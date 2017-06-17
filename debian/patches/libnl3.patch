@@ -1,0 +1,41 @@
+Description: Support libnl version 2.0 and higher
+Author: Marc - A. Dahlhaus <mad@wol.de>
+Forwarded: http://article.gmane.org/gmane.linux.keepalived.devel/3522
+Last-Update: 2011-12-21
+
+--- a/configure.in
++++ b/configure.in
+@@ -61,9 +61,16 @@
+     USE_NL="LIBIPVS_USE_NL"
+     LIBS="$LIBS -lnl"
+   ],
+-  [
+-    USE_NL="LIBIPVS_DONTUSE_NL"
+-    AC_MSG_WARN([keepalived will be built without libnl support.])
++  [AC_CHECK_LIB(nl-3, nl_socket_alloc,
++    [
++      USE_NL="LIBIPVS_USE_NL"
++      CFLAGS="$CFLAGS -I/usr/include/libnl3 -DLIBNL2"
++      LIBS="$LIBS -lnl-3 -lnl-genl-3"
++    ],
++    [
++      USE_NL="LIBIPVS_DONTUSE_NL"
++      AC_MSG_WARN([keepalived will be built without libnl support.])
++    ])
+   ])
+ 
+ dnl ----[ Kernel version check ]----
+--- a/keepalived/libipvs-2.6/libipvs.c
++++ b/keepalived/libipvs-2.6/libipvs.c
+@@ -34,6 +34,11 @@
+ struct ip_vs_getinfo ipvs_info;
+ 
+ #ifdef LIBIPVS_USE_NL
++# ifdef LIBNL2
++#  define nl_handle nl_sock
++#  define nl_handle_alloc nl_socket_alloc
++#  define nl_handle_destroy nl_socket_free
++# endif
+ struct nl_handle *sock = NULL;
+ int family, try_nl = 1;
+ #endif
