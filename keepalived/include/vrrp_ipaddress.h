@@ -55,6 +55,13 @@ typedef struct _ip_address {
 
 	interface_t		*ifp;			/* Interface owning IP address */
 	char			*label;			/* Alias name, e.g. eth0:1 */
+#if HAVE_DECL_IFA_FLAGS
+	uint32_t		flags;			/* Address flags */
+	uint32_t		flagmask;		/* Bitmaps of flags set */
+#else
+	uint8_t			flags;			/* Address flags */
+	uint8_t			flagmask;		/* Bitmaps of flags set */
+#endif
 	bool			set;			/* TRUE if addr is set */
 	bool			iptable_rule_set;	/* TRUE if iptable drop rule
 							 * set to addr */
@@ -101,5 +108,6 @@ extern ip_address_t *parse_ipaddress(ip_address_t *, char *, int);
 extern void alloc_ipaddress(list, vector_t *, interface_t *);
 extern void clear_diff_address(struct ipt_handle *, list, list);
 extern void clear_diff_saddresses(void);
+extern void iptables_init(void);
 
 #endif

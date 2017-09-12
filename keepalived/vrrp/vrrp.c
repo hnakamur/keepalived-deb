@@ -30,7 +30,9 @@
 #include "vrrp_ndisc.h"
 #include "vrrp_scheduler.h"
 #include "vrrp_notify.h"
+#ifdef _WITH_LVS_
 #include "ipvswrapper.h"
+#endif
 #include "vrrp.h"
 #include "vrrp_data.h"
 #include "vrrp_sync.h"
@@ -53,7 +55,7 @@
 #include "utils.h"
 #include "notify.h"
 #include "bitops.h"
-#include "vrrp_netlink.h"
+#include "keepalived_netlink.h"
 #if !HAVE_DECL_SOCK_CLOEXEC
 #include "old_socket.h"
 #endif
@@ -68,6 +70,11 @@
 
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <stdint.h>
+
+/* Set if need to block ip addresses and are able to do so */
+bool block_ipv4;
+bool block_ipv6;
 
 /* add/remove Virtual IP addresses */
 static bool
@@ -121,7 +128,11 @@ vrrp_handle_accept_mode(vrrp_t *vrrp, int cmd, bool force)
 
 #ifdef _HAVE_LIBIPTC_
 		do {
-			h = iptables_open();
+#ifdef _LIBIPTC_DYNAMIC_
+			if ((vrrp->family == AF_INET && using_libip4tc) ||
+			    (vrrp->family == AF_INET6 && using_libip6tc))
+#endif
+				h = iptables_open();
 #endif
 			/* As accept is false, add iptable rule to drop packets destinated to VIPs and eVIPs */
 			if (!LIST_ISEMPTY(vrrp->vip))
@@ -129,7 +140,10 @@ vrrp_handle_accept_mode(vrrp_t *vrrp, int cmd, bool force)
 			if (!LIST_ISEMPTY(vrrp->evip))
 				handle_iptable_rule_to_iplist(h, vrrp->evip, cmd, force);
 #ifdef _HAVE_LIBIPTC_
-			res = iptables_close(h);
+#ifdef _LIBIPTC_DYNAMIC_
+			if (h)
+#endif
+				res = iptables_close(h);
 		} while (res == EAGAIN && ++tries < IPTABLES_MAX_TRIES);
 #endif
 		vrrp->iptable_rules_set = (cmd == IPADDRESS_ADD);
@@ -152,13 +166,16 @@ check_track_script_secure(tracked_sc_t *script)
 
 	flags = check_script_secure(&ns, global_data->script_security, false);
 
+	/* The script path may have been updated if it wasn't an absolute path */
+	script->scr->script = ns.name;
+
 	/* Mark not to run if needs inhibiting */
 	if (flags & SC_INHIBIT) {
 		log_message(LOG_INFO, "Disabling track script %s due to insecure", script->scr->sname);
 		script->scr->insecure = true;
 	}
 	else if (flags & SC_NOTFOUND) {
-		log_message(LOG_INFO, "Disabling track script %s since not found", script->scr->sname);
+		log_message(LOG_INFO, "Disabling track script %s since not found/accessible", script->scr->sname);
 		script->scr->insecure = true;
 	}
 	else if (!(flags & SC_EXECUTABLE))
@@ -206,6 +223,11 @@ check_vrrp_script_security(void)
 			script_flags |= check_notify_script_secure(&sg->script, global_data->script_security, true);
 		}
 	}
+
+	if (global_data->notify_fifo.script)
+		script_flags |= check_notify_script_secure(&global_data->notify_fifo.script, global_data->script_security, false);
+	if (global_data->vrrp_notify_fifo.script)
+		script_flags |= check_notify_script_secure(&global_data->vrrp_notify_fifo.script, global_data->script_security, false);
 
 	if (!global_data->script_security && script_flags & SC_ISSCRIPT) {
 		log_message(LOG_INFO, "SECURITY VIOLATION - scripts are being executed but script_security not enabled.%s",
@@ -314,7 +336,7 @@ vrrp_in_chk_ipsecah(vrrp_t * vrrp, char *buffer)
 		vrrp->ipsecah_counter->seq_number = ntohl(ah->seq_number);
 	} else {
 		log_message(LOG_INFO, "VRRP_Instance(%s) IPSEC-AH : sequence number %d"
-					" already proceeded. Packet dropped. Local(%d)",
+					" already processed. Packet dropped. Local(%d)",
 					vrrp->iname, ntohl(ah->seq_number),
 					vrrp->ipsecah_counter->seq_number);
 		++vrrp->stats->auth_failure;
@@ -1363,8 +1385,7 @@ vrrp_restore_interface(vrrp_t * vrrp, bool advF, bool force)
 	if (advF) {
 		vrrp_send_adv(vrrp, VRRP_PRIO_STOP);
 		++vrrp->stats->pri_zero_sent;
-		syslog(LOG_INFO, "VRRP_Instance(%s) sent 0 priority",
-		       vrrp->iname);
+		log_message(LOG_INFO, "VRRP_Instance(%s) sent 0 priority", vrrp->iname);
 	}
 
 #ifdef _HAVE_FIB_ROUTING_
@@ -1589,7 +1610,9 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 	vrrphdr_t *hd;
 	ssize_t ret;
 	unsigned proto = 0;
+#ifdef _WITH_VRRP_AUTH_
 	ipsec_ah_t *ah;
+#endif
 	unsigned master_adver_int;
 	int addr_cmp;
 
@@ -1614,15 +1637,20 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 		return 0;
 	}
 
-	if (hd->priority == 0) {
-		vrrp_send_adv(vrrp, vrrp->effective_priority);
-		return 0;
-	}
-
 	addr_cmp = vrrp_saddr_cmp(&vrrp->pkt_saddr, vrrp);
 
+	if (hd->priority == 0 ||
+	    (vrrp->higher_prio_send_advert &&
+	    (hd->priority > vrrp->effective_priority ||
+	     (hd->priority == vrrp->effective_priority && addr_cmp > 0)))) {
+		vrrp_send_adv(vrrp, vrrp->effective_priority);
+
+		if (hd->priority == 0)
+			return 0;
+	}
+
 	if (hd->priority == vrrp->effective_priority && addr_cmp == 0)
-			log_message(LOG_INFO, "(%s): WARNING - equal priority advert received from remote host with our IP address.", vrrp->iname);
+		log_message(LOG_INFO, "(%s): WARNING - equal priority advert received from remote host with our IP address.", vrrp->iname);
 
 	if (hd->priority < vrrp->effective_priority ||
 		   (hd->priority == vrrp->effective_priority &&
@@ -1630,6 +1658,7 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 		/* We receive a lower prio adv we just refresh remote ARP cache */
 		log_message(LOG_INFO, "VRRP_Instance(%s) Received advert with lower priority %d, ours %d"
 				      ", forcing new election", vrrp->iname, hd->priority, vrrp->effective_priority);
+#ifdef _WITH_VRRP_AUTH_
 		if (proto == IPPROTO_IPSEC_AH) {
 			ah = (ipsec_ah_t *) (buf + sizeof(struct iphdr));
 			log_message(LOG_INFO, "VRRP_Instance(%s) IPSEC-AH : Syncing seq_num"
@@ -1638,6 +1667,7 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 			vrrp->ipsecah_counter->seq_number = ntohl(ah->seq_number) + 1;
 			vrrp->ipsecah_counter->cycle = 0;
 		}
+#endif
 		if (!vrrp->lower_prio_no_advert)
 			vrrp_send_adv(vrrp, vrrp->effective_priority);
 		if (vrrp->garp_lower_prio_rep) {
@@ -1666,6 +1696,7 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 
 		log_message(LOG_INFO, "VRRP_Instance(%s) Received advert with higher priority %d, ours %d"
 				    , vrrp->iname, hd->priority, vrrp->effective_priority);
+#ifdef _WITH_VRRP_AUTH_
 		if (proto == IPPROTO_IPSEC_AH) {
 			ah = (ipsec_ah_t *) (buf + sizeof(struct iphdr));
 			log_message(LOG_INFO, "VRRP_Instance(%s) IPSEC-AH : Syncing seq_num"
@@ -1674,6 +1705,7 @@ vrrp_state_master_rx(vrrp_t * vrrp, char *buf, ssize_t buflen)
 			vrrp->ipsecah_counter->seq_number = ntohl(ah->seq_number) - 1;
 			vrrp->ipsecah_counter->cycle = 0;
 		}
+#endif
 
 		if (vrrp->version == VRRP_VERSION_3) {
 			master_adver_int = (ntohs(hd->v3.adver_int) & 0x0FFF) * TIMER_CENTI_HZ;
@@ -1911,6 +1943,10 @@ shutdown_vrrp_instances(void)
 	element e;
 	vrrp_t *vrrp;
 
+#ifdef _HAVE_VRRP_VMAC_
+	restore_rp_filter();
+#endif
+
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		vrrp = ELEMENT_DATA(e);
 
@@ -1929,6 +1965,8 @@ shutdown_vrrp_instances(void)
 		/* Run stop script */
 		if (vrrp->script_stop)
 			notify_exec(vrrp->script_stop);
+
+		notify_instance_fifo(vrrp, VRRP_STATE_STOP);
 
 #ifdef _WITH_LVS_
 		/*
@@ -2073,7 +2111,13 @@ vrrp_complete_instance(vrrp_t * vrrp)
 
 		vrrp->effective_priority = vrrp->base_priority;
 	}
-	else if (vrrp->strict_mode && (vrrp->init_state == VRRP_STATE_MAST) && (vrrp->base_priority != VRRP_PRIO_OWNER)) {
+
+	if (vrrp->base_priority == VRRP_PRIO_OWNER && vrrp->nopreempt) {
+		log_message(LOG_INFO, "(%s): nopreempt is incompatible with priority %d - resetting nopreempt", vrrp->iname, VRRP_PRIO_OWNER);
+		vrrp->nopreempt = false;
+	}
+
+	if (vrrp->strict_mode && (vrrp->init_state == VRRP_STATE_MAST) && (vrrp->base_priority != VRRP_PRIO_OWNER)) {
 		log_message(LOG_INFO,"(%s): Cannot start in MASTER state if not address owner", vrrp->iname);
 		vrrp->init_state = VRRP_STATE_BACK;
 		vrrp->wantstate = VRRP_STATE_BACK;
@@ -2118,6 +2162,19 @@ vrrp_complete_instance(vrrp_t * vrrp)
 		vrrp->garp_lower_prio_delay = vrrp->strict_mode ? 0 : global_data->vrrp_garp_lower_prio_delay;
 	if (vrrp->lower_prio_no_advert == PARAMETER_UNSET)
 		vrrp->lower_prio_no_advert = vrrp->strict_mode ? true : global_data->vrrp_lower_prio_no_advert;
+	if (vrrp->higher_prio_send_advert == PARAMETER_UNSET)
+		vrrp->higher_prio_send_advert = vrrp->strict_mode ? false : global_data->vrrp_higher_prio_send_advert;
+
+	if (vrrp->strict_mode) {
+		if (!vrrp->lower_prio_no_advert) {
+			log_message(LOG_INFO, "(%s): strict mode requires lower_prio_no_advert to be set - setting", vrrp->iname);
+			vrrp->lower_prio_no_advert = true;
+		}
+		if (vrrp->higher_prio_send_advert) {
+			log_message(LOG_INFO, "(%s): strict mode requires higherer_prio_send_advert to be clear - resetting", vrrp->iname);
+			vrrp->higher_prio_send_advert = false;
+		}
+	}
 
 	/* Check that the advertisement interval is valid */
 	if (!vrrp->adver_int)
@@ -2133,6 +2190,8 @@ vrrp_complete_instance(vrrp_t * vrrp)
 					vrrp->iname, (float)vrrp->adver_int / TIMER_HZ);
 			vrrp->adver_int = vrrp->adver_int + (TIMER_HZ / 2);
 			vrrp->adver_int -= vrrp->adver_int % TIMER_HZ;
+			if (vrrp->adver_int == 0)
+				vrrp->adver_int = TIMER_HZ;
 		}
 	}
 	else
@@ -2147,6 +2206,9 @@ vrrp_complete_instance(vrrp_t * vrrp)
 					vrrp->iname, (float)vrrp->adver_int / TIMER_HZ);
 			vrrp->adver_int = vrrp->adver_int + (TIMER_CENTI_HZ / 2);
 			vrrp->adver_int -= vrrp->adver_int % TIMER_CENTI_HZ;
+
+			if (vrrp->adver_int == 0)
+				vrrp->adver_int = TIMER_CENTI_HZ;
 		}
 	}
 	vrrp->master_adver_int = vrrp->adver_int;
@@ -2203,7 +2265,7 @@ vrrp_complete_instance(vrrp_t * vrrp)
 
 		/* No interface found, find an unused name */
 		if (!vrrp->vmac_ifname[0]) {
-			int num=0;
+			unsigned short num=0;
 			snprintf(ifname, IFNAMSIZ, "vrrp.%d", vrrp->vrid);
 
 			while (true) {
@@ -2322,10 +2384,12 @@ vrrp_complete_instance(vrrp_t * vrrp)
 	if (vrrp->base_priority != VRRP_PRIO_OWNER && !vrrp->accept) {
 //TODO = we have a problem since SNMP may change accept mode
 //it can also change priority
-		if (vrrp->saddr.ss_family == AF_INET)
-			global_data->block_ipv4 = true;
+		if (!global_data->vrrp_iptables_inchain[0])
+			log_message(LOG_INFO, "(%s): Unable to set no_accept mode since iptables chain name unset", vrrp->iname);
+		else if (vrrp->family == AF_INET)
+			block_ipv4 = true;
 		else
-			global_data->block_ipv6 = true;
+			block_ipv6 = true;
 	}
 	if (!LIST_ISEMPTY(vrrp->vip)) {
 		for (e = LIST_HEAD(vrrp->vip); e; ELEMENT_NEXT(e)) {
@@ -2343,20 +2407,12 @@ vrrp_complete_instance(vrrp_t * vrrp)
 				vip->ifa.ifa_index = vrrp->ifp->ifindex;
 				vip->ifp = vrrp->ifp;
 			}
-
-			if (vrrp->base_priority != VRRP_PRIO_OWNER && !vrrp->accept) {
-				if (vip->ifa.ifa_family == AF_INET)
-					global_data->block_ipv4 = true;
-				else
-					global_data->block_ipv6 = true;
-			}
 		}
 	}
 
 	if (!reload && interface_already_existed) {
 // TODO - consider reload
 		vrrp->vipset = true;	/* Set to force address removal */
-		vrrp_restore_interface(vrrp, false, true);
 	}
 
 	/* See if we need to set promote_secondaries */
@@ -2417,12 +2473,6 @@ vrrp_complete_init(void)
 	/* If we have a global garp_delay add it to any interfaces without a garp_delay */
 	if (global_data->vrrp_garp_interval || global_data->vrrp_gna_interval)
 		set_default_garp_delay();
-
-#ifdef _HAVE_LIBIPTC_
-	/* Make sure we don't have any old iptables/ipsets settings left around */
-	if (!reload)
-		iptables_cleanup();
-#endif
 
 	/* Mark any scripts as insecure */
 	check_vrrp_script_security();
@@ -2584,16 +2634,22 @@ vrrp_complete_init(void)
 
 	alloc_vrrp_buffer(max_mtu_len);
 
+	set_child_finder(vrrp_child_finder);
+
 	return true;
 }
 
-#ifdef _WITH_LVS_
-bool
-vrrp_ipvs_needed(void)
+void vrrp_restore_interfaces_startup(void)
 {
-	return !!(global_data->lvs_syncd.ifname);
+	element e;
+	vrrp_t *vrrp;
+
+	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
+		vrrp = ELEMENT_DATA(e);
+		if (vrrp->vipset)
+			vrrp_restore_interface(vrrp, false, true);
+	}
 }
-#endif
 
 /* Try to find a VRRP instance */
 static vrrp_t *
@@ -2662,12 +2718,19 @@ clear_diff_vrrp_vip(vrrp_t *old_vrrp, vrrp_t *vrrp)
 
 #ifdef _HAVE_LIBIPTC_
 	do {
-		h = iptables_open();
+#ifdef _LIBIPTC_DYNAMIC_
+		if ((vrrp->family == AF_INET && using_libip4tc) ||
+		    (vrrp->family == AF_INET6 && using_libip6tc))
+#endif
+			h = iptables_open();
 #endif
 		clear_diff_vrrp_vip_list(vrrp, h, old_vrrp->vip, vrrp->vip);
 		clear_diff_vrrp_vip_list(vrrp, h, old_vrrp->evip, vrrp->evip);
 #ifdef _HAVE_LIBIPTC_
-		res = iptables_close(h);
+#ifdef _LIBIPTC_DYNAMIC_
+		if (h)
+#endif
+			res = iptables_close(h);
 	} while (res == EAGAIN && ++tries < IPTABLES_MAX_TRIES);
 #endif
 }
@@ -2703,7 +2766,9 @@ restore_vrrp_state(vrrp_t *old_vrrp, vrrp_t *vrrp)
 	/* Save old stats */
 	memcpy(vrrp->stats, old_vrrp->stats, sizeof(vrrp_stats));
 
+#ifdef _WITH_VRRP_AUTH_
 	memcpy(vrrp->ipsecah_counter, old_vrrp->ipsecah_counter, sizeof(seq_counter_t));
+#endif
 
 	/* Remember if we had vips up and add new ones if needed */
 	vrrp->vipset = old_vrrp->vipset;
