@@ -62,7 +62,8 @@ extern void inet_ip4tosockaddr(struct in_addr *, struct sockaddr_storage *);
 extern void inet_ip6tosockaddr(struct in6_addr *, struct sockaddr_storage *);
 extern void inet_ip6scopeid(uint32_t, struct sockaddr_storage *);
 extern char *inet_sockaddrtos(struct sockaddr_storage *);
-extern char *inet_sockaddrtopair(struct sockaddr_storage *addr);
+extern char *inet_sockaddrtopair(struct sockaddr_storage *);
+extern char *inet_sockaddrtotrio(struct sockaddr_storage *, uint16_t);
 extern uint16_t inet_sockaddrport(struct sockaddr_storage *);
 extern uint32_t inet_sockaddrip4(struct sockaddr_storage *);
 extern int inet_sockaddrip6(struct sockaddr_storage *, struct in6_addr *);
@@ -71,7 +72,7 @@ extern int inet_sockaddrcmp(struct sockaddr_storage *, struct sockaddr_storage *
 extern char *get_local_name(void);
 extern int string_equal(const char *, const char *);
 extern void set_std_fd(int);
-#ifndef _HAVE_LIBIPTC_
+#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
 extern int fork_exec(char **argv);
 #endif
 

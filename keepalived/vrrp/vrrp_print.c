@@ -31,7 +31,7 @@
 #include "vrrp_iproute.h"
 #include "vrrp_iprule.h"
 #endif
-#include "vrrp_netlink.h"
+#include "keepalived_netlink.h"
 #include "rttables.h"
 #include "logger.h"
 
@@ -90,8 +90,9 @@ vscript_print(FILE *file, void *data)
 	fprintf(file, "   Interval = %lu sec\n", vscript->interval / TIMER_HZ);
 	fprintf(file, "   Weight = %d\n", vscript->weight);
 	fprintf(file, "   Rise = %d\n", vscript->rise);
-	fprintf(file, "   Full = %d\n", vscript->fall);
+	fprintf(file, "   Fall = %d\n", vscript->fall);
 	fprintf(file, "   Insecure = %s\n", vscript->insecure ? "yes" : "no");
+	fprintf(file, "   uid:gid = %d:%d\n", vscript->uid, vscript->gid);
 
 	switch (vscript->result) {
 	case VRRP_SCRIPT_STATUS_INIT:
@@ -217,7 +218,7 @@ if_print(FILE *file, void * data)
 	if (IF_MII_SUPPORTED(ifp))
 		fprintf(file, " NIC support MII regs\n");
 	else if (IF_ETHTOOL_SUPPORTED(ifp))
-		fprintf(file, " NIC support EHTTOOL GLINK interface\n");
+		fprintf(file, " NIC support ETHTOOL GLINK interface\n");
 	else
 		fprintf(file, " Enabling NIC ioctl refresh polling\n");
 }
@@ -269,6 +270,7 @@ vrrp_print(FILE *file, void *data)
 	fprintf(file, "   Gratuitous ARP lower priority delay = %u\n", vrrp->garp_lower_prio_delay / TIMER_HZ);
 	fprintf(file, "   Gratuitous ARP lower priority repeat = %u\n", vrrp->garp_lower_prio_rep);
 	fprintf(file, "   Send advert after receive lower priority advert = %s\n", vrrp->lower_prio_no_advert ? "false" : "true");
+	fprintf(file, "   Send advert after receive higher priority advert = %s\n", vrrp->higher_prio_send_advert ? "true" : "false");
 	fprintf(file, "   Virtual Router ID = %d\n", vrrp->vrid);
 	fprintf(file, "   Priority = %d\n", vrrp->base_priority);
 	fprintf(file, "   Advert interval = %d %s\n",

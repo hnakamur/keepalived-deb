@@ -26,6 +26,7 @@
 
 #include <netdb.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -39,7 +40,6 @@
 #include "global_parser.h"
 #include "global_data.h"
 #include "main.h"
-#include "check_data.h"
 #include "parser.h"
 #include "memory.h"
 #include "smtp.h"
@@ -196,7 +196,7 @@ lvs_timeouts(vector_t *strvec)
 		log_message(LOG_INFO, "Unknown option %s specified for lvs_timeouts", FMT_STR_VSLOT(strvec, i));
 	}
 }
-#ifdef _WITH_LVS_
+#if defined _WITH_LVS_ && defined _WITH_VRRP_
 static void
 lvs_syncd_handler(vector_t *strvec)
 {
@@ -406,6 +406,21 @@ vrrp_lower_prio_no_advert_handler(vector_t *strvec)
 		global_data->vrrp_lower_prio_no_advert = true;
 }
 static void
+vrrp_higher_prio_send_advert_handler(vector_t *strvec)
+{
+	int res;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0)
+			log_message(LOG_INFO, "Invalid value for vrrp_higher_prio_send_advert specified");
+		else
+			global_data->vrrp_higher_prio_send_advert = res;
+	}
+	else
+		global_data->vrrp_higher_prio_send_advert = true;
+}
+static void
 vrrp_iptables_handler(vector_t *strvec)
 {
 	global_data->vrrp_iptables_inchain[0] = '\0';
@@ -522,6 +537,78 @@ static void
 vrrp_no_swap_handler(__attribute__((unused)) vector_t *strvec)
 {
 	global_data->vrrp_no_swap = true;
+}
+#endif
+static void
+notify_fifo(vector_t *strvec, const char *type, notify_fifo_t *fifo)
+{
+	if (vector_size(strvec) < 2) {
+		log_message(LOG_INFO, "No %snotify_fifo name specified", type);
+		return;
+	}
+
+	if (fifo->name) {
+		log_message(LOG_INFO, "%snotify_fifo already specified - ignoring %s", type, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
+
+	fifo->name = MALLOC(strlen(strvec_slot(strvec, 1) + 1));
+	strcpy(fifo->name, strvec_slot(strvec, 1));
+}
+static void
+notify_fifo_script(vector_t *strvec, const char *type, notify_fifo_t *fifo)
+{
+	char *id_str;
+
+	if (vector_size(strvec) < 2) {
+		log_message(LOG_INFO, "No %snotify_fifo_script specified", type);
+		return;
+	}
+
+	if (fifo->script) {
+		log_message(LOG_INFO, "%snotify_fifo_script already specified - ignoring %s", type, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
+
+	id_str = MALLOC(strlen(type) + strlen("notify_fifo"));
+	strcpy(id_str, type);
+	strcat(id_str, "notify_fifo");
+	fifo->script = notify_script_init(strvec, id_str, global_data->script_security);
+
+	FREE(id_str);
+}
+static void
+global_notify_fifo(vector_t *strvec)
+{
+	notify_fifo(strvec, "", &global_data->notify_fifo);
+}
+static void
+global_notify_fifo_script(vector_t *strvec)
+{
+	notify_fifo_script(strvec, "", &global_data->notify_fifo);
+}
+#ifdef _WITH_VRRP_
+static void
+vrrp_notify_fifo(vector_t *strvec)
+{
+	notify_fifo(strvec, "vrrp_", &global_data->vrrp_notify_fifo);
+}
+static void
+vrrp_notify_fifo_script(vector_t *strvec)
+{
+	notify_fifo_script(strvec, "vrrp_", &global_data->vrrp_notify_fifo);
+}
+#endif
+#ifdef _WITH_LVS_
+static void
+lvs_notify_fifo(vector_t *strvec)
+{
+	notify_fifo(strvec, "lvs_", &global_data->lvs_notify_fifo);
+}
+static void
+lvs_notify_fifo_script(vector_t *strvec)
+{
+	notify_fifo_script(strvec, "lvs_", &global_data->lvs_notify_fifo);
 }
 #endif
 #ifdef _WITH_LVS_
@@ -686,53 +773,6 @@ use_pid_dir_handler(__attribute__((unused)) vector_t *strvec)
 	use_pid_dir = true;
 }
 
-bool
-set_script_uid_gid(vector_t *strvec, unsigned keyword_offset, uid_t *uid_p, gid_t *gid_p)
-{
-	char *username;
-	char *groupname;
-	uid_t uid;
-	gid_t gid;
-	struct passwd pwd;
-	struct passwd *pwd_p;
-	struct group grp;
-	struct group *grp_p;
-	int ret;
-	char buf[getpwnam_buf_len];
-
-	username = strvec_slot(strvec, keyword_offset);
-
-	if ((ret = getpwnam_r(username, &pwd, buf, sizeof(buf), &pwd_p))) {
-		log_message(LOG_INFO, "Unable to resolve script username '%s' - ignoring", username);
-		return true;
-	}
-	if (!pwd_p) {
-		log_message(LOG_INFO, "Script user '%s' does not exist", username);
-		return true;
-	}
-
-	uid = pwd.pw_uid;
-	gid = pwd.pw_gid;
-
-	if (vector_size(strvec) > keyword_offset + 1) {
-		groupname = strvec_slot(strvec, keyword_offset + 1);
-		if ((ret = getgrnam_r(groupname, &grp, buf, sizeof(buf), &grp_p))) {
-			log_message(LOG_INFO, "Unable to resolve script group name '%s' - ignoring", groupname);
-			return true;
-		}
-		if (!grp_p) {
-			log_message(LOG_INFO, "Script group '%s' does not exist", groupname);
-			return true;
-		}
-		gid = grp.gr_gid;
-	}
-
-	*uid_p = uid;
-	*gid_p = gid;
-
-	return false;
-}
-
 static void
 script_user_handler(vector_t *strvec)
 {
@@ -741,7 +781,7 @@ script_user_handler(vector_t *strvec)
 		return;
 	}
 
-	if (set_script_uid_gid(strvec, 1, &default_script_uid, &default_script_gid))
+	if (set_default_script_user(strvec_slot(strvec, 1), vector_size(strvec) > 2 ? strvec_slot(strvec, 2) : NULL, true))
 		log_message(LOG_INFO, "Error setting global script uid/gid");
 }
 
@@ -775,7 +815,9 @@ init_global_keywords(bool global_active)
 #ifdef _WITH_LVS_
 	install_keyword("lvs_timeouts", &lvs_timeouts);
 	install_keyword("lvs_flush", &lvs_flush_handler);
+#ifdef _WITH_VRRP_
 	install_keyword("lvs_sync_daemon", &lvs_syncd_handler);
+#endif
 #endif
 #ifdef _WITH_VRRP_
 	install_keyword("vrrp_mcast_group4", &vrrp_mcast_group4_handler);
@@ -789,6 +831,7 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_garp_interval", &vrrp_garp_interval_handler);
 	install_keyword("vrrp_gna_interval", &vrrp_gna_interval_handler);
 	install_keyword("vrrp_lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
+	install_keyword("vrrp_higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
 	install_keyword("vrrp_version", &vrrp_version_handler);
 	install_keyword("vrrp_iptables", &vrrp_iptables_handler);
 #ifdef _HAVE_LIBIPSET_
@@ -799,6 +842,16 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_strict", &vrrp_strict_handler);
 	install_keyword("vrrp_priority", &vrrp_prio_handler);
 	install_keyword("vrrp_no_swap", &vrrp_no_swap_handler);
+#endif
+	install_keyword("notify_fifo", &global_notify_fifo);
+	install_keyword("notify_fifo_script", &global_notify_fifo_script);
+#ifdef _WITH_VRRP_
+	install_keyword("vrrp_notify_fifo", &vrrp_notify_fifo);
+	install_keyword("vrrp_notify_fifo_script", &vrrp_notify_fifo_script);
+#endif
+#ifdef _WITH_LVS_
+	install_keyword("lvs_notify_fifo", &lvs_notify_fifo);
+	install_keyword("lvs_notify_fifo_script", &lvs_notify_fifo_script);
 #endif
 #ifdef _WITH_LVS_
 	install_keyword("checker_priority", &checker_prio_handler);

@@ -27,11 +27,15 @@
 #include <netdb.h>
 
 /* local includes */
-#include "check_data.h"
-#include "vrrp_data.h"
 #include "scheduler.h"
 #include "layer4.h"
+#ifdef _WITH_LVS_
+#include "check_data.h"
+#include "check_api.h"
+#endif
+#ifdef _WITH_VRRP_
 #include "vrrp.h"
+#endif
 
 /* global defs */
 #define SMTP_PORT_STR		"25"
@@ -91,7 +95,26 @@ typedef struct _smtp {
 
 #define FMT_SMTP_HOST()	inet_sockaddrtopair(&global_data->smtp_server)
 
+#ifndef _WITH_LVS_
+typedef void real_server_t;
+#endif
+#ifndef _WITH_VRRP_
+typedef void vrrp_t;
+typedef void vrrp_sgroup_t;
+#endif
+
 /* Prototypes defs */
-extern void smtp_alert(real_server_t *, vrrp_t *, vrrp_sgroup_t *,
-		       const char *, const char *);
+extern void smtp_alert(
+#ifdef _WITH_LVS_
+			checker_t *,
+#else
+			__attribute__((unused)) void *,
+#endif
+#ifdef _WITH_VRRP_
+			vrrp_t *, vrrp_sgroup_t *,
+#else
+			void *, void *,
+#endif
+			const char *, const char *);
+
 #endif

@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <stdint.h>
 
 #include "check_parser.h"
 #include "check_data.h"
@@ -85,21 +86,37 @@ static void
 vs_end_handler(void)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	if (! vs->af)
+	if (!vs->af)
 		vs->af = AF_INET;
 }
 static void
 ip_family_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	if (vs->af)
+	uint16_t af;
+
+	if (!strcmp(strvec_slot(strvec, 1), "inet"))
+		af = AF_INET;
+	else if (!strcmp(strvec_slot(strvec, 1), "inet6")) {
+#ifndef LIBIPVS_USE_NL
+		log_message(LOG_INFO, "IPVS with IPv6 is not supported by this build");
+		skip_block();
 		return;
-	if (0 == strcmp(strvec_slot(strvec, 1), "inet"))
-		vs->af = AF_INET;
-	else if (0 == strcmp(strvec_slot(strvec, 1), "inet6"))
-		vs->af = AF_INET6;
-	else
+#endif
+		af = AF_INET6;
+	}
+	else {
 		log_message(LOG_INFO, "unknown address family %s", FMT_STR_VSLOT(strvec, 1));
+		return;
+	}
+
+	if (vs->af != AF_UNSPEC &&
+	    af != vs->af) {
+		log_message(LOG_INFO, "Virtual server specified family %s conflicts with server family", FMT_STR_VSLOT(strvec, 1));
+		return;
+	}
+
+	vs->af = af;
 }
 static void
 delay_handler(vector_t *strvec)
@@ -156,17 +173,17 @@ lbflags_handler(vector_t *strvec)
 }
 
 static void
-lbkind_handler(vector_t *strvec)
+forwarding_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	char *str = strvec_slot(strvec, 1);
 
 	if (!strcmp(str, "NAT"))
-		vs->loadbalancing_kind = IP_VS_CONN_F_MASQ;
+		vs->forwarding_method = IP_VS_CONN_F_MASQ;
 	else if (!strcmp(str, "DR"))
-		vs->loadbalancing_kind = IP_VS_CONN_F_DROUTE;
+		vs->forwarding_method = IP_VS_CONN_F_DROUTE;
 	else if (!strcmp(str, "TUN"))
-		vs->loadbalancing_kind = IP_VS_CONN_F_TUNNEL;
+		vs->forwarding_method = IP_VS_CONN_F_TUNNEL;
 	else
 		log_message(LOG_INFO, "PARSER : unknown [%s] routing method.", str);
 }
@@ -240,16 +257,30 @@ static void
 hasuspend_handler(__attribute__((unused)) vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	vs->ha_suspend = 1;
+	vs->ha_suspend = true;
 }
 
 static void
-virtualhost_handler(vector_t *strvec)
+vs_virtualhost_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	vs->virtualhost = set_value(strvec);
 }
 
+static void
+svr_forwarding_handler(real_server_t *rs, vector_t *strvec)
+{
+	char *str = strvec_slot(strvec, 1);
+
+	if (!strcmp(str, "NAT"))
+		rs->forwarding_method = IP_VS_CONN_F_MASQ;
+	else if (!strcmp(str, "DR"))
+		rs->forwarding_method = IP_VS_CONN_F_DROUTE;
+	else if (!strcmp(str, "TUN"))
+		rs->forwarding_method = IP_VS_CONN_F_TUNNEL;
+	else
+		log_message(LOG_INFO, "PARSER : unknown [%s] routing method for real server.", str);
+}
 /* Sorry Servers handlers */
 static void
 ssvr_handler(vector_t *strvec)
@@ -260,11 +291,20 @@ static void
 ssvri_handler(__attribute__((unused)) vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	if (vs->s_svr) {
-		vs->s_svr->inhibit = 1;
-	} else {
-		log_message(LOG_ERR, "Ignoring sorry_server_inhibit used before or without sorry_server");
-	}
+	if (vs->s_svr)
+		vs->s_svr->inhibit = true;
+	else
+		log_message(LOG_ERR, "Ignoring sorry_server inhibit used before or without sorry_server");
+}
+static void
+ss_forwarding_handler(vector_t *strvec)
+{
+	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+
+	if (vs->s_svr)
+		svr_forwarding_handler(vs->s_svr, strvec);
+	else
+		log_message(LOG_ERR, "sorry_server forwarding used without sorry_server");
 }
 
 /* Real Servers handlers */
@@ -280,6 +320,14 @@ weight_handler(vector_t *strvec)
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
 	rs->weight = atoi(strvec_slot(strvec, 1));
 	rs->iweight = rs->weight;
+}
+static void
+rs_forwarding_handler(vector_t *strvec)
+{
+	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+
+	svr_forwarding_handler(rs, strvec);
 }
 static void
 uthreshold_handler(vector_t *strvec)
@@ -305,20 +353,17 @@ inhibit_handler(__attribute__((unused)) vector_t *strvec)
 static inline notify_script_t*
 set_check_notify_script(vector_t *strvec)
 {
-	notify_script_t *script = notify_script_init(strvec, default_script_uid, default_script_gid);
-
-	if (vector_size(strvec) > 2 ) {
-		if (set_script_uid_gid(strvec, 2, &script->uid, &script->gid))
-			log_message(LOG_INFO, "Invalid user/group for quorum/notify script %s", script->name);
-	}
-
-	return script;
+	return notify_script_init(strvec, "quorum/notify", global_data->script_security);
 }
 static void
 notify_up_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+	if (rs->notify_up) {
+		log_message(LOG_INFO, "(%s): notify_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
 	rs->notify_up = set_check_notify_script(strvec);
 }
 static void
@@ -326,7 +371,18 @@ notify_down_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+	if (rs->notify_down) {
+		log_message(LOG_INFO, "(%s): notify_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
 	rs->notify_down = set_check_notify_script(strvec);
+}
+static void
+rs_virtualhost_handler(vector_t *strvec)
+{
+	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+	rs->virtualhost = set_value(strvec);
 }
 static void
 alpha_handler(__attribute__((unused)) vector_t *strvec)
@@ -345,12 +401,20 @@ static void
 quorum_up_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	if (vs->quorum_up) {
+		log_message(LOG_INFO, "(%s): quorum_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
 	vs->quorum_up = set_check_notify_script(strvec);
 }
 static void
 quorum_down_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	if (vs->quorum_down) {
+		log_message(LOG_INFO, "(%s): quorum_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		return;
+	}
 	vs->quorum_down = set_check_notify_script(strvec);
 }
 static void
@@ -402,8 +466,8 @@ init_check_keywords(bool active)
 	install_keyword("sh-port", &lbflags_handler);
 	install_keyword("sh-fallback", &lbflags_handler);
 #endif
-	install_keyword("lb_kind", &lbkind_handler);
-	install_keyword("lvs_method", &lbkind_handler);
+	install_keyword("lb_kind", &forwarding_handler);
+	install_keyword("lvs_method", &forwarding_handler);
 #ifdef _HAVE_PE_NAME_
 	install_keyword("persistence_engine", &pengine_handler);
 #endif
@@ -411,7 +475,7 @@ init_check_keywords(bool active)
 	install_keyword("persistence_granularity", &pgr_handler);
 	install_keyword("protocol", &proto_handler);
 	install_keyword("ha_suspend", &hasuspend_handler);
-	install_keyword("virtualhost", &virtualhost_handler);
+	install_keyword("virtualhost", &vs_virtualhost_handler);
 
 	/* Pool regression detection and handling. */
 	install_keyword("alpha", &alpha_handler);
@@ -424,14 +488,17 @@ init_check_keywords(bool active)
 	/* Real server mapping */
 	install_keyword("sorry_server", &ssvr_handler);
 	install_keyword("sorry_server_inhibit", &ssvri_handler);
+	install_keyword("sorry_server_lvs_method", &ss_forwarding_handler);
 	install_keyword("real_server", &rs_handler);
 	install_sublevel();
 	install_keyword("weight", &weight_handler);
+	install_keyword("lvs_method", &rs_forwarding_handler);
 	install_keyword("uthreshold", &uthreshold_handler);
 	install_keyword("lthreshold", &lthreshold_handler);
 	install_keyword("inhibit_on_failure", &inhibit_handler);
 	install_keyword("notify_up", &notify_up_handler);
 	install_keyword("notify_down", &notify_down_handler);
+	install_keyword("virtualhost", &rs_virtualhost_handler);
 
 	install_sublevel_end_handler(&vs_end_handler);
 

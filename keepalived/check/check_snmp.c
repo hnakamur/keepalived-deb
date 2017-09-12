@@ -22,6 +22,8 @@
 
 #include "config.h"
 
+#include <stdint.h>
+
 #include "check_data.h"
 #include "check_snmp.h"
 #include "list.h"
@@ -76,7 +78,6 @@ enum check_snmp_virtualserver_magic {
 	CHECK_SNMP_VSHYSTERESIS,
 	CHECK_SNMP_VSREALTOTAL,
 	CHECK_SNMP_VSREALUP,
-#ifdef _WITH_LVS_
 	CHECK_SNMP_VSSTATSCONNS,
 	CHECK_SNMP_VSSTATSINPKTS,
 	CHECK_SNMP_VSSTATSOUTPKTS,
@@ -106,7 +107,6 @@ enum check_snmp_virtualserver_magic {
 	CHECK_SNMP_VSSHFALLBACK,
 	CHECK_SNMP_VSSHPORT,
 	CHECK_SNMP_VSSCHED3,
-#endif
 };
 
 enum check_snmp_realserver_magic {
@@ -122,7 +122,6 @@ enum check_snmp_realserver_magic {
 	CHECK_SNMP_RSNOTIFYUP,
 	CHECK_SNMP_RSNOTIFYDOWN,
 	CHECK_SNMP_RSFAILEDCHECKS,
-#ifdef _WITH_LVS_
 	CHECK_SNMP_RSSTATSCONNS,
 	CHECK_SNMP_RSSTATSACTIVECONNS,
 	CHECK_SNMP_RSSTATSINACTIVECONNS,
@@ -149,9 +148,10 @@ enum check_snmp_realserver_magic {
 	CHECK_SNMP_RSRATEINBPSLOW,
 	CHECK_SNMP_RSRATEINBPSHIGH,
 	CHECK_SNMP_RSRATEOUTBPSLOW,
-	CHECK_SNMP_RSRATEOUTBPSHIGH
+	CHECK_SNMP_RSRATEOUTBPSHIGH,
 #endif
-#endif
+	CHECK_SNMP_RSLOADBALANCINGKIND,
+	CHECK_SNMP_RSVIRTUALHOST
 };
 
 #define STATE_VSGM_FWMARK 1
@@ -164,7 +164,7 @@ enum check_snmp_realserver_magic {
 #define STATE_RS_REGULAR_NEXT 3
 #define STATE_RS_END 4
 
-#ifdef _WITH_LVS_
+#ifdef _WITH_VRRP_
 enum check_snmp_lvs_sync_daemon {
 	CHECK_SNMP_LVSSYNCDAEMONENABLED,
 	CHECK_SNMP_LVSSYNCDAEMONINTERFACE,
@@ -361,7 +361,7 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 		} else {
 			struct sockaddr_in *addr4 = (struct sockaddr_in *)&be->addr;
 			*var_len = 4;
-			ip = (*(u_int32_t *)&addr4->sin_addr) & htonl(0xFFFFFF00);
+			ip = (*(uint32_t *)&addr4->sin_addr) & htonl(0xFFFFFF00);
 			ip += htonl(be->range);
 			return (u_char *)&ip;
 		}
@@ -428,7 +428,6 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = (v->service_type == IPPROTO_TCP)?1:2;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSLOADBALANCINGALGO:
-#ifdef _WITH_LVS_
 		if (!strcmp(v->sched, "rr"))
 			long_ret.u = 1;
 		else if (!strcmp(v->sched, "wrr"))
@@ -449,14 +448,16 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 			long_ret.u = 9;
 		else if (!strcmp(v->sched, "nq"))
 			long_ret.u = 10;
+		else if (!strcmp(v->sched, "fo"))
+			long_ret.u = 11;
+		else if (!strcmp(v->sched, "ovf"))
+			long_ret.u = 12;
 		else
-#endif
 			long_ret.u = 99;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSLOADBALANCINGKIND:
 		long_ret.u = 0;
-#ifdef _WITH_LVS_
-		switch (v->loadbalancing_kind) {
+		switch (v->forwarding_method) {
 		case IP_VS_CONN_F_MASQ:
 			long_ret.u = 1;
 			break;
@@ -467,7 +468,6 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 			long_ret.u = 3;
 			break;
 		}
-#endif
 		if (!long_ret.u) break;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSSTATUS:
@@ -542,7 +542,6 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 				if (((real_server_t *)ELEMENT_DATA(e))->alive)
 					long_ret.u++;
 		return (u_char*)&long_ret;
-#ifdef _WITH_LVS_
 	case CHECK_SNMP_VSSTATSCONNS:
 		ipvs_update_stats(v);
 		long_ret.u = v->stats.conns;
@@ -587,7 +586,6 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 		ipvs_update_stats(v);
 		long_ret.u = v->stats.outbps;
 		return (u_char*)&long_ret;
-#endif
 #ifdef _WITH_LVS_64BIT_STATS_
 	case CHECK_SNMP_VSSTATSCONNS64:
 		ipvs_update_stats(v);
@@ -848,6 +846,21 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 	case CHECK_SNMP_RSPORT:
 		long_ret.u = htons(inet_sockaddrport(&be->addr));
 		return (u_char *)&long_ret;
+	case CHECK_SNMP_RSLOADBALANCINGKIND:
+		long_ret.u = 0;
+		switch (be->forwarding_method) {
+		case IP_VS_CONN_F_MASQ:
+			long_ret.u = 1;
+			break;
+		case IP_VS_CONN_F_DROUTE:
+			long_ret.u = 2;
+			break;
+		case IP_VS_CONN_F_TUNNEL:
+			long_ret.u = 3;
+			break;
+		}
+		if (!long_ret.u) break;
+		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSSTATUS:
 		if (btype == STATE_RS_SORRY) break;
 		long_ret.u = be->alive?1:2;
@@ -881,6 +894,10 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		if (!be->notify_down) break;
 		*var_len = strlen(be->notify_down->name);
 		return (u_char*)be->notify_down->name;
+	case CHECK_SNMP_RSVIRTUALHOST:
+		if (!be->virtualhost) break;
+		*var_len = strlen(be->virtualhost);
+		return (u_char*)be->virtualhost;
 	case CHECK_SNMP_RSFAILEDCHECKS:
 		if (btype == STATE_RS_SORRY) break;
 		if (LIST_ISEMPTY(be->failed_checkers))
@@ -888,7 +905,6 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		else
 			long_ret.u = LIST_SIZE(be->failed_checkers);
 		return (u_char*)&long_ret;
-#ifdef _WITH_LVS_
 	case CHECK_SNMP_RSSTATSCONNS:
 		ipvs_update_stats(bvs);
 		long_ret.u = be->stats.conns;
@@ -1005,7 +1021,6 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = be->stats.outbps >> 32;
 		return (u_char*)&long_ret;
 #endif
-#endif
 	default:
 		return NULL;
 	}
@@ -1017,7 +1032,7 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 	return NULL;
 }
 
-#ifdef _WITH_LVS_
+#ifdef _WITH_VRRP_
 static u_char*
 check_snmp_lvs_sync_daemon(struct variable *vp, oid *name, size_t *length,
 				 int exact, size_t *var_len, WriteMethod **write_method)
@@ -1183,7 +1198,6 @@ static struct variable8 check_vars[] = {
 	 check_snmp_virtualserver, 3, {3, 1, 25}},
 	{CHECK_SNMP_VSHYSTERESIS, ASN_UNSIGNED, RONLY,
 	 check_snmp_virtualserver, 3, {3, 1, 26}},
-#ifdef _WITH_LVS_
 	{CHECK_SNMP_VSSTATSCONNS, ASN_GAUGE, RONLY,
 	 check_snmp_virtualserver, 3, {3, 1, 27}},
 	{CHECK_SNMP_VSSTATSINPKTS, ASN_COUNTER, RONLY,
@@ -1232,7 +1246,6 @@ static struct variable8 check_vars[] = {
 	{CHECK_SNMP_VSRATEOUTBPSHIGH, ASN_UNSIGNED, RONLY,
 	 check_snmp_virtualserver, 3, {3, 1, 50}},
 #endif
-#endif
 	{CHECK_SNMP_VSPERSISTGRANULARITY6, ASN_UNSIGNED, RONLY,
 	 check_snmp_virtualserver, 3, {3, 1, 51}},
 	{CHECK_SNMP_VSHASHED, ASN_INTEGER, RONLY,
@@ -1269,7 +1282,6 @@ static struct variable8 check_vars[] = {
 	 check_snmp_realserver, 3, {4, 1, 12}},
 	{CHECK_SNMP_RSFAILEDCHECKS, ASN_UNSIGNED, RONLY,
 	 check_snmp_realserver, 3, {4, 1, 13}},
-#ifdef _WITH_LVS_
 	{CHECK_SNMP_RSSTATSCONNS, ASN_GAUGE, RONLY,
 	 check_snmp_realserver, 3, {4, 1, 14}},
 	{CHECK_SNMP_RSSTATSACTIVECONNS, ASN_GAUGE, RONLY,
@@ -1324,8 +1336,11 @@ static struct variable8 check_vars[] = {
 	{CHECK_SNMP_RSRATEOUTBPSHIGH, ASN_UNSIGNED, RONLY,
 	 check_snmp_realserver, 3, {4, 1, 39}},
 #endif
-#endif
-#ifdef _WITH_LVS_
+	{CHECK_SNMP_RSLOADBALANCINGKIND, ASN_UNSIGNED, RONLY,
+	 check_snmp_realserver, 3, {4, 1, 40}},
+	{CHECK_SNMP_RSVIRTUALHOST, ASN_OCTET_STR, RONLY,
+	 check_snmp_realserver, 3, {4, 1, 41}},
+#ifdef _WITH_VRRP_
 	/* LVS sync daemon configuration */
 	{CHECK_SNMP_LVSSYNCDAEMONENABLED, ASN_INTEGER, RONLY,
 	 check_snmp_lvs_sync_daemon, 2, {6, 1}},

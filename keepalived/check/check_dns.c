@@ -24,6 +24,8 @@
 #include "config.h"
 
 #include <strings.h>
+#include <stdint.h>
+
 #include "check_dns.h"
 #include "check_api.h"
 #include "memory.h"
@@ -116,12 +118,12 @@ dns_final(thread_t * thread, int error, const char *fmt, ...)
 			}
 			update_svr_checker_state(DOWN, checker->id, checker->vs,
 						 checker->rs);
-			smtp_alert(checker->rs, NULL, NULL, "DOWN",
+			smtp_alert(checker, NULL, NULL, "DOWN",
 				   "=> DNS_CHECK: failed on service <=");
 		}
 	} else {
 		if (!svr_checker_up(checker->id, checker->rs)) {
-			smtp_alert(checker->rs, NULL, NULL, "UP",
+			smtp_alert(checker, NULL, NULL, "UP",
 				   "=> DNS_CHECK: succeed on service <=");
 			update_svr_checker_state(UP, checker->id, checker->vs,
 						 checker->rs);
@@ -333,7 +335,7 @@ dns_connect_thread(thread_t * thread)
 	checker_t *checker = THREAD_ARG(thread);
 	conn_opts_t *co = checker->co;
 
-	if (!CHECKER_ENABLED(checker)) {
+	if (!checker->enabled) {
 		thread_add_timer(thread->master, dns_connect_thread, checker,
 				 checker->vs->delay_loop);
 		return 0;
@@ -386,6 +388,22 @@ dns_dump(void *data)
 	log_message(LOG_INFO, "   Name = %s", dns_check->name);
 }
 
+static bool 
+dns_check_compare(void *a, void *b)
+{
+	dns_check_t *old = CHECKER_DATA(a);
+	dns_check_t *new = CHECKER_DATA(b);
+
+	if (!compare_conn_opts(CHECKER_CO(a), CHECKER_CO(b)))
+		return false;
+	if (strcmp(old->type, new->type) != 0)
+		return false;
+	if (strcmp(old->name, new->name) != 0)
+		return false;
+
+	return true;
+}
+
 static void
 dns_check_handler(__attribute__((unused)) vector_t * strvec)
 {
@@ -394,8 +412,8 @@ dns_check_handler(__attribute__((unused)) vector_t * strvec)
 	dns_check->attempts = 0;
 	dns_check->type = DNS_DEFAULT_TYPE;
 	dns_check->name = DNS_DEFAULT_NAME;
-	queue_checker(dns_free, dns_dump, dns_connect_thread, dns_check,
-		      CHECKER_NEW_CO());
+	queue_checker(dns_free, dns_dump, dns_connect_thread,
+		      dns_check_compare, dns_check, CHECKER_NEW_CO());
 }
 
 static void
