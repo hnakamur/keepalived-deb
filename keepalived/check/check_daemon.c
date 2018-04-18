@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -106,6 +106,8 @@ stop_check(int status)
 	 */
 	log_message(LOG_INFO, "Stopped");
 
+	if (log_file_name)
+		close_log_file();
 	closelog();
 
 	FREE(config_id);
@@ -116,6 +118,7 @@ stop_check(int status)
 	if (check_syslog_ident)
 		free(check_syslog_ident);
 #endif
+	close_std_fd();
 
 	exit(status);
 }
@@ -161,8 +164,7 @@ start_check(list old_checkers_queue)
 	}
 
         /* Create a notify FIFO if needed, and open it */
-        if (global_data->lvs_notify_fifo.name)
-                notify_fifo_open(&global_data->notify_fifo, &global_data->lvs_notify_fifo, lvs_notify_fifo_script_exit, "lvs_");
+	notify_fifo_open(&global_data->notify_fifo, &global_data->lvs_notify_fifo, lvs_notify_fifo_script_exit, "lvs_");
 
 	/* Get current active addresses, and start update process */
 	if (using_ha_suspend || __test_bit(LOG_ADDRESS_CHANGES, &debug))
@@ -206,6 +208,7 @@ start_check(list old_checkers_queue)
 	register_checkers_thread();
 }
 
+#ifndef _DEBUG_
 /* Reload thread */
 static int
 reload_check_thread(__attribute__((unused)) thread_t * thread)
@@ -277,7 +280,6 @@ check_signal_init(void)
 }
 
 /* CHECK Child respawning thread */
-#ifndef _DEBUG_
 static int
 check_respawn_thread(thread_t * thread)
 {
@@ -314,6 +316,9 @@ start_check_child(void)
 	char *syslog_ident;
 
 	/* Initialize child process */
+	if (log_file_name)
+		flush_log_file();
+
 	pid = fork();
 
 	if (pid < 0) {
@@ -332,6 +337,10 @@ start_check_child(void)
 	}
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Clear any child finder functions set in parent */
+	set_child_finder_name(NULL);
+	set_child_finder(NULL, NULL, NULL, NULL, NULL, 0);	/* Currently these won't be set */
+
 	prog_type = PROG_TYPE_CHECKER;
 
 	if ((instance_name
@@ -345,8 +354,19 @@ start_check_child(void)
 		syslog_ident = PROG_CHECK;
 
 	/* Opening local CHECK syslog channel */
-	openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-			    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+	if (!__test_bit(NO_SYSLOG_BIT, &debug))
+		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
+				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+
+	if (log_file_name)
+		open_log_file(log_file_name,
+				"check",
+#if HAVE_DECL_CLONE_NEWNET
+				network_namespace,
+#else
+				NULL,
+#endif
+				instance_name);
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_CHECK, "Healthcheck child process");
@@ -371,11 +391,17 @@ start_check_child(void)
 	 */
 	UNSET_RELOAD;
 
+#ifndef _DEBUG_
 	/* Signal handling initialization */
 	check_signal_init();
+#endif
 
 	/* Start Healthcheck daemon */
 	start_check(NULL);
+
+#ifdef _DEBUG_
+	return 0;
+#endif
 
 	/* Launch the scheduling I/O multiplexer */
 	launch_scheduler();

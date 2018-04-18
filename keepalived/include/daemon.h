@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _DAEMON_H
@@ -32,8 +32,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 
 /* prototype */
-extern pid_t xdaemon(int, int, int);
+extern pid_t xdaemon(bool, bool, bool);
 
 #endif

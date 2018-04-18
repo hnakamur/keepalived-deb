@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _PARSER_H
@@ -37,9 +37,6 @@
 
 /* Global definitions */
 #define KEEPALIVED_CONFIG_FILE "/etc/keepalived/keepalived.conf"
-#define BOB  "{"
-#define EOB  "}"
-#define MAXBUF	1024
 
 /* keyword definition */
 typedef struct _keyword {
@@ -60,17 +57,24 @@ extern vector_t *keywords;
 extern bool reload;
 extern char *config_id;
 
+#ifdef _MEM_CHECK_
+#define alloc_strvec(str)	(memcheck_log("alloc_strvec", str, (__FILE__), (char *)(__FUNCTION__), (__LINE__)), \
+                                 alloc_strvec_r(str))
+#else
+#define alloc_strvec(str)	(alloc_strvec_r(str))
+#endif
+
 /* Prototypes */
 extern void install_keyword_root(const char *, void (*handler) (vector_t *), bool);
+extern void install_root_end_handler(void (*handler) (void));
 extern void install_sublevel(void);
 extern void install_sublevel_end(void);
 extern void install_sublevel_end_handler(void (*handler) (void));
 extern void install_keyword(const char *, void (*handler) (vector_t *));
-extern vector_t *alloc_strvec(char *);
+extern vector_t *alloc_strvec_r(char *);
 extern bool check_conf_file(const char*);
-extern bool read_line(char *, size_t);
 extern vector_t *read_value_block(vector_t *);
-extern void alloc_value_block(void (*alloc_func) (vector_t *));
+extern void alloc_value_block(void (*alloc_func) (vector_t *), const char *);
 extern void *set_value(vector_t *);
 extern unsigned long read_timer(vector_t *);
 extern int check_true_false(char *);

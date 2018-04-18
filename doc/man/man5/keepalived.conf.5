@@ -70,6 +70,117 @@ If keepalived is invoked with -i main, then the router_id will be set to main_ro
 if invoked with -i backup, then backup_router, if not invoked with -i, or with
 -i anything else, then the router_id will not be set. The unicast peers for main will
 be 1.2.3.5 and 1.2.3.6.
+.SH Parameter substitution
+Substitutable parameters can be specified. The format for defining a parameter is:
+.PP
+$PARAMETER=VALUE
+.PP
+where there must be no space before the '=' and only whitespace may preceed to '$'.
+Empty values are allowed.
+
+Parameter names can be made up of any combination of A-Za-z0-9 and _, but cannot start
+with a digit. Parameter names starting with an underscore should be considered
+reserved names that keepalived will define for various pre-defined options.
+
+After a parameter is defined, any occurrence of $PARAMETER followed by
+whitespace, or any occurrence of ${PARAMETER} (which need not be followed by
+whitespace) will be replaced by VALUE.
+
+Replacement is recursive, so that if a parameter value itself includes a
+replaceable parameter, then after the first substitution, the parameter
+in the value will then be replaced; the substitution is done at replacement
+time and not at definition time, so for example:
+.PP
+$ADDRESS_BASE=10.2.${ADDRESS_BASE_SUB}
+$ADDRESS_BASE_SUB=0
+    ${ADDRESS_BASE}.100/32
+$ADDRESS_BASE_SUB=10
+    ${ADDRESS_BASE}.100/32
+.PP
+will produce:
+    10.2.0.100/32
+    10.2.10.100/32
+.PP
+Note in the above examples the use of both ADDRESS_BASE and ADDRESS_BASE_SUB
+required braces ({}) since the parameters were not followed by whitespace
+(after the first substitution which produced 10.2.${ADDRESS_BASE_SUB}.100/32
+the parameter is still not followed by whitespace).
+
+If a parameter is not defined, it will not be replaced at all, so for
+example ${UNDEF_PARAMETER} will remain in the configuration if it is
+undefined; this means that existing configuration that contains a '$'
+character (for example in a script definition) will not be changed so
+long as no new parameter definitions are added to the configuration.
+
+Parameter substitution works in conjunction with conditional configuration.
+For example:
+.PP
+    @main $PRIORITY=240
+    @backup $PRIORITY=200
+    ...
+    vrrp_instance VI_0 {
+        priority $PRIORITY
+    }
+.PP
+will produce:
+    ...
+    vrrp_instance VI_0 }
+        priority 240
+    }
+.PP
+if the config_id is main.
+.PP
+    $IF_MAIN=@main
+    $IF_MAIN priority 240
+.PP
+will produce:
+.PP
+    priority 240
+.PP
+if the config_id is main and nothing if the config_id is not main, although
+why anyone would want to use this rather than simply
+.PP
+    @main priority 240
+.PP
+is not known.
+.PP
+Multiline definitions are also supported, but when used there must be nothing on
+the line after the parameter name. A multiline definition is specified by ending
+each line except the last with a '\' character.
+.PP
+Example:
+.PP
+$INSTANCE= \e
+vrrp_instance VI_${NUM} { \e
+    interface eth0.${NUM} \e
+    use_vmac vrrp${NUM}.1 \e
+    virtual_router_id 1 \e
+ @high priority 130 \e
+ @low priority 120 \e
+    advert_int 1 \e
+    virtual_ipaddress { \e
+        10.0.${NUM}.254/24 \e
+    } \e
+    track_script { \e
+        offset_instance_${NUM} \e
+    } \e
+}
+.PP
+ $NUM=0
+ $INSTANCE
+.PP
+ $NUM=1
+ $INSTANCE
+.SH Pre-defined definitions
+The following pre-defined definitions are defined:
+.PP
+${_PWD}         The directory of the current configuration file
+                (this can be changed if using the include directive).
+
+Additional pre-defined definitions will be added as their need is identified.
+It will normally be quite straightforward to add additional pre-defined
+definitions, so if you need one, or have a good idea for one, then raise
+an issue at https://github.com/acasson/keepalived/issues requesting it.
 .SH TOP HIERACHY
 .PP
 .B GLOBAL CONFIGURATION
@@ -304,7 +415,7 @@ bits of the address.
  192.168.2.0/24 via 192.168.1.100 dev eth0
  192.168.100.0/24 table 6909 nexthop via 192.168.101.1 dev wlan0 onlink weight 1 nexthop via 192.168.101.2 dev wlan0 onlink weight 2
  192.168.200.0/24 dev p33p1.2 table 6909 tos 0x04 protocol bird scope link priority 12 mtu 1000 hoplimit 100 advmss 101 rtt 102 rttvar 103 reordering 104 window 105 cwnd 106 ssthresh lock 107 realms PQA/0x14 rto_min 108 initcwnd 109 initrwnd 110 features ecn
- 2001:470:69e9:1:2::4 dev p33p1.2 table 6909 tos 0x04 protocol bird scope link priority 12 mtu 1000 hoplimit 100 advmss 101 rtt 102 rttvar 103 reordering 104 window 105 cwnd 106 ssthresh lock 107 rto_min 108 initcwnd 109 initrwnd 110 features ecn
+ 2001:470:69e9:1:2::4 dev p33p1.2 table 6909 tos 0x04 protocol bird scope link priority 12 mtu 1000 hoplimit 100 advmss 101 rtt 102 rttvar 103 reordering 104 window 105 cwnd 106 ssthresh lock 107 rto_min 108 initcwnd 109 initrwnd 110 features ecn fastopen_no_cookie 1
  ...
  }
 .PP
@@ -314,6 +425,7 @@ bits of the address.
  to 192.168.2.0/24 table 1
  from 192.168.28.0/24 to 192.168.29.0/26 table small iif p33p1 oif wlan0 tos 22 fwmark 24/12 preference 39 realms 30/20 goto 40
  to 1:2:3:4:5:6:7:0/112 from 7:6:5:4:3:2::/96 table 6908 uidrange 10000-19999
+ to 1:2:3:4:6:6:7:0/112 from 8:6:5:4:3:2::/96 l3mdev
  ...
  }
 .PP
@@ -572,7 +684,7 @@ which will transition together on any state change.
     # For example if 10.1.1.2/24 and 10.1.1.3/24 are both configured on an
     # interface, and one is removed, unless promote_secondaries is set on
     # the interface the other address will also be removed.
-    prompte_secondaries
+    promote_secondaries
 
     # routes add|del when changing to MASTER, to BACKUP.
     # See static_routes for more details
@@ -658,6 +770,19 @@ The subblocks contain arguments for
 Knowledge of
 .I ipvsadm(8)
 will be helpful here.
+.PP
+.B Note:
+Where an option can be configured for a virtual server, real server,
+and possibly checker, the virtual server setting is the default for real servers,
+and the real server setting is the default for checkers.
+.PP
+.B Note:
+Tunnelled real/sorry servers can differ from the address family of
+the virtual server and non tunnelled real/sorry servers, which all have to be the
+same. If a virtual server uses a fwmark, and all the real/sorry servers are
+tunnelled, the address family of the virtual server will be the same as the
+address family of the real/sorry servers if they are all the same, otherwise
+it will default to IPv4 (use ip_family inet6 to override this).
 .PP
 .SH Virtual server group(s)
 .PP
@@ -896,6 +1021,11 @@ A virtual_server can be a declaration of one of
                  # If not set, uses virtualhost from real or virtual server
                  virtualhost <STRING>
                }
+           }
+
+           SSL_GET {
+               # when provided, send Server Name Indicator during SSL handshake
+               enable_sni
            }
 
            # TCP healthchecker

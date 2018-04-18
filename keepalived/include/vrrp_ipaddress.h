@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_IPADDR_H
@@ -100,7 +100,7 @@ struct ipt_handle;	// AAGH - TODO
 /* prototypes */
 extern char *ipaddresstos(char *, ip_address_t *);
 extern int netlink_ipaddress(ip_address_t *, int);
-extern bool netlink_iplist(list, int);
+extern bool netlink_iplist(list, int, bool);
 extern void handle_iptable_rule_to_iplist(struct ipt_handle *, list, int, bool force);
 extern void free_ipaddress(void *);
 extern void dump_ipaddress(void *);

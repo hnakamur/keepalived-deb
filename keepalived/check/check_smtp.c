@@ -18,7 +18,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -161,7 +161,9 @@ smtp_check_end_handler(void)
 	    co->bindto.ss_family != AF_UNSPEC ||
 	    (co->bindto.ss_family == AF_UNSPEC && ((struct sockaddr_in *)&co->bindto)->sin_port) ||
 	    co->bind_if[0] ||
+#ifdef _WITH_SO_MARK_
 	    co->fwmark ||
+#endif
 	    co->connection_to) {
 		/* Set any necessary defaults */
 		if (co->dst.ss_family == AF_UNSPEC) {

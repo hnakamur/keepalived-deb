@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -158,7 +158,7 @@ alloc_global_data(void)
 
 #ifdef _WITH_SNMP_
 	if (snmp) {
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 		new->enable_snmp_keepalived = true;
 #endif
 #ifdef _WITH_SNMP_RFCV2_
@@ -243,8 +243,7 @@ init_global_data(data_t * data)
 		log_message(LOG_INFO, "notify FIFO %s has been specified for global and vrrp FIFO - ignoring vrrp FIFO", data->vrrp_notify_fifo.name);
 		FREE_PTR(data->vrrp_notify_fifo.name);
 		data->vrrp_notify_fifo.name = NULL;
-		FREE_PTR(data->vrrp_notify_fifo.script);
-		data->vrrp_notify_fifo.script = NULL;
+		free_notify_script(&data->vrrp_notify_fifo.script);
 	}
 #endif
 #ifdef _WITH_LVS_
@@ -259,8 +258,7 @@ init_global_data(data_t * data)
 			log_message(LOG_INFO, "notify FIFO %s has been specified for global and LVS FIFO - ignoring LVS FIFO", data->lvs_notify_fifo.name);
 			FREE_PTR(data->lvs_notify_fifo.name);
 			data->lvs_notify_fifo.name = NULL;
-			FREE_PTR(data->lvs_notify_fifo.script);
-			data->lvs_notify_fifo.script = NULL;
+			free_notify_script(&data->lvs_notify_fifo.script);
 		}
 
 #ifdef _WITH_VRRP_
@@ -271,15 +269,12 @@ init_global_data(data_t * data)
 		    data->lvs_notify_fifo.script &&
 		    data->vrrp_notify_fifo.script) {
 			log_message(LOG_INFO, "LVS notify FIFO and vrrp FIFO are the same both with scripts - ignoring LVS FIFO script");
-			FREE_PTR(data->lvs_notify_fifo.script);
-			data->lvs_notify_fifo.script = NULL;
+			free_notify_script(&data->lvs_notify_fifo.script);
 		}
 
 		/* If there is a script for global notify FIFO, it must only be run once, so let VRRP run it */
-		if (data->notify_fifo.script) {
-			FREE_PTR(data->notify_fifo.script);
-			data->notify_fifo.script = NULL;
-		}
+		if (data->notify_fifo.script)
+			free_notify_script(&data->notify_fifo.script);
 #endif
 	}
 #endif
@@ -447,7 +442,7 @@ dump_global_data(data_t * data)
 	log_message(LOG_INFO, " Checker process priority = %d", data->checker_process_priority);
 	log_message(LOG_INFO, " Checker don't swap = %s", data->checker_no_swap ? "true" : "false");
 #endif
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	log_message(LOG_INFO, " SNMP keepalived %s", data->enable_snmp_keepalived ? "enabled" : "disabled");
 #endif
 #ifdef _WITH_SNMP_CHECKER_

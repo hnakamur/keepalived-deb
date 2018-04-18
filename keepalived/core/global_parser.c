@@ -19,7 +19,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -32,6 +32,7 @@
 #include <sys/types.h>
 #include <pwd.h>
 #include <grp.h>
+#include <net/if.h>
 
 #ifdef _WITH_SNMP_
 #include "snmp.h"
@@ -211,6 +212,16 @@ lvs_syncd_handler(vector_t *strvec)
 
 	if (vector_size(strvec) < 3) {
 		log_message(LOG_INFO, "lvs_sync_daemon requires interface, VRRP instance");
+		return;
+	}
+
+	if (strlen(strvec_slot(strvec, 1)) >= IP_VS_IFNAME_MAXLEN) {
+		log_message(LOG_INFO, "lvs_sync_daemon interface name '%s' too long - ignoring", FMT_STR_VSLOT(strvec, 1));
+		return;
+	}
+
+	if (strlen(strvec_slot(strvec, 2)) >= IP_VS_IFNAME_MAXLEN) {
+		log_message(LOG_INFO, "lvs_sync_daemon vrrp interface name '%s' too long - ignoring", FMT_STR_VSLOT(strvec, 2));
 		return;
 	}
 
@@ -552,7 +563,7 @@ notify_fifo(vector_t *strvec, const char *type, notify_fifo_t *fifo)
 		return;
 	}
 
-	fifo->name = MALLOC(strlen(strvec_slot(strvec, 1) + 1));
+	fifo->name = MALLOC(strlen(strvec_slot(strvec, 1)) + 1);
 	strcpy(fifo->name, strvec_slot(strvec, 1));
 }
 static void
@@ -570,7 +581,7 @@ notify_fifo_script(vector_t *strvec, const char *type, notify_fifo_t *fifo)
 		return;
 	}
 
-	id_str = MALLOC(strlen(type) + strlen("notify_fifo"));
+	id_str = MALLOC(strlen(type) + strlen("notify_fifo") + 1);
 	strcpy(id_str, type);
 	strcat(id_str, "notify_fifo");
 	fifo->script = notify_script_init(strvec, id_str, global_data->script_security);
@@ -668,7 +679,7 @@ trap_handler(__attribute__((unused)) vector_t *strvec)
 {
 	global_data->enable_traps = true;
 }
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 static void
 snmp_keepalived_handler(__attribute__((unused)) vector_t *strvec)
 {
@@ -867,7 +878,7 @@ init_global_keywords(bool global_active)
 #ifdef _WITH_SNMP_
 	install_keyword("snmp_socket", &snmp_socket_handler);
 	install_keyword("enable_traps", &trap_handler);
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	install_keyword("enable_snmp_keepalived", &snmp_keepalived_handler);
 #endif
 #ifdef _WITH_SNMP_RFC_

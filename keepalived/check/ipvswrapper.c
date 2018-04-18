@@ -18,14 +18,10 @@
  *               as published by the Free Software Foundation; either version
  *               2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
-
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE /* to make O_CLOEXEC available */
-#endif
 
 #include <fcntl.h>
 #include <stdint.h>
@@ -99,6 +95,9 @@ modprobe_ipvs(void)
 	act.sa_flags = 0;
 
 	sigaction ( SIGCHLD, &act, &old_act);
+
+	if (log_file_name)
+		flush_log_file();
 
 	if (!(child = fork())) {
 		execv(argv[0], argv);
@@ -254,7 +253,7 @@ ipvs_syncd_cmd(int cmd, const struct lvs_syncd_config *config, int state, bool i
 	if (config) {
 		daemonrule.syncid = (int)config->syncid;
 		if (!ignore_interface)
-			strncpy(daemonrule.mcast_ifn, config->ifname, IP_VS_IFNAME_MAXLEN);
+			strcpy(daemonrule.mcast_ifn, config->ifname);
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 		if (cmd == IPVS_STARTDAEMON) {
 			if (config->sync_maxlen)

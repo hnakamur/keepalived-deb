@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2015 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /* The following parameters need to be set on the vmac interface and its parent:
@@ -68,11 +68,12 @@
 #include <stdint.h>
 
 #include "vrrp_if.h"
-#include "logger.h"
 #endif
 
 #include <limits.h>
 #include <unistd.h>
+
+#include "logger.h"
 
 #ifdef _HAVE_VRRP_VMAC_
 static int all_rp_filter = -1;
@@ -407,7 +408,7 @@ get_sysctl(const char* prefix, const char* iface, const char* parameter)
 }
 
 #if !defined _HAVE_IPV4_DEVCONF_ || defined _LIBNL_DYNAMIC_
-static inline int
+static inline void
 set_promote_secondaries_sysctl(interface_t *ifp)
 {
 	if (get_sysctl("net/ipv4/conf", ifp->ifname, "promote_secondaries")) {
@@ -418,7 +419,7 @@ set_promote_secondaries_sysctl(interface_t *ifp)
 	set_sysctl("net/ipv4/conf", ifp->ifname, "promote_secondaries", 1);
 }
 
-static inline int
+static inline void
 reset_promote_secondaries_sysctl(interface_t *ifp)
 {
 	set_sysctl("net/ipv4/conf", ifp->ifname, "promote_secondaries", 0);
@@ -657,11 +658,13 @@ void reset_interface_parameters(interface_t *base_ifp)
 }
 #endif
 
-void link_disable_ipv6(const interface_t* ifp)
+#ifdef _HAVE_VRRP_VMAC_
+void link_enable_ipv6(const interface_t* ifp, bool enable)
 {
 	/* libnl3, nor the kernel, support setting IPv6 options */
-	set_sysctl("net/ipv6/conf", ifp->ifname, "disable_ipv6", 1);
+	set_sysctl("net/ipv6/conf", ifp->ifname, "disable_ipv6", !enable);
 }
+#endif
 
 int get_ipv6_forwarding(const interface_t* ifp)
 {

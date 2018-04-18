@@ -331,6 +331,7 @@ netlink_set_nonblock(nl_handle_t *nl,
 
 	return 0;
 }
+#endif
 
 /* iproute2 utility function */
 int
@@ -352,11 +353,13 @@ addattr_l(struct nlmsghdr *n, size_t maxlen, unsigned short type, void *data, si
 	return 0;
 }
 
+#ifdef _WITH_VRRP_
 int
 addattr8(struct nlmsghdr *n, size_t maxlen, unsigned short type, uint8_t data)
 {
 	return addattr_l(n, maxlen, type, &data, sizeof data);
 }
+#endif
 
 int
 addattr32(struct nlmsghdr *n, size_t maxlen, unsigned short type, uint32_t data)
@@ -364,6 +367,7 @@ addattr32(struct nlmsghdr *n, size_t maxlen, unsigned short type, uint32_t data)
 	return addattr_l(n, maxlen, type, &data, sizeof data);
 }
 
+#ifdef _WITH_VRRP_
 int
 addattr64(struct nlmsghdr *n, size_t maxlen, unsigned short type, uint64_t data)
 {
@@ -537,7 +541,7 @@ netlink_if_address_filter(__attribute__((unused)) struct sockaddr_nl *snl, struc
 
 	ifa = NLMSG_DATA(h);
 
-	/* Only IPV4 are valid us */
+	/* Only IPv4 and IPv6 are valid for us */
 	if (ifa->ifa_family != AF_INET && ifa->ifa_family != AF_INET6)
 		return 0;
 
@@ -600,13 +604,13 @@ netlink_if_address_filter(__attribute__((unused)) struct sockaddr_nl *snl, struc
 /* Our netlink parser */
 static int
 netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
-		   nl_handle_t *nl, struct nlmsghdr *n)
+		   nl_handle_t *nl, struct nlmsghdr *n, bool read_all)
 {
 	ssize_t status;
 	int ret = 0;
 	int error;
 
-	while (1) {
+	while (true) {
 		char buf[nlmsg_buf_size];
 		struct iovec iov = {
 			.iov_base = buf,
@@ -631,8 +635,17 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 				continue;
 			if (errno == EWOULDBLOCK || errno == EAGAIN)
 				break;
-			if (errno == ENOBUFS)
+			if (errno == ENOBUFS) {
+				/* It appears the if we add a large number of interfaces, then
+				 * within a few seconds of starting up the kernel can decide to
+				 * notify us again of all the new interfaces (or it may have something
+				 * to do with becoming master). In any event, if we add a
+				 * kernel_netlink_poll() at every stage of the process, we suddenly
+				 * go from having nothing to receive on nl_kernel to ENOBUFS. Since it
+				 * relates to the interfaces, and we have already got the information
+				 * about the interfaces, it appears that we aren't losing any useful info. */
 				log_message(LOG_INFO, "Netlink: Received message overrun - (%m)");
+			}
 			else
 				log_message(LOG_INFO, "Netlink: recvmsg error - %d (%m)", errno);
 			continue;
@@ -665,7 +678,7 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 				 * return if not related to multipart message.
 				 */
 				if (err->error == 0) {
-					if (!(h->nlmsg_flags & NLM_F_MULTI))
+					if (!(h->nlmsg_flags & NLM_F_MULTI) && !read_all)
 						return 0;
 					continue;
 				}
@@ -719,6 +732,9 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 				log_message(LOG_INFO, "Netlink: filter function error");
 				ret = error;
 			}
+
+			if (!(h->nlmsg_flags & NLM_F_MULTI) && !read_all)
+				return ret;
 		}
 
 		/* After error care. */
@@ -789,7 +805,7 @@ netlink_talk(nl_handle_t *nl, struct nlmsghdr *n)
 		log_message(LOG_INFO, "Netlink: Warning, couldn't set "
 		       "blocking flag to netlink socket...");
 
-	status = netlink_parse_info(netlink_talk_filter, nl, n);
+	status = netlink_parse_info(netlink_talk_filter, nl, n, false);
 
 	/* Restore previous flags */
 	if (ret == 0)
@@ -800,25 +816,43 @@ netlink_talk(nl_handle_t *nl, struct nlmsghdr *n)
 
 /* Fetch a specific type information from netlink kernel */
 static int
-netlink_request(nl_handle_t *nl, unsigned char family, uint16_t type)
+netlink_request(nl_handle_t *nl,
+		unsigned char family,
+		uint16_t type,
+#ifndef _WITH_VRRP_
+		__attribute__((unused))
+#endif
+					char *name)
 {
 	ssize_t status;
 	struct sockaddr_nl snl;
 	struct {
 		struct nlmsghdr nlh;
-		struct rtgenmsg g;
+		struct ifinfomsg i;
+		char buf[64];
 	} req;
 
 	/* Cleanup the room */
 	memset(&snl, 0, sizeof (snl));
 	snl.nl_family = AF_NETLINK;
 
-	req.nlh.nlmsg_len = sizeof (req);
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof req.i);
 	req.nlh.nlmsg_type = type;
-	req.nlh.nlmsg_flags = NLM_F_ROOT | NLM_F_MATCH | NLM_F_REQUEST;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST;
 	req.nlh.nlmsg_pid = 0;
 	req.nlh.nlmsg_seq = ++nl->seq;
-	req.g.rtgen_family = family;
+	req.i.ifi_family = family;
+
+#ifdef _WITH_VRRP_
+	if (name)
+		addattr_l(&req.nlh, sizeof req, IFLA_IFNAME, name, strlen(name) + 1);
+	else
+#endif
+		req.nlh.nlmsg_flags |= NLM_F_DUMP;
+#if HAVE_DECL_RTEXT_FILTER_SKIP_STATS
+	addattr32(&req.nlh, sizeof req, IFLA_EXT_MASK, RTEXT_FILTER_SKIP_STATS);
+#endif
 
 	status = sendto(nl->fd, (void *) &req, sizeof (req)
 			, 0, (struct sockaddr *) &snl, sizeof (snl));
@@ -831,11 +865,70 @@ netlink_request(nl_handle_t *nl, unsigned char family, uint16_t type)
 }
 
 #ifdef _WITH_VRRP_
+
+static char *get_mac_string(int type)
+{
+	switch (type) {
+	case IFLA_BROADCAST:
+		return "Broadcast";
+	case IFLA_ADDRESS:
+		return "Address";
+	default:
+		return "Unknown Type";
+	}
+}
+
+
+static int netlink_if_get_ll_addr(interface_t *ifp, struct rtattr *tb[],
+				  int type, char *name)
+{
+	size_t i;
+
+	if (tb[type]) {
+		size_t hw_addr_len = RTA_PAYLOAD(tb[type]);
+
+		if (hw_addr_len > sizeof(ifp->hw_addr)) {
+			log_message(LOG_ERR,
+				    " %s MAC address for %s is too large: %zu",
+				    get_mac_string(type), name, hw_addr_len);
+			return -1;
+		}
+
+		switch (type) {
+
+		case IFLA_ADDRESS:
+			ifp->hw_addr_len = hw_addr_len;
+			memcpy(ifp->hw_addr, RTA_DATA(tb[type]), hw_addr_len);
+			/*
+			 * Don't allow a hardware address of all zeroes
+			 * Mark hw_addr_len as 0 to warn
+			 */
+			for (i = 0; i < hw_addr_len; i++)
+				if (ifp->hw_addr[i] != 0)
+					break;
+			if (i == hw_addr_len)
+				ifp->hw_addr_len = 0;
+			else
+				ifp->hw_addr_len = hw_addr_len;
+			break;
+
+		case IFLA_BROADCAST:
+			memcpy(ifp->hw_addr_bcast, RTA_DATA(tb[type]),
+			       hw_addr_len);
+			break;
+
+		default:
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 static int
 netlink_if_link_populate(interface_t *ifp, struct rtattr *tb[], struct ifinfomsg *ifi)
 {
 	char *name;
-	size_t i;
 #ifdef _HAVE_VRRP_VMAC_
 	struct rtattr* linkinfo[IFLA_INFO_MAX+1];
 	struct rtattr* linkattr[IFLA_MACVLAN_MAX+1];
@@ -849,26 +942,10 @@ netlink_if_link_populate(interface_t *ifp, struct rtattr *tb[], struct ifinfomsg
 	ifp->mtu = *(uint32_t *)RTA_DATA(tb[IFLA_MTU]);
 	ifp->hw_type = ifi->ifi_type;
 
-	if (tb[IFLA_ADDRESS]) {
-		size_t hw_addr_len = RTA_PAYLOAD(tb[IFLA_ADDRESS]);
-
-		if (hw_addr_len > IF_HWADDR_MAX) {
-			log_message(LOG_ERR, "MAC address for %s is too large: %zu",
-				name, hw_addr_len);
-			return -1;
-		}
-		else {
-			ifp->hw_addr_len = hw_addr_len;
-			memcpy(ifp->hw_addr, RTA_DATA(tb[IFLA_ADDRESS]), hw_addr_len);
-			for (i = 0; i < hw_addr_len; i++)
-				if (ifp->hw_addr[i] != 0)
-					break;
-			if (i == hw_addr_len)
-				ifp->hw_addr_len = 0;
-			else
-				ifp->hw_addr_len = hw_addr_len;
-		}
-	}
+	if (netlink_if_get_ll_addr(ifp, tb, IFLA_ADDRESS, name) == -1)
+		return -1;
+	if (netlink_if_get_ll_addr(ifp, tb, IFLA_BROADCAST, name) == -1)
+		return -1;
 
 #ifdef _HAVE_VRRP_VMAC_
 	/* See if this interface is a MACVLAN of ours */
@@ -972,7 +1049,7 @@ netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl, struct n
 
 /* Interfaces lookup bootstrap function */
 int
-netlink_interface_lookup(void)
+netlink_interface_lookup(char *name)
 {
 	nl_handle_t nlh;
 	int status = 0;
@@ -981,11 +1058,11 @@ netlink_interface_lookup(void)
 		return -1;
 
 	/* Interface lookup */
-	if (netlink_request(&nlh, AF_PACKET, RTM_GETLINK) < 0) {
+	if (netlink_request(&nlh, AF_PACKET, RTM_GETLINK, name) < 0) {
 		status = -1;
 		goto end_int;
 	}
-	status = netlink_parse_info(netlink_if_link_filter, &nlh, NULL);
+	status = netlink_parse_info(netlink_if_link_filter, &nlh, NULL, false);
 
 end_int:
 	netlink_close(&nlh);
@@ -1004,18 +1081,18 @@ netlink_address_lookup(void)
 		return -1;
 
 	/* IPv4 Address lookup */
-	if (netlink_request(&nlh, AF_INET, RTM_GETADDR) < 0) {
+	if (netlink_request(&nlh, AF_INET, RTM_GETADDR, NULL) < 0) {
 		status = -1;
 		goto end_addr;
 	}
-	status = netlink_parse_info(netlink_if_address_filter, &nlh, NULL);
+	status = netlink_parse_info(netlink_if_address_filter, &nlh, NULL, false);
 
 	/* IPv6 Address lookup */
-	if (netlink_request(&nlh, AF_INET6, RTM_GETADDR) < 0) {
+	if (netlink_request(&nlh, AF_INET6, RTM_GETADDR, NULL) < 0) {
 		status = -1;
 		goto end_addr;
 	}
-	status = netlink_parse_info(netlink_if_address_filter, &nlh, NULL);
+	status = netlink_parse_info(netlink_if_address_filter, &nlh, NULL, false);
 
 end_addr:
 	netlink_close(&nlh);
@@ -1123,7 +1200,7 @@ kernel_netlink(thread_t * thread)
 	nl_handle_t *nl = THREAD_ARG(thread);
 
 	if (thread->type != THREAD_READ_TIMEOUT)
-		netlink_parse_info(netlink_broadcast_filter, nl, NULL);
+		netlink_parse_info(netlink_broadcast_filter, nl, NULL, true);
 	nl->thread = thread_add_read(master, kernel_netlink, nl, nl->fd,
 				      NETLINK_TIMER);
 	return 0;
@@ -1133,7 +1210,10 @@ kernel_netlink(thread_t * thread)
 void
 kernel_netlink_poll(void)
 {
-	netlink_parse_info(netlink_broadcast_filter, &nl_kernel, NULL);
+	if (!nl_kernel.fd)
+		return;
+
+	netlink_parse_info(netlink_broadcast_filter, &nl_kernel, NULL, true);
 }
 #endif
 

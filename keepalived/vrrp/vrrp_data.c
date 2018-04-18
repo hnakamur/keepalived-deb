@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -35,6 +35,7 @@
 #include "utils.h"
 #include "logger.h"
 #include "bitops.h"
+#include "vrrp_ipaddress.h"
 #ifdef _HAVE_FIB_ROUTING_
 #include "vrrp_iprule.h"
 #include "vrrp_iproute.h"
@@ -147,21 +148,25 @@ dump_vscript(void *data)
 	log_message(LOG_INFO, "   Fall = %d", vscript->fall);
 	log_message(LOG_INFO, "   Insecure = %s", vscript->insecure ? "yes" : "no");
 
-	switch (vscript->result) {
-	case VRRP_SCRIPT_STATUS_INIT:
+	switch (vscript->init_state) {
+	case SCRIPT_INIT_STATE_INIT:
 		str = "INIT"; break;
-	case VRRP_SCRIPT_STATUS_INIT_GOOD:
+	case SCRIPT_INIT_STATE_GOOD:
 		str = "INIT/GOOD"; break;
-	case VRRP_SCRIPT_STATUS_INIT_FAILED:
+	case SCRIPT_INIT_STATE_FAILED:
 		str = "INIT/FAILED"; break;
-	case VRRP_SCRIPT_STATUS_DISABLED:
+	case SCRIPT_INIT_STATE_DISABLED:
 		str = "DISABLED"; break;
 	default:
 		str = (vscript->result >= vscript->rise) ? "GOOD" : "BAD";
 	}
 	log_message(LOG_INFO, "   Status = %s", str);
 	log_message(LOG_INFO, "   Script uid:gid = %d:%d", vscript->uid, vscript->gid);
-
+	log_message(LOG_INFO, "   State = %s",
+			vscript->state == SCRIPT_STATE_IDLE ? "idle" :
+			vscript->state == SCRIPT_STATE_RUNNING ? "running" :
+			vscript->state == SCRIPT_STATE_REQUESTING_TERMINATION ? "requested termination" :
+			vscript->state == SCRIPT_STATE_FORCING_TERMINATION ? "forcing termination" : "unknown");
 }
 
 /* Socket pool functions */
@@ -254,7 +259,7 @@ dump_vrrp(void *data)
 	log_message(LOG_INFO, "   Using VRRPv%d", vrrp->version);
 	if (vrrp->family == AF_INET6)
 		log_message(LOG_INFO, "   Using Native IPv6");
-	if (vrrp->init_state == VRRP_STATE_BACK)
+	if (vrrp->wantstate == VRRP_STATE_BACK)
 		log_message(LOG_INFO, "   Want State = BACKUP");
 	else
 		log_message(LOG_INFO, "   Want State = MASTER");
@@ -419,7 +424,6 @@ alloc_vrrp(char *iname)
 	new->family = AF_UNSPEC;
 	new->saddr.ss_family = AF_UNSPEC;
 	new->wantstate = VRRP_STATE_BACK;
-	new->init_state = VRRP_STATE_BACK;
 	new->version = 0;
 	new->master_priority = 0;
 	new->last_transition = timer_now();
@@ -436,7 +440,9 @@ alloc_vrrp(char *iname)
 	new->garp_lower_prio_rep = PARAMETER_UNSET;
 	new->lower_prio_no_advert = PARAMETER_UNSET;
 	new->higher_prio_send_advert = PARAMETER_UNSET;
+#ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	new->unicast_chksum_compat = CHKSUM_COMPATIBILITY_NONE;
+#endif
 
 	new->skip_check_adv_addr = global_data->vrrp_skip_check_adv_addr;
 	new->strict_mode = PARAMETER_UNSET;
@@ -569,7 +575,8 @@ alloc_vrrp_script(char *sname)
 	new->interval = VRRP_SCRIPT_DI * TIMER_HZ;
 	new->timeout = VRRP_SCRIPT_DT * TIMER_HZ;
 	new->weight = VRRP_SCRIPT_DW;
-	new->result = VRRP_SCRIPT_STATUS_INIT;
+	new->init_state = SCRIPT_INIT_STATE_INIT;
+	new->state = SCRIPT_STATE_IDLE;
 	new->inuse = 0;
 	new->rise = 1;
 	new->fall = 1;
@@ -587,6 +594,11 @@ alloc_vrrp_buffer(size_t len)
 void
 free_vrrp_buffer(void)
 {
+	/* If the configuration failed, we may not have
+	 * allocated a buffer */
+	if (!vrrp_buffer)
+		return;
+
 	FREE(vrrp_buffer);
 	vrrp_buffer = NULL;
 	vrrp_buffer_len = 0;

@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _NOTIFY_H
@@ -37,6 +37,21 @@
 #define SC_INHIBIT      0x04    /* Script needs inhibiting */
 #define SC_NOTFOUND	0x08	/* Cannot find element of path */
 #define	SC_EXECUTABLE	0x10	/* The script is marked executable */
+
+typedef enum {
+	SCRIPT_STATE_IDLE,
+	SCRIPT_STATE_RUNNING,
+	SCRIPT_STATE_REQUESTING_TERMINATION,
+	SCRIPT_STATE_FORCING_TERMINATION
+} script_state_t;
+
+typedef enum {
+	SCRIPT_INIT_STATE_DONE,
+	SCRIPT_INIT_STATE_INIT,
+	SCRIPT_INIT_STATE_GOOD,
+	SCRIPT_INIT_STATE_FAILED,
+	SCRIPT_INIT_STATE_DISABLED,
+} script_init_state_t;
 
 /* notify_script details */
 typedef struct _notify_script {
@@ -61,6 +76,7 @@ free_notify_script(notify_script_t **script)
 		return;
 	FREE_PTR((*script)->name);
 	FREE_PTR(*script);
+	*script = NULL;
 }
 
 /* Global variables */

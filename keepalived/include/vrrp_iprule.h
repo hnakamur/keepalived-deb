@@ -18,6 +18,7 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright (C) 2015 Chris Riley, <kernelchris@gmail.com>
+ * Copyright (C) 2016-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_IPRULE_H
@@ -76,6 +77,9 @@ typedef struct _ip_rule {
 #endif
 #if HAVE_DECL_FRA_UID_RANGE
 	struct fib_rule_uid_range uid_range;
+#endif
+#if HAVE_DECL_FRA_L3MDEV
+	bool		l3mdev;
 #endif
 	bool		set;
 } ip_rule_t;

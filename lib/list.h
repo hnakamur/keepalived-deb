@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _LIST_H
@@ -62,6 +62,6 @@ extern void dump_list(list l);
 extern void list_add(list l, void *data);
 extern void list_del(list l, void *data);
 extern list alloc_mlist(void (*free_func) (void *), void (*dump_func) (void *), size_t size);
-extern void free_mlist(list l, int size);
+extern void free_mlist(list l, size_t size);
 
 #endif

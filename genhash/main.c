@@ -5,8 +5,6 @@
  *
  * Part:        Main entry point.
  *
- * Version:     $Id: main.c,v 1.1.16 2009/02/14 03:25:07 acassen Exp $
- *
  * Authors:     Alexandre Cassen, <acassen@linux-vs.org>
  *
  *              This program is distributed in the hope that it will be useful,
@@ -19,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -44,6 +42,7 @@
 
 /* global var */
 REQ *req = NULL;
+int exit_code;
 
 /* Terminate handler */
 static void
@@ -73,23 +72,26 @@ usage(const char *prog)
 	fprintf(stderr, VERSION_STRING);
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s -s server-address -p port -u url\n"
-		"  %s -S -s server-address -p port -u url\n"
-		"  %s -h\n" "  %s -r\n\n", prog, prog, prog, prog);
+		"  %1$s -s server-address -p port -u url\n"
+		"  %1$s -S -s server-address -p port -u url\n"
+		"  %1$s -h\n" "  %1$s -r\n\n", prog);
 	fprintf(stderr,
 		"Commands:\n"
 		"Either long or short options are allowed.\n"
-		"  %s --use-ssl         -S       Use SSL connection to remote server.\n"
-		"  %s --server          -s       Use the specified remote server address.\n"
-		"  %s --port            -p       Use the specified remote server port.\n"
-		"  %s --url             -u       Use the specified remote server url.\n"
-		"  %s --use-virtualhost -V       Use the specified virtualhost in GET query.\n"
-		"  %s --hash            -H       Use the specified hash algorithm.\n"
-		"  %s --verbose         -v       Use verbose mode output.\n"
-		"  %s --help            -h       Display this short inlined help screen.\n"
-		"  %s --release         -r       Display the release number.\n"
-		"  %s --fwmark          -m       Use the specified FW mark.\n",
-		prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+		"  %1$s --use-ssl         -S       Use SSL connection to remote server.\n"
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		"  %1$s --use-sni         -I       Use SNI during SSL handshake (uses virtualhost setting; see -V).\n"
+#endif
+		"  %1$s --server          -s       Use the specified remote server address.\n"
+		"  %1$s --port            -p       Use the specified remote server port.\n"
+		"  %1$s --url             -u       Use the specified remote server url.\n"
+		"  %1$s --use-virtualhost -V       Use the specified virtualhost in GET query.\n"
+		"  %1$s --hash            -H       Use the specified hash algorithm.\n"
+		"  %1$s --verbose         -v       Use verbose mode output.\n"
+		"  %1$s --help            -h       Display this short inlined help screen.\n"
+		"  %1$s --release         -r       Display the release number.\n"
+		"  %1$s --fwmark          -m       Use the specified FW mark.\n",
+		prog);
 	fprintf(stderr, "\nSupported hash algorithms:\n");
 	for (i = hash_first; i < hash_guard; i++)
 		fprintf(stderr, "  %s%s\n",
@@ -116,6 +118,9 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 		{"help",            no_argument,       0, 'h'},
 		{"verbose",         no_argument,       0, 'v'},
 		{"use-ssl",         no_argument,       0, 'S'},
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		{"use-sni",         no_argument,       0, 'I'},
+#endif
 		{"server",          required_argument, 0, 's'},
 		{"hash",            required_argument, 0, 'H'},
 		{"use-virtualhost", required_argument, 0, 'V'},
@@ -126,7 +131,11 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 	};
 
 	/* Parse the command line arguments */
-	while ((c = getopt_long (argc, argv, "rhvSs:H:V:p:u:m:", long_options, NULL)) != EOF) {
+	while ((c = getopt_long (argc, argv, "rhvSs:H:V:p:u:m:"
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+							       "I"
+#endif
+				  , long_options, NULL)) != EOF) {
 		switch (c) {
 		case 'r':
 			fprintf(stderr, VERSION_STRING);
@@ -140,6 +149,11 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 		case 'S':
 			req_obj->ssl = 1;
 			break;
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		case 'I':
+			req_obj->sni = 1;
+			break;
+#endif
 		case 's':
 			if ((ret = getaddrinfo(optarg, NULL, &hint, &res)) != 0){
 				fprintf(stderr, "server should be an IP, not %s\n", optarg);
@@ -209,9 +223,12 @@ int
 main(int argc, char **argv)
 {
 	thread_t thread;
-	char *url_default = malloc(2);
-	url_default[0] = '/';
-	url_default[1] = '\0';
+	char *url_default = "/";
+
+#ifdef _MEM_CHECK_
+	mem_log_init("Genhash", "Genhash process");
+	enable_mem_log_termination();
+#endif
 
 	/* Allocate the room */
 	req = (REQ *) MALLOC(sizeof (REQ));
@@ -221,22 +238,19 @@ main(int argc, char **argv)
 
 	/* Command line parser */
 	if (!parse_cmdline(argc, argv, req)) {
-		FREE(url_default);
 		FREE(req);
-		exit(0);
+		exit(1);
 	}
 
 	/* Check minimum configuration need */
 	if (!req->dst && !req->addr_port && !req->url) {
-		FREE(url_default);
 		freeaddrinfo(req->dst);
 		FREE(req);
-		exit(0);
+		exit(1);
 	}
 
-	if(!req->url){
+	if(!req->url)
 		req->url = url_default;
-	}
 
 	/* Init the reference timer */
 	req->ref_time = timer_tol(timer_now());
@@ -271,10 +285,10 @@ main(int argc, char **argv)
 			    req->url, req->response_time - req->ref_time);
 
 	/* exit cleanly */
-	FREE(url_default);
+	thread_destroy_master(master);
 	SSL_CTX_free(req->ctx);
 	free_sock(sock);
 	freeaddrinfo(req->dst);
 	FREE(req);
-	exit(0);
+	exit(exit_code);
 }

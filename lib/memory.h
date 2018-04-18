@@ -18,7 +18,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _MEMORY_H
@@ -44,6 +44,7 @@
 extern size_t mem_allocated;
 
 /* Memory debug prototypes defs */
+extern void memcheck_log(const char *, const char *, const char *, const char *, int);
 extern void *keepalived_malloc(size_t, char *, char *, int)
 		__attribute__((alloc_size(1))) __attribute__((malloc));
 extern int keepalived_free(void *, char *, char *, int);

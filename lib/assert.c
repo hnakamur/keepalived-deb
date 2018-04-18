@@ -3,7 +3,7 @@
  *              <www.linuxvirtualserver.org>. It monitor & manipulate
  *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        vrrp_daemon.c include file.
+ * Part:        assert facility.
  *
  * Author:      Alexandre Cassen, <acassen@linux-vs.org>
  *
@@ -17,17 +17,33 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2018-2018 Alexandre Cassen, <acassen@gmail.com>
  */
+#include "config.h"
 
-#ifndef _VRRP_DAEMON_H
-#define _VRRP_DAEMON_H
+#ifndef  NDEBUG
 
-/* Daemon define */
-#define PROG_VRRP	"Keepalived_vrrp"
-#define WDOG_VRRP	"/tmp/.vrrp"
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 
-/* Prototypes */
-extern int start_vrrp_child(void);
+#include "logger.h"
 
+/* This prints an "Assertion failed" message and aborts.  */
+void __assert_fail (const char *__assertion, const char *__file,
+                           LINE_type __line, const char *__function)
+{
+	log_message(LOG_ERR, "assert: %s:%d: %s: Assertion: `%s' failed.", __file, __line, __function, __assertion);
+	abort();
+}
+
+#ifdef __USE_GNU
+/* Likewise, but prints the error text for ERRNUM.  */
+void __assert_perror_fail (int __errnum, const char *__file,
+                                  unsigned int __line, const char *__function)
+{
+	log_message(LOG_ERR, "assert: %s:%d: %s: Unexpected error: %s.", __file, __line, __function, strerror(__errnum));
+	abort();
+}
+#endif
 #endif

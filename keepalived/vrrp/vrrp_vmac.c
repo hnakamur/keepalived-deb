@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -112,7 +112,7 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 
 	memset(&req, 0, sizeof (req));
 	memset(ifname, 0, IFNAMSIZ);
-	strncpy(ifname, vrrp->vmac_ifname, IFNAMSIZ - 1);
+	strcpy(ifname, vrrp->vmac_ifname);
 
 	/*
 	 * Check to see if this vmac interface was created
@@ -190,7 +190,7 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 		/*
 		 * Update interface queue and vrrp instance interface binding.
 		 */
-		netlink_interface_lookup();
+		netlink_interface_lookup(ifname);
 		ifp = if_get_by_ifname(ifname);
 		if (!ifp)
 			return -1;
@@ -211,13 +211,18 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 		/* We don't want IPv6 running on the interface unless we have some IPv6
 		 * eVIPs, so disable it if not needed */
 		if (!vrrp->evip_add_ipv6)
-			link_disable_ipv6(ifp);
+			link_enable_ipv6(ifp, false);
 	}
 	if (vrrp->family == AF_INET6 || vrrp->evip_add_ipv6) {
-		// We don't want a link-local address auto assigned - see RFC5798 paragraph 7.4.
-		// If we have a sufficiently recent kernel, we can stop a link local address
-		// based on the MAC address being automatically assigned. If not, then we have
-		// to delete the generated address after bringing the interface up (see below).
+		/* Make sure IPv6 is enabled for the interface, in case the
+		 * sysctl net.ipv6.conf.default.disable_ipv6 is set true. */
+		link_enable_ipv6(ifp, true);
+
+		/* We don't want a link-local address auto assigned - see RFC5798 paragraph 7.4.
+		 * If we have a sufficiently recent kernel, we can stop a link local address
+		 * based on the MAC address being automatically assigned. If not, then we have
+		 * to delete the generated address after bringing the interface up (see below).
+		 */
 #if HAVE_DECL_IFLA_INET6_ADDR_GEN_MODE
 		memset(&req, 0, sizeof (req));
 		req.n.nlmsg_len = NLMSG_LENGTH(sizeof (struct ifinfomsg));
@@ -226,14 +231,13 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 		req.ifi.ifi_family = AF_UNSPEC;
 		req.ifi.ifi_index = (int)vrrp->vmac_ifindex;
 
-		u_char val = IN6_ADDR_GEN_MODE_NONE;
 		struct rtattr* spec;
 
 		spec = NLMSG_TAIL(&req.n);
 		addattr_l(&req.n, sizeof(req), IFLA_AF_SPEC, NULL,0);
 		data = NLMSG_TAIL(&req.n);
 		addattr_l(&req.n, sizeof(req), AF_INET6, NULL,0);
-		addattr_l(&req.n, sizeof(req), IFLA_INET6_ADDR_GEN_MODE, &val, sizeof(val));
+		addattr8(&req.n, sizeof(req), IFLA_INET6_ADDR_GEN_MODE, IN6_ADDR_GEN_MODE_NONE);
 		data->rta_len = (unsigned short)((void *)NLMSG_TAIL(&req.n) - (void *)data);
 		spec->rta_len = (unsigned short)((void *)NLMSG_TAIL(&req.n) - (void *)spec);
 
@@ -299,6 +303,11 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 			log_message(LOG_INFO, "Deleting auto link-local address from vmac failed");
 	}
 #endif
+
+	/* If we are adding a large number of interfaces, the netlink socket
+	 * may run out of buffers if we don't receive the netlink messages
+	 * as we progress */
+	kernel_netlink_poll();
 
 	return 1;
 }

@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_SCHEDULER_H
@@ -68,7 +68,6 @@ extern int vrrp_dispatcher_init(thread_t *);
 extern void vrrp_dispatcher_release(vrrp_data_t *);
 extern int vrrp_lower_prio_gratuitous_arp_thread(thread_t *);
 extern void vrrp_set_effective_priority(vrrp_t *, uint8_t);
-extern bool vrrp_child_finder(pid_t, char const **);
 extern int vrrp_arp_thread(thread_t *);
 
 #endif
