@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -198,8 +198,8 @@ vrrp_script_up(list l)
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		tsc = ELEMENT_DATA(e);
-		if ((tsc->scr->result == VRRP_SCRIPT_STATUS_DISABLED) ||
-		    (tsc->scr->result == VRRP_SCRIPT_STATUS_INIT_GOOD))
+		if ((tsc->scr->init_state == SCRIPT_INIT_STATE_DISABLED) ||
+		    (tsc->scr->init_state == SCRIPT_INIT_STATE_GOOD))
 			continue;
 		if (!tsc->weight && tsc->scr->result < tsc->scr->rise)
 			return 0;
@@ -222,7 +222,7 @@ vrrp_script_weight(list l)
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		tsc = ELEMENT_DATA(e);
-		if (tsc->scr->result == VRRP_SCRIPT_STATUS_DISABLED)
+		if (tsc->scr->init_state == SCRIPT_INIT_STATE_DISABLED)
 			continue;
 		if (tsc->scr->result >= tsc->scr->rise) {
 			if (tsc->weight > 0)

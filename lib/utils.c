@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -38,6 +38,9 @@
 #include "utils.h"
 #include "signals.h"
 #include "bitops.h"
+#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
+#include "logger.h"
+#endif
 
 /* global vars */
 unsigned long debug = 0;
@@ -331,7 +334,7 @@ inet_sockaddrtopair(struct sockaddr_storage *addr)
 	static char ret[sizeof(addr_str) + 8];	/* '[' + addr_str + ']' + ':' + 'nnnnn' */
 
 	inet_sockaddrtos2(addr, addr_str);
-	snprintf(ret, sizeof(ret) - 1, "[%s]:%d"
+	snprintf(ret, sizeof(ret), "[%s]:%d"
 		, addr_str
 		, ntohs(inet_sockaddrport(addr)));
 	return ret;
@@ -345,7 +348,7 @@ inet_sockaddrtotrio(struct sockaddr_storage *addr, uint16_t proto)
 	char *proto_str = proto == IPPROTO_TCP ? "tcp" : proto == IPPROTO_UDP ? "udp" : proto == IPPROTO_SCTP ? "sctp" : proto == 0 ? "none" : "?";
 
 	inet_sockaddrtos2(addr, addr_str);
-	snprintf(ret, sizeof(ret) - 1, "[%s]:%s:%d" ,addr_str, proto_str,
+	snprintf(ret, sizeof(ret), "[%s]:%s:%d" ,addr_str, proto_str,
 		 ntohs(inet_sockaddrport(addr)));
 	return ret;
 }
@@ -534,7 +537,7 @@ string_equal(const char *str1, const char *str2)
 }
 
 void
-set_std_fd(int force)
+set_std_fd(bool force)
 {
 	int fd;
 
@@ -552,6 +555,14 @@ set_std_fd(int force)
 	signal_pipe_close(STDERR_FILENO+1);
 }
 
+void
+close_std_fd(void)
+{
+	close(STDIN_FILENO);
+	close(STDOUT_FILENO);
+	close(STDERR_FILENO);
+}
+
 #if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
 int
 fork_exec(char **argv)
@@ -566,6 +577,9 @@ fork_exec(char **argv)
 	act.sa_flags = 0;
 
 	sigaction(SIGCHLD, &act, &old_act);
+
+	if (log_file_name)
+		flush_log_file();
 
 	pid = fork();
 	if (pid < 0)

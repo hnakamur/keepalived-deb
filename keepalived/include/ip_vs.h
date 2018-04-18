@@ -6,6 +6,7 @@
 #ifndef KEEPALIVED_IP_VS_H
 #define KEEPALIVED_IP_VS_H
 
+#include <net/if.h>	/* Force inclusion of net/if.h before linux/if.h */
 #ifdef HAVE_LINUX_IP_VS_H
 #include <linux/ip_vs.h>
 #else
@@ -99,6 +100,11 @@ struct ip_vs_get_services_app {
 	struct ip_vs_service_entry_app entrytable[0];
 	} user;
 };
+
+/* Make sure we don't have an inconsistent definition */
+#if IP_VS_IFNAME_MAXLEN > IFNAMSIZ
+	#error The code assumes that IP_VS_IFNAME_MAXLEN <= IFNAMSIZ
+#endif
 
 /* The argument to IP_VS_SO_GET_DAEMON */
 struct ip_vs_daemon_kern {

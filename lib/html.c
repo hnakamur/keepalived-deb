@@ -17,37 +17,38 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "html.h"
 #include "memory.h"
-
-#ifdef _INCLUDE_UNUSED_CODE_
 
 /* HTTP header tag */
 #define CONTENT_LENGTH	"Content-Length:"
 
 /* Return the http header content length */
-int extract_content_length(char *buffer, size_t size)
+size_t extract_content_length(char *buffer, size_t size)
 {
 	char *clen = strstr(buffer, CONTENT_LENGTH);
+	size_t len;
+	char *end;
 
 	/* Pattern not found */
-	if (!clen)
-		return 0;
+	if (!clen || clen > buffer + size)
+		return SIZE_MAX;
 
 	/* Content-Length extraction */
-	if (!(clen = strchr(clen, ':')))
-		return 0;
+	len = strtoul(clen + strlen(CONTENT_LENGTH), &end, 10);
+	if (*end)
+		return SIZE_MAX;
 
-	return atoi(clen+1);
+	return len;
 }
-#endif
 
 /*
  * Return the http header error code. According

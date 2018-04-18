@@ -17,15 +17,17 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_ARP_H
 #define _VRRP_ARP_H
 
 /* system includes */
+#include <netinet/in.h>
 #include <net/ethernet.h>
 #include <net/if_arp.h>
+#include <linux/if_infiniband.h>
 
 /* local includes */
 #include "vrrp_ipaddress.h"
@@ -50,6 +52,25 @@ typedef struct _arphdr {
 	unsigned char		__ar_tha[ETH_ALEN];	/* Target hardware address.  */
 	unsigned char		__ar_tip[4];		/* Target IP address.  */
 } arphdr_t;
+
+typedef struct inf_arphdr {
+	unsigned short int ar_hrd;
+	unsigned short int ar_pro;
+	unsigned char      ar_hln;
+	unsigned char      ar_pln;
+	unsigned short int ar_op;
+
+	/* Infiniband arp looks like this */
+	unsigned char     __ar_sha[INFINIBAND_ALEN];
+	unsigned char     __ar_sip[4];
+	unsigned char     __ar_tha[INFINIBAND_ALEN];
+	unsigned char     __ar_tip[4];
+} inf_arphdr_t;
+
+typedef struct ipoib_hdr {
+	u_int16_t proto;
+	u_int16_t reserved;
+} ipoib_hdr_t;
 
 /* prototypes */
 extern void gratuitous_arp_init(void);

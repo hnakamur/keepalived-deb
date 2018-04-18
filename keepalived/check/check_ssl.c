@@ -20,7 +20,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -56,22 +56,24 @@ password_cb(char *buf, int num, __attribute__((unused)) int rwflag, void *userda
 	if ((unsigned)num < plen + 1)
 		return (0);
 
-	strncpy(buf, ssl->password, plen);
+	strcpy(buf, ssl->password);
 	return (int)plen;
 }
 
 /* Inititalize global SSL context */
-static BIO *bio_err = 0;
 static int
 build_ssl_ctx(void)
 {
 	ssl_data_t *ssl;
 
 	/* Library initialization */
+#if HAVE_OPENSSL_INIT_CRYPTO
+	if (!OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL))
+		log_message(LOG_INFO, "OPENSSL_init_crypto failed");
+#else
 	SSL_library_init();
-
 	SSL_load_error_strings();
-	bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
+#endif
 
 	if (!check_data->ssl)
 		ssl = (ssl_data_t *) MALLOC(sizeof(ssl_data_t));
@@ -123,7 +125,7 @@ build_ssl_ctx(void)
 		}
 
       end:
-#if (OPENSSL_VERSION_NUMBER < 0x00905100L)
+#if HAVE_SSL_CTX_SET_VERIFY_DEPTH
 	SSL_CTX_set_verify_depth(ssl->ctx, 1);
 #endif
 
@@ -155,9 +157,6 @@ init_ssl_ctx(void)
 int
 ssl_printerr(int err)
 {
-	unsigned long extended_error = 0;
-	char *ssl_strerr;
-
 	switch (err) {
 	case SSL_ERROR_ZERO_RETURN:
 		log_message(LOG_INFO, "  SSL error: (zero return)");
@@ -177,15 +176,10 @@ ssl_printerr(int err)
 	case SSL_ERROR_SYSCALL:
 		log_message(LOG_INFO, "  SSL error: (syscall error)");
 		break;
-	case SSL_ERROR_SSL:{
-			ssl_strerr = (char *) MALLOC(500);
-
-			extended_error = ERR_get_error();
-			ERR_error_string(extended_error, ssl_strerr);
-			log_message(LOG_INFO, "  SSL error: (%s)", ssl_strerr);
-			FREE(ssl_strerr);
-			break;
-		}
+	case SSL_ERROR_SSL:
+		/* Note: the following is not thread safe. Use MALLOC(256) and ERR_error_string_n if need thread safety */
+		log_message(LOG_INFO, "  SSL error: (%s)", ERR_error_string(ERR_get_error(), NULL));
+		break;
 	}
 	return 0;
 }
@@ -196,6 +190,10 @@ ssl_connect(thread_t * thread, int new_req)
 	checker_t *checker = THREAD_ARG(thread);
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+	url_t *url = list_element(http_get_check->url, http_get_check->url_it);
+	char* vhost = NULL;
+#endif
 	int ret = 0;
 	int val = 0;
 
@@ -206,7 +204,25 @@ ssl_connect(thread_t * thread, int new_req)
 		req->bio = BIO_new_socket(thread->u.fd, BIO_NOCLOSE);
 		BIO_get_fd(req->bio, &bio_fd);
 		fcntl(bio_fd, F_SETFD, fcntl(bio_fd, F_GETFD) | FD_CLOEXEC);
+#if HAVE_SSL_SET0_RBIO
+		BIO_up_ref(req->bio);
+		SSL_set0_rbio(req->ssl, req->bio);
+		SSL_set0_wbio(req->ssl, req->bio);
+#else
 		SSL_set_bio(req->ssl, req->bio, req->bio);
+#endif
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		if (http_get_check->enable_sni) {
+			if (url && url->virtualhost)
+				vhost = url->virtualhost;
+			else if (http_get_check->virtualhost)
+				vhost = http_get_check->virtualhost;
+			else if (checker->vs->virtualhost)
+				vhost = checker->vs->virtualhost;
+			if (vhost)
+				SSL_set_tlsext_host_name(req->ssl, vhost);
+		}
+#endif
 	}
 
 	/* Set descriptor non blocking */

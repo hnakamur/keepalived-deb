@@ -31,6 +31,10 @@
    you don't. */
 #undef HAVE_DECL_ETHERTYPE_IPV6
 
+/* Define to 1 if you have the declaration of `FRA_L3MDEV', and to 0 if you
+   don't. */
+#undef HAVE_DECL_FRA_L3MDEV
+
 /* Define to 1 if you have the declaration of `FRA_OIFNAME', and to 0 if you
    don't. */
 #undef HAVE_DECL_FRA_OIFNAME
@@ -131,9 +135,17 @@
    if you don't. */
 #undef HAVE_DECL_MACVLAN_MODE_PRIVATE
 
+/* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
+   */
+#undef HAVE_DECL_O_PATH
+
 /* Define to 1 if you have the declaration of `RTAX_CC_ALGO', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTAX_CC_ALGO
+
+/* Define to 1 if you have the declaration of `RTAX_FASTOPEN_NO_COOKIE', and
+   to 0 if you don't. */
+#undef HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
 
 /* Define to 1 if you have the declaration of `RTAX_QUICKACK', and to 0 if you
    don't. */
@@ -158,6 +170,10 @@
 /* Define to 1 if you have the declaration of `RTA_VIA', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTA_VIA
+
+/* Define to 1 if you have the declaration of `RTEXT_FILTER_SKIP_STATS', and
+   to 0 if you don't. */
+#undef HAVE_DECL_RTEXT_FILTER_SKIP_STATS
 
 /* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
    don't. */
@@ -192,8 +208,8 @@
 /* Define to 1 if ipset supports iface type */
 #undef HAVE_IPSET_ATTR_IFACE
 
-/* Define to 1 if you have the <json-c/json.h> header file. */
-#undef HAVE_JSON_C_JSON_H
+/* Define to 1 if you have the <json.h> header file. */
+#undef HAVE_JSON_H
 
 /* Define to 1 if you have the `crypto' library (-lcrypto). */
 #undef HAVE_LIBCRYPTO
@@ -326,6 +342,9 @@
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
 
+/* Define to 1 if you have the `OPENSSL_init_crypto' function. */
+#undef HAVE_OPENSSL_INIT_CRYPTO
+
 /* Define to 1 if you have the <openssl/md5.h> header file. */
 #undef HAVE_OPENSSL_MD5_H
 
@@ -353,6 +372,12 @@
 
 /* Define to 1 if you have the `socket' function. */
 #undef HAVE_SOCKET
+
+/* Define to 1 if you have the `SSL_CTX_set_verify_depth' function. */
+#undef HAVE_SSL_CTX_SET_VERIFY_DEPTH
+
+/* Define to 1 if you have the `SSL_set0_rbio' function. */
+#undef HAVE_SSL_SET0_RBIO
 
 /* Define to 1 if stdbool.h conforms to C99. */
 #undef HAVE_STDBOOL_H
@@ -469,6 +494,9 @@
 /* Define to 1 if libipvs can use netlink */
 #undef LIBIPVS_USE_NL
 
+/* The type of parameter __line passed to __assert_fail() */
+#undef LINE_type
+
 /* Define to 1 if <linux/netlink.h> needs <sys/socket.h> */
 #undef NETLINK_H_NEEDS_SYS_SOCKET_H
 
@@ -508,6 +536,10 @@
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
+/* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
+   */
+#undef USE_LIBIPSET_LINUX_IP_SET_H
+
 /* Version number of package */
 #undef VERSION
 
@@ -516,10 +548,6 @@
 
 /* Define if <linux/netfilter/x_tables.h> doesnt define it */
 #undef XT_EXTENSION_MAXNAMELEN
-
-/* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
-   */
-#undef XT_SET_H_NEEDS_LINUX_IP_SET_H
 
 /* Define to 1 to build with debugging support */
 #undef _DEBUG_
@@ -558,6 +586,9 @@
 /* Define to 1 if have pe selection support */
 #undef _HAVE_PE_NAME_
 
+/* Define to 1 if have SSL_set_tlsext_host_name() */
+#undef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+
 /* Define to 1 if have MAC VLAN support */
 #undef _HAVE_VRRP_VMAC_
 
@@ -578,6 +609,9 @@
 
 /* Define to 1 to log malloc/free checks to syslog */
 #undef _MEM_CHECK_LOG_
+
+/* Define to 1 to build with smtp-alert debugging support */
+#undef _SMTP_ALERT_DEBUG_
 
 /* Define to 1 to have keepalived send RFC6257 SNMP responses for VRRPv2
    instances */
@@ -622,9 +656,6 @@
 /* Define to 1 to have keepalived SNMP checker support */
 #undef _WITH_SNMP_CHECKER_
 
-/* Define to 1 to have keepalived SNMP VRRP support */
-#undef _WITH_SNMP_KEEPALIVED_
-
 /* Define to 1 to have RFCv2 SNMP support */
 #undef _WITH_SNMP_RFCV2_
 
@@ -633,6 +664,9 @@
 
 /* Define to 1 to have RFC SNMP support */
 #undef _WITH_SNMP_RFC_
+
+/* Define to 1 to have keepalived SNMP VRRP support */
+#undef _WITH_SNMP_VRRP_
 
 /* Define to 1 if have SO_MARK */
 #undef _WITH_SO_MARK_

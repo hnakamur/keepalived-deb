@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _CHECK_API_H
@@ -67,8 +67,8 @@ extern list checkers_queue;
 #define CHECKER_GET_CURRENT() (LIST_TAIL_DATA(checkers_queue))
 #define CHECKER_GET() (CHECKER_DATA(CHECKER_GET_CURRENT()))
 #define CHECKER_GET_CO() (((checker_t *)CHECKER_GET_CURRENT())->co)
-#define CHECKER_VALUE_INT(X) (atoi(vector_slot(X,1)))
-#define CHECKER_VALUE_UINT(X) ((unsigned)strtoul(vector_slot(X,1), NULL, 10))
+#define CHECKER_VALUE_INT(X) (atoi(strvec_slot(X,1)))
+#define CHECKER_VALUE_UINT(X) ((unsigned)strtoul(strvec_slot(X,1), NULL, 10))
 #define CHECKER_VALUE_STRING(X) (set_value(X))
 #define CHECKER_HA_SUSPEND(C) ((C)->vs->ha_suspend)
 #define CHECKER_NEW_CO() ((conn_opts_t *) MALLOC(sizeof (conn_opts_t)))

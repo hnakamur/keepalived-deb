@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -79,7 +79,9 @@ static int print_vrrp_stats(thread_t * thread);
 #ifdef _WITH_JSON_
 static int print_vrrp_json(thread_t * thread);
 #endif
+#ifndef _DEBUG_
 static int reload_vrrp_thread(thread_t * thread);
+#endif
 
 static char *vrrp_syslog_ident;
 
@@ -106,7 +108,8 @@ stop_vrrp(int status)
 	/* Ensure any interfaces are in backup mode,
 	 * sending a priority 0 vrrp message
 	 */
-	restore_vrrp_interfaces();
+	if (!__test_bit(DONT_RELEASE_VRRP_BIT, &debug))
+		restore_vrrp_interfaces();
 
 #ifdef _HAVE_LIBIPTC_
 	iptables_fini();
@@ -117,7 +120,7 @@ stop_vrrp(int status)
 	netlink_rulelist(vrrp_data->static_rules, IPRULE_DEL, false);
 	netlink_rtlist(vrrp_data->static_routes, IPROUTE_DEL);
 #endif
-	netlink_iplist(vrrp_data->static_addresses, IPADDRESS_DEL);
+	netlink_iplist(vrrp_data->static_addresses, IPADDRESS_DEL, false);
 
 #ifdef _WITH_SNMP_
 	if (global_data->enable_snmp_keepalived || global_data->enable_snmp_rfcv2 || global_data->enable_snmp_rfcv3)
@@ -134,7 +137,8 @@ stop_vrrp(int status)
 	 * of an IGMP leave group being sent for some reason.
 	 * Since we are about to exit, it doesn't affect anything else
 	 * running. */
-	sleep(1);
+	if (!LIST_ISEMPTY(vrrp_data->vrrp))
+		sleep(1);
 
 	if (!__test_bit(DONT_RELEASE_VRRP_BIT, &debug))
 		shutdown_vrrp_instances();
@@ -146,7 +150,7 @@ stop_vrrp(int status)
 	}
 #endif
 
-	/* Terminate all script process */
+	/* Terminate all script processes */
 	script_killall(master, SIGTERM);
 
 	/* We mustn't receive a SIGCHLD after master is destroyed */
@@ -177,6 +181,8 @@ stop_vrrp(int status)
 	 */
 	log_message(LOG_INFO, "Stopped");
 
+	if (log_file_name)
+		close_log_file();
 	closelog();
 
 	FREE(config_id);
@@ -187,6 +193,7 @@ stop_vrrp(int status)
 	if (vrrp_syslog_ident)
 		free(vrrp_syslog_ident);
 #endif
+	close_std_fd();
 
 	exit(status);
 }
@@ -262,7 +269,7 @@ start_vrrp(void)
 	}
 	else {
 		/* Clear leftover static entries */
-		netlink_iplist(vrrp_data->static_addresses, IPADDRESS_DEL);
+		netlink_iplist(vrrp_data->static_addresses, IPADDRESS_DEL, false);
 #ifdef _HAVE_FIB_ROUTING_
 		netlink_rtlist(vrrp_data->static_routes, IPROUTE_DEL);
 		netlink_error_ignore = ENOENT;
@@ -287,9 +294,17 @@ start_vrrp(void)
 	 * has been called so we know whether we want IPv4 and/or IPv6 */
 	iptables_init();
 
+#if !defined _DEBUG_ && defined _WITH_LVS_
+	/* Only one process must run the script to process the global fifo,
+	 * so let the checker process do so. */
+	if (__test_bit(DAEMON_CHECKERS, &daemon_mode)) {
+		FREE_PTR(global_data->notify_fifo.script);
+		global_data->notify_fifo.script = NULL;
+	}
+#endif
+
 	/* Create a notify FIFO if needed, and open it */
-	if (global_data->vrrp_notify_fifo.name)
-		notify_fifo_open(&global_data->notify_fifo, &global_data->vrrp_notify_fifo, vrrp_notify_fifo_script_exit, "vrrp_");
+	notify_fifo_open(&global_data->notify_fifo, &global_data->vrrp_notify_fifo, vrrp_notify_fifo_script_exit, "vrrp_");
 
 	/* Make sure we don't have any old iptables/ipsets settings left around */
 #ifdef _HAVE_LIBIPTC_
@@ -318,7 +333,7 @@ start_vrrp(void)
 #endif
 
 	/* Set static entries */
-	netlink_iplist(vrrp_data->static_addresses, IPADDRESS_ADD);
+	netlink_iplist(vrrp_data->static_addresses, IPADDRESS_ADD, false);
 #ifdef _HAVE_FIB_ROUTING_
 	netlink_rtlist(vrrp_data->static_routes, IPROUTE_ADD);
 	netlink_rulelist(vrrp_data->static_rules, IPRULE_ADD, false);
@@ -329,6 +344,7 @@ start_vrrp(void)
 		list ifl;
 
 		dump_global_data(global_data);
+		dump_list(garp_delay);
 		dump_vrrp_data(vrrp_data);
 		ifl = get_if_list();
 		if (!LIST_ISEMPTY(ifl))
@@ -345,10 +361,51 @@ start_vrrp(void)
 			 VRRP_DISPATCHER);
 }
 
+#ifndef _DEBUG_
+static int
+send_reload_advert_thread(thread_t *thread)
+{
+	vrrp_t *vrrp = THREAD_ARG(thread);
+
+	if (vrrp->state == VRRP_STATE_MAST)
+		vrrp_send_adv(vrrp, vrrp->effective_priority);
+
+	/* If this is the last vrrp instance to send an advert, schedule the
+	 * actual reload. */
+	if (THREAD_VAL(thread))
+		thread_add_event(master, reload_vrrp_thread, NULL, 0);
+
+	return 0;
+}
+
 static void
 sighup_vrrp(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 {
-	thread_add_event(master, reload_vrrp_thread, NULL, 0);
+	element e;
+	vrrp_t *vrrp;
+	int num_master_inst = 0;
+	int i;
+
+	/* We want to send adverts for the vrrp instances which are
+	 * in master state. After that the reload can be initiated */
+	if (!LIST_ISEMPTY(vrrp_data->vrrp)) {
+		for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
+			vrrp = ELEMENT_DATA(e);
+			if (vrrp->state == VRRP_STATE_MAST)
+				num_master_inst++;
+		}
+
+		for (e = LIST_HEAD(vrrp_data->vrrp), i = 0; e; ELEMENT_NEXT(e)) {
+			vrrp = ELEMENT_DATA(e);
+			if (vrrp->state == VRRP_STATE_MAST) {
+				i++;
+				thread_add_event(master, send_reload_advert_thread, vrrp, i == num_master_inst);
+			}
+		}
+	}
+
+	if (num_master_inst == 0)
+		thread_add_event(master, reload_vrrp_thread, NULL, 0);
 }
 
 static void
@@ -462,6 +519,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_t * thread)
 
 	return 0;
 }
+#endif
 
 static int
 print_vrrp_data(__attribute__((unused)) thread_t * thread)
@@ -524,6 +582,9 @@ start_vrrp_child(void)
 	char *syslog_ident;
 
 	/* Initialize child process */
+	if (log_file_name)
+		flush_log_file();
+
 	pid = fork();
 
 	if (pid < 0) {
@@ -557,14 +618,29 @@ start_vrrp_child(void)
 	else
 		syslog_ident = PROG_VRRP;
 
-	openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-			    , (log_facility==LOG_DAEMON) ? LOG_LOCAL1 : log_facility);
+	if (!__test_bit(NO_SYSLOG_BIT, &debug))
+		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
+				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL1 : log_facility);
+
+	if (log_file_name)
+		open_log_file(log_file_name,
+				"vrrp",
+#if HAVE_DECL_CLONE_NEWNET
+				network_namespace,
+#else
+				NULL,
+#endif
+				instance_name);
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_VRRP, "VRRP Child process");
 #endif
 
 	free_parent_mallocs_startup(true);
+
+	/* Clear any child finder functions set in parent */
+	set_child_finder_name(NULL);
+	set_child_finder(NULL, NULL, NULL, NULL, NULL, 0);	/* Currently these won't be set */
 
 	/* Child process part, write pidfile */
 	if (!pidfile_write(vrrp_pidfile, getpid())) {
@@ -583,8 +659,10 @@ start_vrrp_child(void)
 	 */
 	UNSET_RELOAD;
 
+#ifndef _DEBUG_
 	/* Signal handling initialization */
 	vrrp_signal_init();
+#endif
 
 #ifdef _LIBNL_DYNAMIC_
 	libnl_init();
@@ -592,6 +670,10 @@ start_vrrp_child(void)
 
 	/* Start VRRP daemon */
 	start_vrrp();
+
+#ifdef _DEBUG_
+	return 0;
+#endif
 
 	/* Launch the scheduling I/O multiplexer */
 	launch_scheduler();

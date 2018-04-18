@@ -5,8 +5,6 @@
  *
  * Part:        Hash-related declarations (to break circular deps).
  *
- * Version:     hash.h 2013/07/22
- *
  * Authors:     Jan Pokorny, <jpokorny@redhat.com>
  *
  *              This program is distributed in the hope that it will be useful,
@@ -20,6 +18,7 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright 2013 Red Hat, Inc.
+ * Copyright (C) 2014-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _HASH_H
@@ -53,9 +52,9 @@ typedef union {
 	char			*dummy;
 } hash_context_t;
 
-typedef void (*hash_init_f)(hash_context_t *);
-typedef void (*hash_update_f)(hash_context_t *, const void *, unsigned long);
-typedef void (*hash_final_f)(unsigned char *, hash_context_t *);
+typedef int (*hash_init_f)(hash_context_t *);
+typedef int (*hash_update_f)(hash_context_t *, const void *, unsigned long);
+typedef int (*hash_final_f)(unsigned char *, hash_context_t *);
 
 typedef struct {
 	hash_init_f		init;

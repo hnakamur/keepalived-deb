@@ -5,8 +5,6 @@
  *
  * Part:        main.c include file.
  *
- * Version:     $Id: main.h,v 1.1.16 2009/02/14 03:25:07 acassen Exp $
- *
  * Authors:     Alexandre Cassen, <acassen@linux-vs.org>
  *
  *              This program is distributed in the hope that it will be useful,
@@ -19,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _MAIN_H
@@ -72,17 +70,23 @@ typedef struct {
 	char		*vhost;
 	int		verbose;
 	int		ssl;
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+	int		sni;
+#endif
 	SSL_CTX		*ctx;
 	SSL_METHOD	*meth;
 	enum		feat_hashes hash;
 	unsigned long	ref_time;
 	unsigned long	response_time;
-	unsigned int mark;
+#ifdef _WITH_SO_MARK_
+	unsigned int	mark;
+#endif
 } REQ;
 
 /* Global variables */
 extern thread_master_t *master;
 extern REQ *req;		/* Cmd line arguments */
+extern int exit_code;
 
 /* Data buffer length description */
 #define BUFSIZE		1024

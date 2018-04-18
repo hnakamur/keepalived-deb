@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -79,9 +79,9 @@ netlink_ipaddress(ip_address_t *ipaddress, int cmd)
 		char buf[256];
 	} req;
 #if HAVE_DECL_IFA_FLAGS
-	uint32_t ifa_flags;
+	uint32_t ifa_flags = 0;
 #else
-	uint8_t ifa_flags;
+	uint8_t ifa_flags = 0;
 #endif
 
 	memset(&req, 0, sizeof (req));
@@ -165,7 +165,7 @@ netlink_ipaddress(ip_address_t *ipaddress, int cmd)
 
 /* Add/Delete a list of IP addresses */
 bool
-netlink_iplist(list ip_list, int cmd)
+netlink_iplist(list ip_list, int cmd, bool force)
 {
 	ip_address_t *ipaddr;
 	element e;
@@ -183,7 +183,12 @@ netlink_iplist(list ip_list, int cmd)
 		ipaddr = ELEMENT_DATA(e);
 		if ((cmd == IPADDRESS_ADD && !ipaddr->set) ||
 		    (cmd == IPADDRESS_DEL &&
-		     (ipaddr->set || __test_bit(DONT_RELEASE_VRRP_BIT, &debug)))) {
+		     (force || ipaddr->set || __test_bit(DONT_RELEASE_VRRP_BIT, &debug)))) {
+			/* If we are removing addresses left over from previous run
+			 * and they don't exist, don't report an error */
+			if (force)
+				netlink_error_ignore = ENODEV;
+
 			if (netlink_ipaddress(ipaddr, cmd) > 0) {
 				ipaddr->set = !(cmd == IPADDRESS_DEL);
 				changed_entries = true;
@@ -473,6 +478,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp)
 	interface_t *ifp_local;
 	char *str;
 	unsigned int i = 0, addr_idx = 0;
+	unsigned int j;
 	uint8_t scope;
 	bool param_avail;
 	bool param_missing = false;
@@ -545,11 +551,11 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp)
 			if (!strcmp(param, "-") || !strcmp(param, "+")) {
 				if (new->ifa.ifa_prefixlen <= 30) {
 					new->u.sin.sin_brd = new->u.sin.sin_addr;
-					for (i = 31; i >= new->ifa.ifa_prefixlen; i--) {
+					for (j = 31; j >= new->ifa.ifa_prefixlen; j--) {
 						if (param[0] == '+')
-							new->u.sin.sin_brd.s_addr |= htonl(1U<<(31-i));
+							new->u.sin.sin_brd.s_addr |= htonl(1U<<(31-j));
 						else
-							new->u.sin.sin_brd.s_addr &= ~htonl(1U<<(31-i));
+							new->u.sin.sin_brd.s_addr &= ~htonl(1U<<(31-j));
 					}
 				}
 			}
@@ -670,7 +676,7 @@ clear_diff_address(struct ipt_handle *h, list l, list n)
 	/* All addresses removed */
 	if (LIST_ISEMPTY(n)) {
 		log_message(LOG_INFO, "Removing a complete VIP or e-VIP block");
-		netlink_iplist(l, IPADDRESS_DEL);
+		netlink_iplist(l, IPADDRESS_DEL, false);
 		handle_iptable_rule_to_iplist(h, l, IPADDRESS_DEL, false);
 		return;
 	}

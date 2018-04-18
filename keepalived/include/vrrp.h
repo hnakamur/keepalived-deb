@@ -18,7 +18,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_H
@@ -229,8 +229,10 @@ typedef struct _vrrp_t {
 							 * prio is allowed.  0 means no delay.
 							 */
 	timeval_t		preempt_time;		/* Time after which preemption can happen */
-	int			state;			/* internal state (init/backup/master) */
+	int			state;			/* internal state (init/backup/master/fault) */
+#ifdef _WITH_SNMP_VRRP_
 	int			init_state;		/* the initial state of the instance */
+#endif
 	int			wantstate;		/* user explicitly wants a state (back/mast) */
 	int			fd_in;			/* IN socket descriptor */
 	int			fd_out;			/* OUT socket descriptor */
@@ -285,6 +287,7 @@ typedef struct _vrrp_t {
 #define VRRP_STATE_MAST			2	/* rfc2338.6.4.3 */
 #define VRRP_STATE_FAULT		3	/* internal */
 #define VRRP_STATE_GOTO_MASTER		4	/* internal */
+#define VRRP_STATE_MASTER_RELOAD	96	/* internal */
 #define VRRP_STATE_STOP			97	/* internal */
 #define VRRP_STATE_GOTO_FAULT		98	/* internal */
 #define VRRP_DISPATCHER			99	/* internal */

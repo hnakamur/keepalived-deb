@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_IF_H
@@ -29,6 +29,11 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#ifdef _HAVE_NET_LINUX_IF_H_COLLISION_
+#define _LINUX_IF_H
+#endif
+#include <linux/netdevice.h>
 
 /* needed to get correct values for SIOC* */
 #include <linux/sockios.h>
@@ -39,9 +44,8 @@
 
 #define LINK_UP   1
 #define LINK_DOWN 0
-#define IF_NAMESIZ    20	/* Max interface length size */
-#define IF_HWADDR_MAX 20	/* Max MAC address length size */
 #define ARPHRD_ETHER 1
+#define ARPHRD_INFINIBAND 32
 #define ARPHRD_LOOPBACK 772
 #define POLLING_DELAY TIMER_HZ
 
@@ -72,14 +76,15 @@ typedef struct _garp_delay {
 
 /* Interface structure definition */
 typedef struct _interface {
-	char			ifname[IF_NAMESIZ + 1];	/* Interface name */
+	char			ifname[IFNAMSIZ];	/* Interface name */
 	ifindex_t		ifindex;		/* Interface index */
 	struct in_addr		sin_addr;		/* IPv4 primary IPv4 address */
 	struct in6_addr		sin6_addr;		/* IPv6 link address */
 	unsigned long		flags;			/* flags */
 	uint32_t		mtu;			/* MTU for this interface_t */
 	unsigned short		hw_type;		/* Type of hardware address */
-	u_char			hw_addr[IF_HWADDR_MAX];	/* MAC address */
+	u_char			hw_addr[MAX_ADDR_LEN];	/* MAC address */
+	u_char			hw_addr_bcast[MAX_ADDR_LEN]; /* broadcast address */
 	size_t			hw_addr_len;		/* MAC addresss length */
 	int			lb_type;		/* Interface regs selection */
 	bool			linkbeat;		/* LinkBeat from MII BMSR req, SIOCETHTOOL or SIOCGIFFLAGS ioctls */
@@ -162,5 +167,6 @@ extern int if_setsockopt_mcast_hops(sa_family_t, int *);
 extern int if_setsockopt_mcast_if(sa_family_t, int *, interface_t *);
 extern int if_setsockopt_priority(int *, int);
 extern int if_setsockopt_rcvbuf(int *, int);
+extern void print_interface_list(FILE *fp);
 
 #endif

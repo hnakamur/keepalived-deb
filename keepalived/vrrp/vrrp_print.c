@@ -19,6 +19,7 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright (C) 2012 John Southworth, <john.southworth@vyatta.com>
+ * Copyright (C) 2015-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -27,6 +28,7 @@
 #include "vrrp.h"
 #include "vrrp_data.h"
 #include "vrrp_print.h"
+#include "vrrp_ipaddress.h"
 #ifdef _HAVE_FIB_ROUTING_
 #include "vrrp_iproute.h"
 #include "vrrp_iprule.h"
@@ -34,6 +36,7 @@
 #include "keepalived_netlink.h"
 #include "rttables.h"
 #include "logger.h"
+#include "vrrp_if.h"
 
 #include <time.h>
 #include <errno.h>
@@ -81,8 +84,7 @@ vgroup_print(FILE *file, void *data)
 static void
 vscript_print(FILE *file, void *data)
 {
-	tracked_sc_t *tsc = data;
-	vrrp_script_t *vscript = tsc->scr;
+	vrrp_script_t *vscript = data;
 	const char *str;
 
 	fprintf(file, " VRRP Script = %s\n", vscript->sname);
@@ -94,20 +96,28 @@ vscript_print(FILE *file, void *data)
 	fprintf(file, "   Insecure = %s\n", vscript->insecure ? "yes" : "no");
 	fprintf(file, "   uid:gid = %d:%d\n", vscript->uid, vscript->gid);
 
-	switch (vscript->result) {
-	case VRRP_SCRIPT_STATUS_INIT:
+	switch (vscript->init_state) {
+	case SCRIPT_INIT_STATE_INIT:
 		str = "INIT"; break;
-	case VRRP_SCRIPT_STATUS_INIT_GOOD:
+	case SCRIPT_INIT_STATE_GOOD:
 		str = "INIT/GOOD"; break;
-	case VRRP_SCRIPT_STATUS_INIT_FAILED:
+	case SCRIPT_INIT_STATE_FAILED:
 		str = "INIT/FAILED"; break;
-	case VRRP_SCRIPT_STATUS_DISABLED:
+	case SCRIPT_INIT_STATE_DISABLED:
 		str = "DISABLED"; break;
 	default:
 		str = (vscript->result >= vscript->rise) ? "GOOD" : "BAD";
 	}
 	fprintf(file, "   Status = %s\n", str);
-	fprintf(file, "   Interface weight %d\n", tsc->weight);
+}
+
+static void
+script_print(FILE *file, void *data)
+{
+	tracked_sc_t *tsc = data;
+	vrrp_script_t *vscript = tsc->scr;
+
+	fprintf(file, "     %s weight %d\n", vscript->sname, tsc->weight);
 }
 
 static void
@@ -177,58 +187,9 @@ rule_print(FILE *file, void *data)
 static void
 if_print(FILE *file, void * data)
 {
-	tracked_if_t *tip = data;
-	interface_t *ifp = tip->ifp;
-	char addr_str[INET6_ADDRSTRLEN];
-	int weight = tip->weight;
-
-	fprintf(file, "------< NIC >------\n");
-	fprintf(file, " Name = %s\n", ifp->ifname);
-	fprintf(file, " index = %u\n", ifp->ifindex);
-	fprintf(file, " IPv4 address = %s\n",
-		inet_ntop2(ifp->sin_addr.s_addr));
-	inet_ntop(AF_INET6, &ifp->sin6_addr, addr_str, sizeof(addr_str));
-	fprintf(file, " IPv6 address = %s\n", addr_str);
-
-	/* FIXME: Harcoded for ethernet */
-	if (ifp->hw_type == ARPHRD_ETHER)
-	fprintf(file, " MAC = %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
-		ifp->hw_addr[0], ifp->hw_addr[1], ifp->hw_addr[2]
-		, ifp->hw_addr[3], ifp->hw_addr[4], ifp->hw_addr[5]);
-
-	if (ifp->flags & IFF_UP)
-		fprintf(file, " is UP\n");
-
-	if (ifp->flags & IFF_RUNNING)
-		fprintf(file, " is RUNNING\n");
-
-	if (!(ifp->flags & IFF_UP) && !(ifp->flags & IFF_RUNNING))
-		fprintf(file, " is DOWN\n");
-
-	if (weight)
-		fprintf(file, " weight = %d\n", weight);
-
-	fprintf(file, " MTU = %d\n", ifp->mtu);
-
-	switch (ifp->hw_type) {
-	case ARPHRD_LOOPBACK:
-		fprintf(file, " HW Type = LOOPBACK\n");
-		break;
-	case ARPHRD_ETHER:
-		fprintf(file, " HW Type = ETHERNET\n");
-		break;
-	default:
-		fprintf(file, " HW Type = UNKNOWN\n");
-		break;
-	}
-
-	/* MII channel supported ? */
-	if (IF_MII_SUPPORTED(ifp))
-		fprintf(file, " NIC support MII regs\n");
-	else if (IF_ETHTOOL_SUPPORTED(ifp))
-		fprintf(file, " NIC support ETHTOOL GLINK interface\n");
-	else
-		fprintf(file, " Enabling NIC ioctl refresh polling\n");
+	/* Track interface dump */
+        tracked_if_t *tip = data;
+        fprintf(file, "     %s weight %d\n", IF_NAME(tip->ifp), tip->weight);
 }
 
 static void
@@ -244,19 +205,20 @@ vrrp_print(FILE *file, void *data)
 	fprintf(file, "   VRRP Version = %d\n", vrrp->version);
 	if (vrrp->family == AF_INET6)
 		fprintf(file, "   Using Native IPv6\n");
+	fprintf(file, "   State = ");
 	if (vrrp->state == VRRP_STATE_BACK) {
-		fprintf(file, "   State = BACKUP\n");
+		fprintf(file, "BACKUP\n");
 		fprintf(file, "   Master router = %s\n",
 			inet_sockaddrtos(&vrrp->master_saddr));
 		fprintf(file, "   Master priority = %d\n",
 			vrrp->master_priority);
 	}
 	else if (vrrp->state == VRRP_STATE_FAULT)
-		fprintf(file, "   State = FAULT\n");
+		fprintf(file, "FAULT\n");
 	else if (vrrp->state == VRRP_STATE_MAST)
-		fprintf(file, "   State = MASTER\n");
+		fprintf(file, "MASTER\n");
 	else
-		fprintf(file, "   State = %d\n", vrrp->state);
+		fprintf(file, "%d\n", vrrp->state);
 	ctime_r(&vrrp->last_transition.tv_sec, time_str);
 	time_str[sizeof(time_str)-2] = '\0';	/* Remove '\n' char */
 	fprintf(file, "   Last transition = %ld (%s)\n",
@@ -322,7 +284,7 @@ vrrp_print(FILE *file, void *data)
 	if (!LIST_ISEMPTY(vrrp->track_script)) {
 		fprintf(file, "   Tracked scripts = %d\n",
 		       LIST_SIZE(vrrp->track_script));
-		vrrp_print_list(file, vrrp->track_script, &vscript_print);
+		vrrp_print_list(file, vrrp->track_script, &script_print);
 	}
 	if (!LIST_ISEMPTY(vrrp->vip)) {
 		fprintf(file, "   Virtual IP = %d\n", LIST_SIZE(vrrp->vip));
@@ -338,7 +300,7 @@ vrrp_print(FILE *file, void *data)
 			LIST_SIZE(vrrp->unicast_peer));
 		vrrp_print_list(file, vrrp->unicast_peer, &sockaddr_print);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
-		fprintf(file, "   Unicast checksum compatibility = %s",
+		fprintf(file, "   Unicast checksum compatibility = %s\n",
 				vrrp->unicast_chksum_compat == CHKSUM_COMPATIBILITY_NONE ? "no" :
 			        vrrp->unicast_chksum_compat == CHKSUM_COMPATIBILITY_NEVER ? "never" :
 			        vrrp->unicast_chksum_compat == CHKSUM_COMPATIBILITY_CONFIG ? "config" :
@@ -393,6 +355,14 @@ vrrp_print_data(void)
 		fprintf(file, "------< VRRP Sync groups >------\n");
 		vrrp_print_list(file, vrrp_data->vrrp_sync_group, &vgroup_print);
 	}
+
+	if (!LIST_ISEMPTY(vrrp_data->vrrp_script)) {
+		fprintf(file, "------< VRRP Scripts >------\n");
+		vrrp_print_list(file, vrrp_data->vrrp_script, &vscript_print);
+	}
+
+	print_interface_list(file);
+
 	fclose(file);
 
 	clear_rt_names();

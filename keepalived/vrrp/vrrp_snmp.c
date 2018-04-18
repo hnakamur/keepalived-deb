@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /*
@@ -108,7 +108,7 @@
 
 #include "snmp.h"
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 /* VRRP SNMP defines */
 #define VRRP_OID KEEPALIVED_OID, 2
 
@@ -205,6 +205,7 @@ enum snmp_rule_magic {
 	VRRP_SNMP_RULE_TUNNELID_LOW,
 	VRRP_SNMP_RULE_UID_RANGE_START,
 	VRRP_SNMP_RULE_UID_RANGE_END,
+	VRRP_SNMP_RULE_L3MDEV,
 };
 
 enum snmp_route_magic {
@@ -261,6 +262,7 @@ enum snmp_route_magic {
 	VRRP_SNMP_ROUTE_ENCAP_TTL,
 	VRRP_SNMP_ROUTE_ENCAP_FLAGS,
 	VRRP_SNMP_ROUTE_ENCAP_ILA_LOCATOR,
+	VRRP_SNMP_ROUTE_FASTOPEN_NO_COOKIE,
 };
 
 enum snmp_next_hop_magic {
@@ -457,7 +459,7 @@ sprint_oid(char *str, oid* oid, int len)
 }
 #endif
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 /* Convert VRRP state to SNMP state */
 static int
 vrrp_snmp_state(int state)
@@ -490,14 +492,14 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = scr->weight;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_SCRIPT_RESULT:
-		switch (scr->result) {
-		case VRRP_SCRIPT_STATUS_INIT:
+		switch (scr->init_state) {
+		case SCRIPT_INIT_STATE_INIT:
 			long_ret.u = 1; break;
-		case VRRP_SCRIPT_STATUS_INIT_GOOD:
+		case SCRIPT_INIT_STATE_GOOD:
 			long_ret.u = 4; break;
-		case VRRP_SCRIPT_STATUS_INIT_FAILED:
+		case SCRIPT_INIT_STATE_FAILED:
 			long_ret.u = 5; break;
-		case VRRP_SCRIPT_STATUS_DISABLED:
+		case SCRIPT_INIT_STATE_DISABLED:
 			long_ret.u = 0; break;
 		default:
 			long_ret.u = (scr->result >= scr->rise) ? 3 : 2;
@@ -756,16 +758,16 @@ vrrp_snmp_address(struct variable *vp, oid *name, size_t *length,
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_ADDRESS_VALUE:
 		if (addr->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof addr->u.sin6_addr;
 			return (u_char *)&addr->u.sin6_addr;
 		} else {
-			*var_len = 4;
+			*var_len = sizeof addr->u.sin.sin_addr;
 			return (u_char *)&addr->u.sin.sin_addr;
 		}
 		break;
 	case VRRP_SNMP_ADDRESS_BROADCAST:
 		if (addr->ifa.ifa_family == AF_INET6) break;
-		*var_len = 4;
+		*var_len = sizeof addr->u.sin.sin_brd;
 		return (u_char *)&addr->u.sin.sin_brd;
 	case VRRP_SNMP_ADDRESS_MASK:
 		long_ret.u = addr->ifa.ifa_prefixlen;
@@ -834,10 +836,10 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		if (!route->dst)
 			break;
 		if (route->dst->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof route->dst->u.sin6_addr;
 			return (u_char *)&route->dst->u.sin6_addr;
 		}
-		*var_len = 4;
+		*var_len = sizeof route->dst->u.sin.sin_addr;
 		return (u_char *)&route->dst->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_DESTINATIONMASK:
 		if (!route->dst)
@@ -848,10 +850,10 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		if (!route->via)
 			break;
 		if (route->via->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof route->via->u.sin6_addr;
 			return (u_char *)&route->via->u.sin6_addr;
 		}
-		*var_len = 4;
+		*var_len = sizeof route->via->u.sin.sin_addr;
 		return (u_char *)&route->via->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_SECONDARYGATEWAY:
 		if (LIST_ISEMPTY(route->nhs) || LIST_SIZE(route->nhs) != 1)
@@ -862,19 +864,19 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 			break;
 #endif
 		if (gw2->addr->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof gw2->addr->u.sin6_addr;
 			return (u_char *)&gw2->addr->u.sin6_addr;
 		}
-		*var_len = 4;
+		*var_len = sizeof gw2->addr->u.sin.sin_addr;
 		return (u_char *)&gw2->addr->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_SOURCE:
 		if (!route->pref_src)
 			break;
 		if (route->pref_src->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof route->pref_src->u.sin6_addr;
 			return (u_char *)&route->pref_src->u.sin6_addr;
 		}
-		*var_len = 4;
+		*var_len = sizeof route->pref_src->u.sin.sin_addr;
 		return (u_char *)&route->pref_src->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_METRIC:
 		long_ret.u = route->metric;
@@ -926,10 +928,10 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		if (!route->src)
 			break;
 		if (route->src->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof route->src->u.sin6_addr;
 			return (u_char *)&route->src->u.sin6_addr;
 		} else {
-			*var_len = 4;
+			*var_len = sizeof route->src->u.sin.sin_addr;
 			return (u_char *)&route->src->u.sin.sin_addr;
 		}
 	case VRRP_SNMP_ROUTE_FROM_ADDRESS_MASK:
@@ -1081,6 +1083,15 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 			route->pref == ICMPV6_ROUTER_PREF_LOW ? 1 :
 			route->pref == ICMPV6_ROUTER_PREF_MEDIUM ? 2 :
 			route->pref == ICMPV6_ROUTER_PREF_HIGH ? 3 : 0;
+		return (u_char *)&long_ret;
+#endif
+	case VRRP_SNMP_ROUTE_FASTOPEN_NO_COOKIE:
+#if !HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+		break;
+#else
+		if (!(route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE))
+			break;
+		long_ret.u = route->fastopen_no_cookie;
 		return (u_char *)&long_ret;
 #endif
 	case VRRP_SNMP_ROUTE_REALM_DST:
@@ -1237,10 +1248,10 @@ vrrp_snmp_next_hop(struct variable *vp, oid *name, size_t *length,
 		if (!nh->addr)
 			break;
 		if (nh->addr->ifa.ifa_family == AF_INET6) {
-			*var_len = 16;
+			*var_len = sizeof nh->addr->u.sin6_addr;
 			return (u_char *)&nh->addr->u.sin6_addr;
 		}
-		*var_len = 4;
+		*var_len = sizeof nh->addr->u.sin.sin_addr;
 		return (u_char *)&nh->addr->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_NEXT_HOP_IF_INDEX:
 		if (!nh->ifp)
@@ -1475,6 +1486,14 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_RULE_UID_RANGE_END:
 		if (rule->mask & IPRULE_BIT_UID_RANGE)
 			long_ret.u = rule->uid_range.end;
+		else
+#endif
+			break;
+		return (u_char *)&long_ret;
+#if HAVE_DECL_FRA_L3MDEV
+	case VRRP_SNMP_RULE_L3MDEV:
+		if (rule->l3mdev)
+			long_ret.u = 1;
 		else
 #endif
 			break;
@@ -2323,6 +2342,10 @@ static struct variable8 vrrp_vars[] = {
 	{VRRP_SNMP_ROUTE_ENCAP_ILA_LOCATOR, ASN_COUNTER64, RONLY,
 	 vrrp_snmp_encap, 3, {7, 1, 54}},
 #endif
+#if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+	{VRRP_SNMP_ROUTE_FASTOPEN_NO_COOKIE, ASN_UNSIGNED, RONLY,
+	 vrrp_snmp_route, 3, {7, 1, 55}},
+#endif
 #endif
 
 	 /* vrrpRuleTable */
@@ -2382,12 +2405,16 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_rule, 3, {8, 1, 28}},
 	{VRRP_SNMP_RULE_TUNNELID_LOW, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 29}},
-#endif
 #if HAVE_DECL_FRA_UID_RANGE
 	{VRRP_SNMP_RULE_UID_RANGE_START, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 30}},
 	{VRRP_SNMP_RULE_UID_RANGE_END, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 31}},
+#endif
+#if HAVE_DECL_FRA_L3MDEV
+	{VRRP_SNMP_RULE_L3MDEV, ASN_UNSIGNED, RONLY,
+	 vrrp_snmp_rule, 3, {8, 1, 32}},
+#endif
 #endif
 
 	/* vrrpScriptTable */
@@ -2852,6 +2879,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 			long_ret.u = LIST_SIZE(rt->vip);
 		return (u_char*)&long_ret;
 	case VRRP_RFC_SNMP_OPER_MIP:
+		*var_len = sizeof ((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 		return (u_char*)&((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 	case VRRP_RFC_SNMP_OPER_PIP:
 #ifdef _HAVE_VRRP_VMAC_
@@ -2860,6 +2888,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		else
 #endif
 			ifp = rt->ifp;
+		*var_len = sizeof ifp->sin_addr;
 		return (u_char*)&ifp->sin_addr;
 	case VRRP_RFC_SNMP_OPER_AUTH_TYPE:
 #ifdef _WITH_VRRP_AUTH_
@@ -2921,6 +2950,7 @@ vrrp_rfcv2_snmp_assoiptable(struct variable *vp, oid *name, size_t *length,
 
 	switch (vp->magic) {
 	case VRRP_RFC_SNMP_ASSOC_IP_ADDR:
+		*var_len = sizeof addr->u.sin.sin_addr;
 		return (u_char*)&addr->u.sin.sin_addr;
 	case VRRP_RFC_SNMP_ASSOC_IP_ADDR_ROW:
 		/* If we implement write access, then this could be 2 for down */
@@ -3494,7 +3524,7 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 {
 	vrrp_t *rt;
 	interface_t* ifp;
-	timeval_t uptime;
+	timeval_t uptime, time_now;
 
 	if ((rt = snmp_rfcv3_header_list_table(vp, name, length, exact,
 					     var_len, write_method)) == NULL)
@@ -3558,7 +3588,8 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 	case VRRP_RFCv3_SNMP_OPER_VR_UPTIME:
 		if (rt->state == VRRP_STATE_BACK ||
 		    rt->state == VRRP_STATE_MAST) {
-			uptime = timer_sub(rt->stats->uptime, vrrp_start_time);
+			time_now = timer_now();
+			uptime = timer_sub(time_now, rt->stats->uptime);
 			long_ret.s = uptime.tv_sec * 100 + uptime.tv_usec / 10000;	// unit is centi-seconds
 		}
 		else
@@ -3696,7 +3727,7 @@ vrrp_rfcv3_snmp_statstable(struct variable *vp, oid *name, size_t *length,
 		ret = rt->stats->become_master;
 		return (u_char *)&ret;
 	case VRRP_RFCv3_SNMP_STATS_MASTER_REASON:
-		if (rt->state != VRRP_STATE_MAST)
+		if (!rt->stats->become_master)
 			ret = VRRPV3_MASTER_REASON_NOT_MASTER;
 		else
 			ret = rt->stats->master_reason;
@@ -3940,7 +3971,7 @@ vrrp_snmp_agent_init(const char *snmp_socket)
 	/* We let the check process handle the global OID if it is running and with snmp */
 	snmp_agent_init(snmp_socket, vrrp_handles_global_oid());
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_keepalived)
 		snmp_register_mib(vrrp_oid, OID_LENGTH(vrrp_oid), "KEEPALIVED-VRRP",
 				  (struct variable *)vrrp_vars,
@@ -3966,7 +3997,7 @@ vrrp_snmp_agent_init(const char *snmp_socket)
 void
 vrrp_snmp_agent_close(void)
 {
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_keepalived)
 		snmp_unregister_mib(vrrp_oid, OID_LENGTH(vrrp_oid));
 #endif

@@ -2,7 +2,7 @@
 #
 # Keepalived OpenSource project.
 #
-# Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
 GIT_COMMIT_FILE		= git-commit.h
 
@@ -17,6 +17,7 @@ noinst_LIBRARIES	= liblib.a
 
 liblib_a_SOURCES	= memory.c utils.c notify.c timer.c scheduler.c \
 	vector.c list.c html.c parser.c signals.c logger.c rttables.c \
+	assert.c \
 	bitops.h timer.h scheduler.h rttables.h vector.h parser.h \
 	signals.h notify.h logger.h list.h memory.h html.h utils.h
 

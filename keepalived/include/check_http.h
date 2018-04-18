@@ -18,7 +18,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _CHECK_HTTP_H
@@ -47,6 +47,8 @@ typedef struct _request {
 	SSL				*ssl;
 	BIO				*bio;
 	MD5_CTX				context;
+	size_t				content_len;
+	size_t				rx_bytes;
 } request_t;
 
 typedef struct _url {
@@ -54,6 +56,7 @@ typedef struct _url {
 	char				*digest;
 	int				status_code;
 	char				*virtualhost;
+	ssize_t				len_mismatch;
 } url_t;
 
 typedef struct _http_checker {
@@ -62,6 +65,9 @@ typedef struct _http_checker {
 	request_t			*req;		/* GET buffer and SSL args */
 	list				url;
 	char				*virtualhost;
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+	bool				enable_sni;
+#endif
 } http_checker_t;
 
 /* global defs */

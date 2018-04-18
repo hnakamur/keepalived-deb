@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -38,26 +38,22 @@ vrrp_init_instance_sands(vrrp_t * vrrp)
 {
 	set_time_now();
 
-	if (vrrp->state == VRRP_STATE_MAST	  ||
+	if (vrrp->state == VRRP_STATE_MASTER_RELOAD)
+		vrrp->sands = time_now;
+	else if (vrrp->state == VRRP_STATE_MAST	  ||
 	    vrrp->state == VRRP_STATE_GOTO_MASTER ||
 	    vrrp->state == VRRP_STATE_GOTO_FAULT  ||
-	    vrrp->wantstate == VRRP_STATE_GOTO_MASTER) {
-// TIMER  - GOTO_MASTER shouldn't be adver_int. Look at circumstances to set GOTO_MASTER
-// i) backup and expire timer
-// ii) backup and receive prio 0
-// iii) master and receive higher prio advert
+	    vrrp->wantstate == VRRP_STATE_GOTO_MASTER)
 		vrrp->sands = timer_add_long(time_now, vrrp->adver_int);
-		return;
-	}
-
-	/*
-	 * When in the BACKUP state the expiry timer should be updated to
-	 * time_now plus the Master Down Timer, when a non-preemptable packet is
-	 * received. (When a preemptable packet is received, the wantstate is
-	 * moved to GOTO_MASTER and this condition is caught above).
-	 */
-	if (vrrp->state == VRRP_STATE_BACK || vrrp->state == VRRP_STATE_FAULT)
+	else if (vrrp->state == VRRP_STATE_BACK || vrrp->state == VRRP_STATE_FAULT) {
+		/*
+		 * When in the BACKUP state the expiry timer should be updated to
+		 * time_now plus the Master Down Timer, when a non-preemptable packet is
+		 * received. (When a preemptable packet is received, the wantstate is
+		 * moved to GOTO_MASTER and this condition is caught above).
+		 */
 		vrrp->sands = timer_add_long(time_now, vrrp->ms_down_timer);
+	}
 }
 
 /* Instance name lookup */
@@ -83,7 +79,6 @@ vrrp_sync_set_group(vrrp_sgroup_t *vgroup)
 	vrrp_t *vrrp;
 	char *str;
 	unsigned int i;
-	vrrp_t *vrrp_last = NULL;
 
 	/* Can't handle no members of the group */
 	if (!vgroup->iname)
@@ -100,19 +95,17 @@ vrrp_sync_set_group(vrrp_sgroup_t *vgroup)
 			else {
 				list_add(vgroup->index_list, vrrp);
 				vrrp->sync = vgroup;
-				vrrp_last = vrrp;
 			}
 		}
 		else
 			log_message(LOG_INFO, "Virtual router %s specified in sync group %s doesn't exist - ignoring",
 				str, vgroup->gname);
 	}
+
 	if (LIST_SIZE(vgroup->index_list) <= 1) {
-		/* The sync group will be removed by the calling function */
-		log_message(LOG_INFO, "Sync group %s has only %d virtual router(s) - removing", vgroup->gname, LIST_SIZE(vgroup->index_list));
-		/* If there is only one entry in the group, remove the group from the vrrp entry */
-		if (vrrp_last)
-			vrrp_last->sync = NULL;
+		/* The sync group will be removed by the calling function if it has no members */
+		log_message(LOG_INFO, "Sync group %s has only %d virtual router(s) - %s", vgroup->gname, LIST_SIZE(vgroup->index_list),
+				LIST_SIZE(vgroup->index_list) ? "this probably isn't what you want" : "removing");
 	}
 }
 
@@ -251,7 +244,7 @@ vrrp_sync_backup(vrrp_t * vrrp)
 	vgroup->state = VRRP_STATE_BACK;
 	vrrp_sync_smtp_notifier(vgroup);
 	notify_group_exec(vgroup, VRRP_STATE_BACK);
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	vrrp_snmp_group_trap(vgroup);
 #endif
 }
@@ -286,7 +279,7 @@ vrrp_sync_master(vrrp_t * vrrp)
 	vgroup->state = VRRP_STATE_MAST;
 	vrrp_sync_smtp_notifier(vgroup);
 	notify_group_exec(vgroup, VRRP_STATE_MAST);
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	vrrp_snmp_group_trap(vgroup);
 #endif
 }
@@ -318,13 +311,18 @@ vrrp_sync_fault(vrrp_t * vrrp)
 		if (isync != vrrp && isync->state != VRRP_STATE_FAULT) {
 			if (isync->state == VRRP_STATE_MAST)
 				isync->wantstate = VRRP_STATE_GOTO_FAULT;
-			if (isync->state == VRRP_STATE_BACK)
+			if (isync->state == VRRP_STATE_BACK) {
 				isync->state = VRRP_STATE_FAULT;
+				notify_instance_exec(isync, VRRP_STATE_FAULT);
+#ifdef _WITH_SNMP_VRRP_
+				vrrp_snmp_instance_trap(isync);
+#endif
+			}
 		}
 	}
 	vgroup->state = VRRP_STATE_FAULT;
 	notify_group_exec(vgroup, VRRP_STATE_FAULT);
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	vrrp_snmp_group_trap(vgroup);
 #endif
 }

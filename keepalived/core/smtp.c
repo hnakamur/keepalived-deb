@@ -19,7 +19,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -660,8 +660,32 @@ smtp_alert(
 		else
 			snprintf(smtp->subject, MAX_HEADERS_LENGTH, "%s", subject);
 
-		strncpy(smtp->body, body, MAX_BODY_LENGTH);
+		strncpy(smtp->body, body, MAX_BODY_LENGTH - 1);
+		smtp->body[MAX_BODY_LENGTH - 1]= '\0';
+
 		build_to_header_rcpt_addrs(smtp);
+
+#ifdef _SMTP_ALERT_DEBUG_
+		FILE *fp = fopen("/tmp/smtp-alert.log", "a");
+		struct tm tm;
+		char time_buf[25];
+		int time_buf_len;
+
+		localtime_r(&time_now.tv_sec, &tm);
+		time_buf_len = strftime(time_buf, sizeof time_buf, "%a %b %e %X %Y", &tm);
+
+		fprintf(fp, "%s: %s -> %s\n"
+			    "%*sSubject: %s\n"
+			    "%*sBody:    %s\n\n",
+			    time_buf, global_data->email_from, smtp->email_to,
+			    time_buf_len - 7, "", smtp->subject,
+			    time_buf_len - 7, "", smtp->body);
+
+		fclose(fp);
+
+		free_smtp_all(smtp);
+		return;
+#endif
 
 		smtp_connect(smtp);
 	}

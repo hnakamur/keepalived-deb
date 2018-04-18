@@ -17,25 +17,23 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
 #include "git-commit.h"
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include <stdlib.h>
 #include <sys/utsname.h>
 #include <sys/resource.h>
 #include <stdbool.h>
+#include <linux/version.h>
 
 #include "main.h"
 #include "config.h"
 #include "git-commit.h"
+#include "utils.h"
 #include "signals.h"
 #include "pidfile.h"
 #include "bitops.h"
@@ -126,13 +124,17 @@ free_parent_mallocs_startup(bool am_child)
 #else
 		free(syslog_ident);
 #endif
+		syslog_ident = NULL;
 
-		if (orig_core_dump_pattern)
+		if (orig_core_dump_pattern) {
 			FREE_PTR(orig_core_dump_pattern);
+			orig_core_dump_pattern = NULL;
+		}
 	}
 
 	if (free_main_pidfile) {
 		FREE_PTR(main_pidfile);
+		main_pidfile = NULL;
 		free_main_pidfile = false;
 	}
 }
@@ -224,25 +226,21 @@ make_pidfile_name(const char* start, const char* instance, const char* extn)
 	return name;
 }
 
-static bool
-find_keepalived_child(pid_t pid, char const **prog_name)
+static char const *
+find_keepalived_child_name(pid_t pid)
 {
 #ifdef _WITH_LVS_
-	if (pid == checkers_child) {
-		*prog_name = PROG_CHECK;
-		return true;
-	}
+	if (pid == checkers_child)
+		return PROG_CHECK;
 #endif
 #ifdef _WITH_VRRP_
-	if (pid == vrrp_child) {
-		*prog_name = PROG_VRRP;
-		return true;
-	}
+	if (pid == vrrp_child)
+		return PROG_VRRP;
 #endif
-	return false;
+
+	return NULL;
 }
 
-#if HAVE_DECL_CLONE_NEWNET
 static vector_t *
 global_init_keywords(void)
 {
@@ -264,7 +262,6 @@ read_config_file(void)
 {
 	init_data(conf_file, global_init_keywords);
 }
-#endif
 
 /* Daemon stop sequence */
 static void
@@ -444,12 +441,14 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	if (!sigismember(&old_set, SIGCHLD))
 		sigprocmask(SIG_UNBLOCK, &child_wait, NULL);
 }
+#endif
 
 /* Initialize signal handler */
 static void
 signal_init(void)
 {
 	signal_handler_init();
+#ifndef _DEBUG_
 	signal_set(SIGHUP, propogate_signal, NULL);
 	signal_set(SIGUSR1, propogate_signal, NULL);
 	signal_set(SIGUSR2, propogate_signal, NULL);
@@ -458,9 +457,9 @@ signal_init(void)
 #endif
 	signal_set(SIGINT, sigend, NULL);
 	signal_set(SIGTERM, sigend, NULL);
+#endif
 	signal_ignore(SIGPIPE);
 }
-#endif
 
 /* To create a core file when abrt is running (a RedHat distribution),
  * and keepalived isn't installed from an RPM package, edit the file
@@ -541,6 +540,9 @@ usage(const char *prog)
 	fprintf(stderr, "  -l, --log-console            Log messages to local console\n");
 	fprintf(stderr, "  -D, --log-detail             Detailed log messages\n");
 	fprintf(stderr, "  -S, --log-facility=[0-7]     Set syslog facility to LOG_LOCAL[0-7]\n");
+	fprintf(stderr, "  -g, --log-file=FILE          Also log to FILE (default /tmp/keepalived.log)\n");
+	fprintf(stderr, "      --flush-log-file         Flush log file on write\n");
+	fprintf(stderr, "  -G, --no-syslog              Don't log via syslog\n");
 #ifdef _WITH_VRRP_
 	fprintf(stderr, "  -X, --release-vips           Drop VIP on transition from signal.\n");
 	fprintf(stderr, "  -V, --dont-release-vrrp      Don't remove VRRP VIPs and VROUTEs on daemon stop\n");
@@ -590,6 +592,10 @@ parse_cmdline(int argc, char **argv)
 	int c;
 	bool reopen_log = false;
 	int signum;
+	struct utsname uname_buf;
+	int longindex;
+	int curind;
+	bool bad_option = false;
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -600,6 +606,9 @@ parse_cmdline(int argc, char **argv)
 		{"log-console",		no_argument,		NULL, 'l'},
 		{"log-detail",		no_argument,		NULL, 'D'},
 		{"log-facility",	required_argument,	NULL, 'S'},
+		{"log-file",		optional_argument,	NULL, 'g'},
+		{"flush-log-file",	no_argument,		NULL,  2 },
+		{"no-syslog",		no_argument,		NULL, 'G'},
 #ifdef _WITH_VRRP_
 		{"release-vips",	no_argument,		NULL, 'X'},
 		{"dont-release-vrrp",	no_argument,		NULL, 'V'},
@@ -631,14 +640,18 @@ parse_cmdline(int argc, char **argv)
 		{"namespace",		required_argument,	NULL, 's'},
 #endif	
 		{"config-id",		required_argument,	NULL, 'i'},
-		{"signum",		required_argument,	NULL,  1 },
+		{"signum",		required_argument,	NULL,  4 },
 		{"version",		no_argument,		NULL, 'v'},
 		{"help",		no_argument,		NULL, 'h'},
 
 		{NULL,			0,			NULL,  0 }
 	};
 
-	while ((c = getopt_long(argc, argv, "vhlndDRS:f:p:i:mM"
+	/* Unfortunately, if a short option is used, getopt_long() doesn't change the value
+	 * of longindex, so we need to ensure that before calling getopt_long(), longindex
+	 * is set to a know invalid value */
+	curind = optind;
+	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndDRS:f:p:i:mM::g::G"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 					    "PC"
 #endif
@@ -657,7 +670,15 @@ parse_cmdline(int argc, char **argv)
 #if HAVE_DECL_CLONE_NEWNET
 					    "s:"
 #endif
-				, long_options, NULL)) != EOF) {
+				, long_options, &longindex)) != -1) {
+
+		/* Check for an empty option argument. For example --use-file= returns
+		 * a 0 length option, which we don't want */
+		if (longindex >= 0 && long_options[longindex].has_arg == required_argument && optarg && !optarg[0]) {
+			c = ':';
+			optarg = NULL;
+		}
+
 		switch (c) {
 		case 'v':
 			fprintf(stderr, "%s", version_string);
@@ -665,6 +686,12 @@ parse_cmdline(int argc, char **argv)
 			fprintf(stderr, ", git commit %s", GIT_COMMIT);
 #endif
 			fprintf(stderr, "\n\n%s\n\n", COPYRIGHT_STRING);
+			fprintf(stderr, "Built with kernel headers for Linux %d.%d.%d\n",
+						(LINUX_VERSION_CODE >> 16) & 0xff,
+						(LINUX_VERSION_CODE >>  8) & 0xff,
+						(LINUX_VERSION_CODE      ) & 0xff);
+			uname(&uname_buf);
+			fprintf(stderr, "Running on %s %s %s\n\n", uname_buf.sysname, uname_buf.release, uname_buf.version);
 			fprintf(stderr, "Build options: %s\n", BUILD_OPTIONS);
 			exit(0);
 			break;
@@ -707,8 +734,22 @@ parse_cmdline(int argc, char **argv)
 			log_facility = LOG_FACILITY[atoi(optarg)].facility;
 			reopen_log = true;
 			break;
+		case 'g':
+			if (optarg && optarg[0])
+				log_file_name = optarg;
+			else
+				log_file_name = "/tmp/keepalived.log";
+			open_log_file(log_file_name, NULL, NULL, NULL);
+			break;
+		case 'G':
+			__set_bit(NO_SYSLOG_BIT, &debug);
+			reopen_log = true;
+			break;
 		case 'f':
 			conf_file = optarg;
+			break;
+		case 2:		/* --flush-log-file */
+			set_flush_log_file();
 			break;
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 		case 'P':
@@ -768,7 +809,7 @@ parse_cmdline(int argc, char **argv)
 			config_id = MALLOC(strlen(optarg) + 1);
 			strcpy(config_id, optarg);
 			break;
-		case 1:
+		case 4:			/* --signum */
 			signum = get_signum(optarg);
 			if (signum == -1) {
 				fprintf(stderr, "Unknown sigfunc %s\n", optarg);
@@ -778,10 +819,25 @@ parse_cmdline(int argc, char **argv)
 			printf("%d\n", signum);
 			exit(0);
 			break;
+		case '?':
+			if (optopt && argv[curind][1] != '-')
+				fprintf(stderr, "Unknown option -%c\n", optopt);
+			else
+				fprintf(stderr, "Unknown option --%s\n", argv[curind]);
+			bad_option = true;
+			break;
+		case ':':
+			if (optopt && argv[curind][1] != '-')
+				fprintf(stderr, "Missing parameter for option -%c\n", optopt);
+			else
+				fprintf(stderr, "Missing parameter for option --%s\n", long_options[longindex].name);
+			bad_option = true;
+			break;
 		default:
-			exit(0);
+			exit(1);
 			break;
 		}
+		curind = optind;
 	}
 
 	if (optind < argc) {
@@ -790,6 +846,9 @@ parse_cmdline(int argc, char **argv)
 			printf("%s ", argv[optind++]);
 		printf("\n");
 	}
+
+	if (bad_option)
+		exit(1);
 
 	return reopen_log;
 }
@@ -811,7 +870,7 @@ keepalived_main(int argc, char **argv)
 #endif
 
 	/* Initialise pointer to child finding function */
-	set_child_finder(find_keepalived_child);
+	set_child_finder_name(find_keepalived_child_name);
 
 	/* Initialise daemon_mode */
 #ifdef _WITH_VRRP_
@@ -840,9 +899,10 @@ keepalived_main(int argc, char **argv)
 			if (*end != '.')
 				os_major = 0;
 			else {
-				os_release = (unsigned)strtoul(end + 1, &end, 10);
-				if (*end && *end != '-')
+				if (!isdigit(end[1]))
 					os_major = 0;
+				else
+					os_release = (unsigned)strtoul(end + 1, &end, 10);
 			}
 		}
 		if (!os_major)
@@ -851,8 +911,8 @@ keepalived_main(int argc, char **argv)
 		/* config_id defaults to hostname */
 		if (!config_id) {
 			end = strchrnul(uname_buf.nodename, '.');
-			config_id = MALLOC(end - uname_buf.nodename + 1);
-			strncpy(config_id, uname_buf.nodename, end - uname_buf.nodename);
+			config_id = MALLOC((size_t)(end - uname_buf.nodename) + 1);
+			strncpy(config_id, uname_buf.nodename, (size_t)(end - uname_buf.nodename));
 			config_id[end - uname_buf.nodename] = '\0';
 		}
 	}
@@ -863,7 +923,8 @@ keepalived_main(int argc, char **argv)
 	 */
 	if (parse_cmdline(argc, argv)) {
 		closelog();
-		openlog(PACKAGE_NAME, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0) , log_facility);
+		if (!__test_bit(NO_SYSLOG_BIT, &debug))
+			openlog(PACKAGE_NAME, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0) , log_facility);
 	}
 
 	if (__test_bit(LOG_CONSOLE_BIT, &debug))
@@ -877,6 +938,24 @@ keepalived_main(int argc, char **argv)
 
 	/* Handle any core file requirements */
 	core_dump_init();
+
+	if (os_major) {
+		if (KERNEL_VERSION(os_major, os_minor, os_release) < LINUX_VERSION_CODE) {
+			/* keepalived was build for a later kernel version */
+			log_message(LOG_INFO, "WARNING - keepalived was build for newer Linux %d.%d.%d, running on %s %s %s",
+					(LINUX_VERSION_CODE >> 16) & 0xff,
+					(LINUX_VERSION_CODE >>  8) & 0xff,
+					(LINUX_VERSION_CODE      ) & 0xff,
+					uname_buf.sysname, uname_buf.release, uname_buf.version);
+		} else {
+			/* keepalived was build for a later kernel version */
+			log_message(LOG_INFO, "Running on %s %s %s (built for Linux %d.%d.%d)",
+					uname_buf.sysname, uname_buf.release, uname_buf.version,
+					(LINUX_VERSION_CODE >> 16) & 0xff,
+					(LINUX_VERSION_CODE >>  8) & 0xff,
+					(LINUX_VERSION_CODE      ) & 0xff);
+		}
+	}
 
 	netlink_set_recv_buf_size();
 
@@ -917,6 +996,15 @@ keepalived_main(int argc, char **argv)
 			log_message(LOG_INFO, "Unable to change syslog ident");
 
 		use_pid_dir = true;
+
+		open_log_file(log_file_name,
+				NULL,
+#if HAVE_DECL_CLONE_NEWNET
+				network_namespace,
+#else
+				NULL,
+#endif
+				instance_name);
 	}
 
 	if (use_pid_dir) {
@@ -980,8 +1068,14 @@ keepalived_main(int argc, char **argv)
 	}
 
 	/* daemonize process */
-	if (!__test_bit(DONT_FORK_BIT, &debug))
-		xdaemon(0, 0, 0);
+	if (!__test_bit(DONT_FORK_BIT, &debug) &&
+	    xdaemon(false, false, true) > 0) {
+		closelog();
+		FREE(config_id);
+		FREE(orig_core_dump_pattern);
+		close_std_fd();
+		exit(0);
+	}
 
 	/* Set file creation mask */
 	umask(0);
@@ -994,10 +1088,8 @@ keepalived_main(int argc, char **argv)
 	if (!pidfile_write(main_pidfile, getpid()))
 		goto end;
 
-#ifndef _DEBUG_
 	/* Signal handling initialization  */
 	signal_init();
-#endif
 
 	/* Create the master thread */
 	master = thread_make_master();
@@ -1005,10 +1097,8 @@ keepalived_main(int argc, char **argv)
 	/* Init daemon */
 	start_keepalived();
 
-#ifndef _DEBUG_
 	/* Launch the scheduling I/O multiplexer */
 	launch_scheduler();
-#endif
 
 	/* Finish daemon process */
 	stop_keepalived();
@@ -1051,6 +1141,7 @@ end:
 	if (syslog_ident)
 		free(syslog_ident);
 #endif
+	close_std_fd();
 
 	exit(0);
 }

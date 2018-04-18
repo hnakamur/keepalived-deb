@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_NETLINK_H
@@ -89,7 +89,7 @@ extern size_t rta_addattr8(struct rtattr *, size_t, unsigned short, uint8_t);
 extern struct rtattr *rta_nest(struct rtattr *, size_t, unsigned short);
 extern size_t rta_nest_end(struct rtattr *, struct rtattr *);
 extern ssize_t netlink_talk(nl_handle_t *, struct nlmsghdr *);
-extern int netlink_interface_lookup(void);
+extern int netlink_interface_lookup(char *);
 extern void kernel_netlink_poll(void);
 #endif
 extern void kernel_netlink_init(void);
