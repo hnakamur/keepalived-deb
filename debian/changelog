@@ -1,3 +1,10 @@
+keepalived (1:1.4.4-1ubuntu1ppa1~ubuntu18.04) bionic; urgency=medium
+
+  * New upstream version 1.4.4
+  * Change target to Ubuntu 18.04
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Thu, 24 May 2018 09:54:04 +0900
+
 keepalived (1:1.4.3-1ubuntu1ppa1~ubuntu16.04.1) xenial; urgency=medium
 
   * Imported Upstream version 1.4.3
