@@ -88,7 +88,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [1.4.3], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [1.4.4], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -563,7 +563,7 @@ if test .${enable_libnl} != .no; then
 	  NEED_NL3=Yes
 	fi
 
-	if test $disable_vrrp != .no; then
+	if test .$enable_vrrp != .no; then
 	  NEED_NL3=Yes
 
           dnl ----[Check have IPV4_DEVCONF defines - since Linux 3.11]----
@@ -930,6 +930,25 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
   ])
 CPPFLAGS="$SAV_CPPFLAGS"
 
+dnl ----[Check if have linux/if_ether.h and netinet/if_ether.h namespace collision]----
+# Including <linux/if_ether.h> and <netinet/if_ether.h> can cause a namespace collision (musl libc).
+AC_MSG_CHECKING([for linux/if_ether.h and netinet/if_ether.h namespace collision])
+SAV_CPPFLAGS="$CPPFLAGS"
+CPPFLAGS="$CPPFLAGS $kernelinc"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+    #include <linux/if_ether.h>
+    #include <netinet/if_ether.h>
+  ]])],
+  [
+    AC_MSG_RESULT([no])
+  ],
+  [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([_HAVE_NETINET_LINUX_IF_ETHER_H_COLLISION_], [ 1 ], [Define to 1 if have linux/if_ether.h followed by netinet/if_ether.h namespace collision])
+    add_build_opt([NETINET_LINUX_IF_ETHER_H_COLLISION])
+  ])
+CPPFLAGS="$SAV_CPPFLAGS"
+
 # Linux 4.5 to 4.5.4 has <libiptc/libiptc.h> indirectly including <net/if.h>
 # and <linux/if.h> which causes a namespace collision.
 AC_MSG_CHECKING([for libiptc/libiptc.h linux/if.h and net/if.h namespace collision])
@@ -1174,6 +1193,28 @@ if test "$enable_snmp" = yes -o \
   NETSNMP_LIBS_EXT=`${NETSNMP_CONFIG} --external-libs`
   NETSNMP_LIBS="$NETSNMP_LIBS_AGENT $NETSNMP_LIBS_EXT"
   NETSNMP_CFLAGS="`${NETSNMP_CONFIG} --base-cflags` -DNETSNMP_NO_INLINE"
+
+  # net-snmp-config adds compiler and linker options that were set at the time
+  # net-snmp was built, and this can include spec files that may not exist
+  # on the system building keepalived. We need to check if any spec files
+  # are specified, and if they do not exist on this system, then remove them
+  # from NETSNMP_LIBS or NETSNMP_CFLAGS.
+  # For further information, see https://bugzilla.redhat.com/show_bug.cgi?id=1544527
+  # and the other bugs referred to in it.
+  for spec in `echo $NETSNMP_LIBS | sed -e "s? ?\n?g" | grep "^-specs="`; do
+    SPEC_FILE=`echo $spec | sed -e "s?^-spaces=??"`
+    if test ! -f $SPEC_FILE; then
+      NETSNMP_LIBS=`echo $NETSNMP_LIBS | sed -e "s? *$spec *? ?"`
+      AC_MSG_WARN([Removing $spec from NETSNMP_LIBS since spec file not installed])
+    fi
+  done
+  for spec in `echo $NETSNMP_CFLAGS | sed -e "s? ?\n?g" | grep "^-specs="`; do
+    SPEC_FILE=`echo $spec | sed -e "s?^-spaces=??"`
+    if test ! -f $SPEC_FILE; then
+      NETSNMP_CFLAGS=`echo $NETSNMP_CFLAGS | sed -e "s? *$spec *? ?"`
+      AC_MSG_WARN([Removing $spec from NETSNMP_CFLAGS since spec file not installed])
+    fi
+  done
 
   SAV_CFLAGS="$CFLAGS"
   CFLAGS="$CFLAGS ${NETSNMP_CFLAGS}"
@@ -1472,11 +1513,12 @@ else
   INIT_TYPE=$init_type
 fi
 
-if test $INIT_TYPE = systemd; then
+if test -z $INIT_TYPE; then
+  INIT_TYPE=undetected
+elif test $INIT_TYPE = systemd; then
   AC_SUBST([systemdsystemunitdir], [$with_systemdsystemunitdir])
 fi
 
-if test -z $INIT_TYPE; then INIT_TYPE=undetected; fi
 AM_CONDITIONAL([INIT_UPSTART], [test $INIT_TYPE = upstart])
 AM_CONDITIONAL([INIT_SYSTEMD], [test $INIT_TYPE = systemd])
 AM_CONDITIONAL([INIT_SYSV], [test $INIT_TYPE = SYSV])
