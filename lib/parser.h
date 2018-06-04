@@ -24,12 +24,7 @@
 #define _PARSER_H
 
 /* system includes */
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <syslog.h>
-#include <ctype.h>
+#include <sys/types.h>
 #include <stdbool.h>
 
 /* local includes */
@@ -47,14 +42,8 @@ typedef struct _keyword {
 	bool active;
 } keyword_t;
 
-/* Reloading helpers */
-#define SET_RELOAD      (reload = 1)
-#define UNSET_RELOAD    (reload = 0)
-#define RELOAD_DELAY    5
-
 /* global vars exported */
 extern vector_t *keywords;
-extern bool reload;
 extern char *config_id;
 
 #ifdef _MEM_CHECK_
@@ -78,7 +67,7 @@ extern void alloc_value_block(void (*alloc_func) (vector_t *), const char *);
 extern void *set_value(vector_t *);
 extern unsigned long read_timer(vector_t *);
 extern int check_true_false(char *);
-extern void skip_block(void);
+extern void skip_block(bool);
 extern void init_data(const char *, vector_t * (*init_keywords) (void));
 
 #endif

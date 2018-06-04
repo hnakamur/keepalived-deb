@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <arpa/inet.h>
 
 #include "check_parser.h"
 #include "check_data.h"
@@ -35,17 +36,23 @@
 #include "main.h"
 #include "logger.h"
 #include "parser.h"
-#include "memory.h"
 #include "utils.h"
 #include "ipwrapper.h"
 #if defined _WITH_VRRP_
 #include "vrrp_parser.h"
 #endif
+#if defined _WITH_BFD_
+#include "bfd_parser.h"
+#endif
+#include "libipvs.h"
 
 /* SSL handlers */
 static void
-ssl_handler(__attribute__((unused)) vector_t *strvec)
+ssl_handler(vector_t *strvec)
 {
+	if (!strvec)
+		return;
+
 	if (check_data->ssl) {
 		free_ssl();
 		log_message(LOG_INFO, "SSL context already specified - replacing");
@@ -95,6 +102,9 @@ vsg_handler(vector_t *strvec)
 {
 	virtual_server_group_t *vsg;
 
+	if (!strvec)
+		return;
+
 	/* Fetch queued vsg */
 	alloc_vsg(strvec_slot(strvec, 1));
 	alloc_value_block(alloc_vsg_entry, strvec_slot(strvec, 0));
@@ -109,6 +119,12 @@ vsg_handler(vector_t *strvec)
 static void
 vs_handler(vector_t *strvec)
 {
+	global_data->have_checker_config = true;
+
+	/* If we are not in the checker process, we don't want any more info */
+	if (!strvec)
+		return;
+
 	alloc_vs(strvec_slot(strvec, 1), strvec_slot(strvec, 2));
 }
 static void
@@ -130,20 +146,18 @@ vs_end_handler(void)
 		}
 	}
 
-	if (!vs->af) {
+	if (vs->af == AF_UNSPEC) {
 		/* This only occurs if the virtual server uses a fwmark, and all the
 		 * real/sorry servers are tunnelled.
 		 *
 		 * Maintain backward compatibility. Prior to the commit following 17fa4a3c
 		 * the address family of the virtual server was set from any of its
-		 * real or sorry servers, even if it was tunnelled. However, all the real
+		 * real or sorry servers, even if they were tunnelled. However, all the real
 		 * and sorry servers had to be the same address family, even if tunnelled,
 		 * so only set the address family from the tunnelled real/sorry servers
 		 * if all the real/sorry servers are of the same address family. */
 		if (vs->s_svr)
 			vs->af = vs->s_svr->addr.ss_family;
-		else
-			vs->af = AF_UNSPEC;
 
 		if (!LIST_ISEMPTY(vs->rs)) {
 			for (e = LIST_HEAD(vs->rs); e; ELEMENT_NEXT(e)) {
@@ -175,7 +189,7 @@ ip_family_handler(vector_t *strvec)
 	else if (!strcmp(strvec_slot(strvec, 1), "inet6")) {
 #ifndef LIBIPVS_USE_NL
 		log_message(LOG_INFO, "IPVS with IPv6 is not supported by this build");
-		skip_block();
+		skip_block(false);
 		return;
 #endif
 		af = AF_INET6;
@@ -367,11 +381,12 @@ proto_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	char *str = strvec_slot(strvec, 1);
-	if (!strcmp(str, "TCP"))
+
+	if (!strcasecmp(str, "TCP"))
 		vs->service_type = IPPROTO_TCP;
-	else if (!strcmp(str, "SCTP"))
+	else if (!strcasecmp(str, "SCTP"))
 		vs->service_type = IPPROTO_SCTP;
-	else if (!strcmp(str, "UDP"))
+	else if (!strcasecmp(str, "UDP"))
 		vs->service_type = IPPROTO_UDP;
 	else
 		log_message(LOG_INFO, "Unknown protocol %s - ignoring", str);
@@ -381,6 +396,22 @@ hasuspend_handler(__attribute__((unused)) vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	vs->ha_suspend = true;
+}
+
+static void
+vs_smtp_alert_handler(vector_t *strvec)
+{
+	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec, 1));
+		if (res == -1) {
+			log_message(LOG_INFO, "Invalid virtual_server smtp_alert parameter %s", FMT_STR_VSLOT(strvec, 1));
+			return;
+		}
+	}
+	vs->smtp_alert = res;
 }
 
 static void
@@ -439,26 +470,47 @@ rs_handler(vector_t *strvec)
 static void
 rs_end_handler(void)
 {
-	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+	virtual_server_t *vs;
+	real_server_t *rs;
 
-	/* For tunnelled forwarding, the address families don't have to be the same */
-	if (rs->forwarding_method != IP_VS_CONN_F_TUNNEL) {
+	if (LIST_ISEMPTY(check_data->vs))
+		return;
+
+	vs = LIST_TAIL_DATA(check_data->vs);
+
+	if (LIST_ISEMPTY(vs->rs))
+		return;
+
+	rs = LIST_TAIL_DATA(vs->rs);
+
+	/* For tunnelled forwarding, the address families don't have to be the same, so
+	 * long as the kernel supports IPVS_DEST_ATTR_ADDR_FAMILY */
+#if HAVE_DECL_IPVS_DEST_ATTR_ADDR_FAMILY
+	if (rs->forwarding_method != IP_VS_CONN_F_TUNNEL)
+#endif
+	{
 		if (vs->af == AF_UNSPEC)
 			vs->af = rs->addr.ss_family;
 		else if (vs->af != rs->addr.ss_family) {
 			log_message(LOG_INFO, "Address family of virtual server and real server %s don't match - skipping real server.", inet_sockaddrtos(&rs->addr));
 			free_list_element(vs->rs, vs->rs->tail);
 		}
-        }
+	}
 }
 static void
 rs_weight_handler(vector_t *strvec)
 {
+	int weight;
+
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
-	rs->weight = atoi(strvec_slot(strvec, 1));
-	rs->iweight = rs->weight;
+	weight = atoi(strvec_slot(strvec, 1));
+	if (weight <= 0 || weight > 65535) {
+		log_message(LOG_INFO, "Real server weight %d is outside range 1-65535", weight);
+		return;
+	}
+	rs->weight = weight;
+	rs->iweight = weight;
 }
 static void
 rs_forwarding_handler(vector_t *strvec)
@@ -491,7 +543,7 @@ vs_inhibit_handler(__attribute__((unused)) vector_t *strvec)
 static inline notify_script_t*
 set_check_notify_script(vector_t *strvec, const char *type)
 {
-	return notify_script_init(strvec, type, global_data->script_security);
+	return notify_script_init(strvec, true, type);
 }
 static void
 notify_up_handler(vector_t *strvec)
@@ -499,7 +551,7 @@ notify_up_handler(vector_t *strvec)
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
 	if (rs->notify_up) {
-		log_message(LOG_INFO, "(%s): notify_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		log_message(LOG_INFO, "(%s) notify_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
 		return;
 	}
 	rs->notify_up = set_check_notify_script(strvec, "notify");
@@ -510,7 +562,7 @@ notify_down_handler(vector_t *strvec)
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
 	if (rs->notify_down) {
-		log_message(LOG_INFO, "(%s): notify_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		log_message(LOG_INFO, "(%s) notify_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
 		return;
 	}
 	rs->notify_down = set_check_notify_script(strvec, "notify");
@@ -585,6 +637,22 @@ rs_alpha_handler(vector_t *strvec)
 	rs->alpha = res;
 }
 static void
+rs_smtp_alert_handler(vector_t *strvec)
+{
+	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec, 1));
+		if (res == -1) {
+			log_message(LOG_INFO, "Invalid real_server smtp_alert parameter %s", FMT_STR_VSLOT(strvec, 1));
+			return;
+		}
+	}
+	rs->smtp_alert = res;
+}
+static void
 rs_virtualhost_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
@@ -608,7 +676,7 @@ quorum_up_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	if (vs->notify_quorum_up) {
-		log_message(LOG_INFO, "(%s): quorum_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		log_message(LOG_INFO, "(%s) quorum_up script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
 		return;
 	}
 	vs->notify_quorum_up = set_check_notify_script(strvec, "quorum");
@@ -618,7 +686,7 @@ quorum_down_handler(vector_t *strvec)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	if (vs->notify_quorum_down) {
-		log_message(LOG_INFO, "(%s): quorum_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
+		log_message(LOG_INFO, "(%s) quorum_down script already specified - ignoring %s", vs->vsgname, FMT_STR_VSLOT(strvec,1));
 		return;
 	}
 	vs->notify_quorum_down = set_check_notify_script(strvec, "quorum");
@@ -645,8 +713,15 @@ hysteresis_handler(vector_t *strvec)
 static void
 vs_weight_handler(vector_t *strvec)
 {
+	int weight;
+
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	vs->weight = atoi(strvec_slot(strvec, 1));
+	weight = atoi(strvec_slot(strvec, 1));
+	if (weight <= 0 || weight > 65535) {
+		log_message(LOG_INFO, "Virtual server weight %d is outside range 1-65535", weight);
+		return;
+	}
+	vs->weight = weight;
 }
 
 void
@@ -692,6 +767,7 @@ init_check_keywords(bool active)
 	install_keyword("persistence_granularity", &pgr_handler);
 	install_keyword("protocol", &proto_handler);
 	install_keyword("ha_suspend", &hasuspend_handler);
+	install_keyword("smtp_alert", &vs_smtp_alert_handler);
 	install_keyword("virtualhost", &vs_virtualhost_handler);
 
 	/* Pool regression detection and handling. */
@@ -721,6 +797,7 @@ init_check_keywords(bool active)
 	install_keyword("delay_before_retry", &rs_delay_before_retry_handler);
 	install_keyword("warmup", &rs_warmup_handler);
 	install_keyword("delay_loop", &rs_delay_handler);
+	install_keyword("smtp_alert", &rs_smtp_alert_handler);
 	install_keyword("virtualhost", &rs_virtualhost_handler);
 
 	install_sublevel_end_handler(&rs_end_handler);
@@ -734,11 +811,14 @@ vector_t *
 check_init_keywords(void)
 {
 	/* global definitions mapping */
-	init_global_keywords(true);
+	init_global_keywords(reload);
 
 	init_check_keywords(true);
 #ifdef _WITH_VRRP_
 	init_vrrp_keywords(false);
+#endif
+#ifdef _WITH_BFD_
+	init_bfd_keywords(true);
 #endif
 	return keywords;
 }
