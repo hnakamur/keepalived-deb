@@ -90,7 +90,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.0.0], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.0.2], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -256,8 +256,8 @@ AC_SUBST(ARFLAGS)
 #
 # save the configure arguments
 #
-AC_DEFINE_UNQUOTED(KEEPALIVED_CONFIGURE_OPTIONS,"$ac_configure_args",
-  [configure options specified])
+args=`echo $ac_configure_args | $SED -e "s/'//g"`
+AC_DEFINE_UNQUOTED(KEEPALIVED_CONFIGURE_OPTIONS,"$args", [configure options specified])
 
 KA_CPPFLAGS="$kernelinc"
 KA_CFLAGS="-Wall -Wunused -Wstrict-prototypes -Wextra -Winit-self -g -O2 -D_GNU_SOURCE"
@@ -773,11 +773,15 @@ dnl --RTA_EXPIRES		dnl -- Linux 4.5
 dnl --FRA_L3MDEV		dnl -- Linux 4.8
 dnl --FRA_UID_RANGE		dnl -- Linux 4.10
 dnl --RTAX_FASTOPEN_NO_COOKIE	dnl -- Linux 4.15
-AC_CHECK_DECLS([RTA_ENCAP, RTA_EXPIRES, RTA_NEWDST, RTA_PREF, FRA_SUPPRESS_PREFIXLEN, FRA_SUPPRESS_IFGROUP, FRA_TUN_ID, RTAX_CC_ALGO, RTAX_QUICKACK, RTEXT_FILTER_SKIP_STATS, FRA_L3MDEV, FRA_UID_RANGE, RTAX_FASTOPEN_NO_COOKIE, RTA_VIA, FRA_OIFNAME], [], [],
+dnl --FRA_PROTOCOL		dnl -- Linux 4.17
+dnl --FRA_IP_PROTO		dnl -- Linux 4.17
+dnl --FRA_SPORT_RANGE		dnl -- Linux 4.17
+dnl --FRA_DPORT_RANGE		dnl -- Linux 4.17
+AC_CHECK_DECLS([RTA_ENCAP, RTA_EXPIRES, RTA_NEWDST, RTA_PREF, FRA_SUPPRESS_PREFIXLEN, FRA_SUPPRESS_IFGROUP, FRA_TUN_ID, RTAX_CC_ALGO, RTAX_QUICKACK, RTEXT_FILTER_SKIP_STATS, FRA_L3MDEV, FRA_UID_RANGE, RTAX_FASTOPEN_NO_COOKIE, RTA_VIA, FRA_OIFNAME, FRA_PROTOCOL, FRA_IP_PROTO, FRA_SPORT_RANGE, FRA_DPORT_RANGE], [], [],
   [[#include <linux/rtnetlink.h>
     #include <sys/socket.h>
     #include <linux/fib_rules.h>]])
-for flag in RTA_ENCAP RTA_EXPIRES RTA_NEWDST RTA_PREF FRA_SUPPRESS_PREFIXLEN FRA_SUPPRESS_IFGROUP FRA_TUN_ID RTAX_CC_ALGO RTAX_QUICKACK RTEXT_FILTER_SKIP_STATS FRA_L3MDEV FRA_UID_RANGE RTAX_FASTOPEN_NO_COOKIE RTA_VIA FRA_OIFNAME; do
+for flag in RTA_ENCAP RTA_EXPIRES RTA_NEWDST RTA_PREF FRA_SUPPRESS_PREFIXLEN FRA_SUPPRESS_IFGROUP FRA_TUN_ID RTAX_CC_ALGO RTAX_QUICKACK RTEXT_FILTER_SKIP_STATS FRA_L3MDEV FRA_UID_RANGE RTAX_FASTOPEN_NO_COOKIE RTA_VIA FRA_OIFNAME FRA_PROTOCOL FRA_IP_PROTO FRA_SPORT_RANGE FRA_DPORT_RANGE; do
   AS_VAR_COPY([decl_var], [ac_cv_have_decl_$flag])
   if test ${decl_var} = yes; then
     add_system_opt[${flag}]
@@ -1232,7 +1236,7 @@ fi
 
 dnl ----[ Checks for FIB routing support ]----
 FIB_ROUTING_SUPPORT=No
-if test .$enable_routes != .no; then
+if test .$enable_vrrp != .no -a .$enable_routes != .no; then
   # Introduced in Linux 2.6.19
   SAV_CPPFLAGS="$CPPFLAGS"
   CPPFLAGS="$CPPFLAGS $kernelinc"
@@ -1433,8 +1437,10 @@ AM_CONDITIONAL([SNMP], [test $SNMP_SUPPORT = Yes])
 AM_CONDITIONAL([SNMP_KEEPALIVED], [test $SNMP_KEEPALIVED_SUPPORT = Yes])
 AM_CONDITIONAL([SNMP_VRRP], [test $SNMP_VRRP_SUPPORT = Yes -o $SNMP_RFC_SUPPORT = Yes])
 AM_CONDITIONAL([SNMP_CHECKER], [test $SNMP_CHECKER_SUPPORT = Yes])
+AM_CONDITIONAL([SNMP_RFC], [test $SNMP_RFCV2_SUPPORT = Yes -o $SNMP_RFCV3_SUPPORT = Yes])
 AM_CONDITIONAL([SNMP_RFCV2], [test $SNMP_RFCV2_SUPPORT = Yes])
 AM_CONDITIONAL([SNMP_RFCV3], [test $SNMP_RFCV3_SUPPORT = Yes])
+AM_CONDITIONAL([SNMP_REPLY_V3_FOR_V2], [test $SNMP_V3_FOR_V2 = Yes])
 
 dnl ----[ Check for Dbus support ]----
 DBUS_SUPPORT=No
@@ -1482,7 +1488,16 @@ dnl ----[ SHA1 or not ? ]----
 SHA1_SUPPORT=No
 if test "${enable_sha1}" = yes; then
   AC_CHECK_HEADERS(openssl/sha.h,,AC_MSG_ERROR([unable to find openssl/sha.h]))
-  AC_CHECK_LIB(crypto, SHA1_Init,,AC_MSG_ERROR([SHA1 in OpenSSL required]))
+  AC_CHECK_LIB(crypto, SHA1_Init,,
+    [
+      dnl libcrypto can require -fpic
+      AS_UNSET([ac_cv_lib_crypto_SHA1_Init])
+      SAV_CFLAGS=$CFLAGS
+      CFLAGS=-fpic
+      AC_CHECK_LIB(crypto, SHA1_Init,,AC_MSG_ERROR([SHA1 in OpenSSL required]))
+      CFLAGS=$SAV_CFLAGS
+      add_to_var([KA_CFLAGS],[-fpic])
+    ])
   SHA1_SUPPORT=Yes
   AC_DEFINE([_WITH_SHA1_], [ 1 ], [Define to 1 to have SHA1 support])
 fi
@@ -1658,6 +1673,19 @@ echo " $KA_LIBS" | grep -qE -- " -l?pthread "
 if test $? -eq 0 ;then
   AC_DEFINE([_WITH_PTHREADS_], [ 1 ], [Define to 1 if using pthreads])
 fi
+
+dnl ----[ Check if rpmbuild supports --build-in-place ]----
+RPM_NO_BIP=1
+AC_CHECK_PROG([HAVE_RPMBUILD], [rpmbuild], [Yes], [No])
+RPM_SRC_DIR=`rpm --eval "%{_sourcedir}"`
+if ! test -d $RPM_SRC_DIR; then
+  HAVE_RPMBUILD=No
+fi
+if test $HAVE_RPMBUILD = Yes; then
+  rpmbuild --help | grep -q -- --build-in-place
+  RPM_NO_BIP=$?
+fi
+AM_CONDITIONAL([RPM_BIP], [test $RPM_NO_BIP -eq 0])
 
 dnl ----[ Determine system init type]----
 INIT_TYPE=

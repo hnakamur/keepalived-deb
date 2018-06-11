@@ -92,8 +92,10 @@ POST_INSTALL = :
 NORMAL_UNINSTALL = :
 PRE_UNINSTALL = :
 POST_UNINSTALL = :
-@SOCK_NONBLOCK_FALSE@am__append_1 = old_socket.o
-@SOCK_NONBLOCK_FALSE@am__append_2 = old_socket.c old_socket.h
+@WITH_VRRP_TRUE@am__append_1 = rttables.o
+@WITH_VRRP_TRUE@am__append_2 = rttables.c rttables.h
+@SOCK_NONBLOCK_FALSE@am__append_3 = old_socket.o
+@SOCK_NONBLOCK_FALSE@am__append_4 = old_socket.c old_socket.h
 subdir = lib
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/configure.ac
@@ -110,13 +112,14 @@ am__v_AR_ = $(am__v_AR_@AM_DEFAULT_V@)
 am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 liblib_a_AR = $(AR) $(ARFLAGS)
-liblib_a_DEPENDENCIES = $(am__append_1)
+liblib_a_DEPENDENCIES = $(am__append_1) $(am__append_3)
 am_liblib_a_OBJECTS = memory.$(OBJEXT) utils.$(OBJEXT) \
 	notify.$(OBJEXT) timer.$(OBJEXT) scheduler.$(OBJEXT) \
 	vector.$(OBJEXT) list.$(OBJEXT) html.$(OBJEXT) \
 	parser.$(OBJEXT) signals.$(OBJEXT) logger.$(OBJEXT) \
-	rttables.$(OBJEXT) assert.$(OBJEXT)
-am__EXTRA_liblib_a_SOURCES_DIST = old_socket.c old_socket.h
+	assert.$(OBJEXT)
+am__EXTRA_liblib_a_SOURCES_DIST = rttables.c rttables.h old_socket.c \
+	old_socket.h
 liblib_a_OBJECTS = $(am_liblib_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -200,6 +203,7 @@ EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 GENHASH_LIBS = @GENHASH_LIBS@
 GREP = @GREP@
+HAVE_RPMBUILD = @HAVE_RPMBUILD@
 HAVE_SPHINX_BUILD = @HAVE_SPHINX_BUILD@
 INSTALL = @INSTALL@
 INSTALL_DATA = @INSTALL_DATA@
@@ -294,14 +298,13 @@ AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 BUILT_SOURCES = $(GIT_COMMIT_FILE)
 noinst_LIBRARIES = liblib.a
 liblib_a_SOURCES = memory.c utils.c notify.c timer.c scheduler.c \
-	vector.c list.c html.c parser.c signals.c logger.c rttables.c \
-	assert.c \
-	bitops.h timer.h scheduler.h rttables.h vector.h parser.h \
+	vector.c list.c html.c parser.c signals.c logger.c assert.c \
+	bitops.h timer.h scheduler.h vector.h parser.h \
 	signals.h notify.h logger.h list.h memory.h html.h utils.h \
 	keepalived_magic.h
 
-liblib_a_LIBADD = $(am__append_1)
-EXTRA_liblib_a_SOURCES = $(am__append_2)
+liblib_a_LIBADD = $(am__append_1) $(am__append_3)
+EXTRA_liblib_a_SOURCES = $(am__append_2) $(am__append_4)
 EXTRA_DIST = $(GIT_COMMIT_FILE)
 all: $(BUILT_SOURCES) config.h
 	$(MAKE) $(AM_MAKEFLAGS) all-am
@@ -603,7 +606,7 @@ uninstall-am:
 .PRECIOUS: Makefile
 
 
-.PHONY: $(GIT_COMMIT_FILE)
+FORCE:
 
 # The git commit file will contain the git version and date of last commit,
 # unless this is a tagged version, in which case the git commit is omitted.
@@ -614,7 +617,7 @@ uninstall-am:
 # The other file that needs to be ignored is deletion of snap/snapcraft.yaml,
 # since in a snapcraft build that file is deleted
 # (see https://bugs.launchpad.net/snapcraft/+bug/1662388).
-$(GIT_COMMIT_FILE):
+$(GIT_COMMIT_FILE): FORCE
 	@if [ ! -f $(srcdir)/$@ -a ! -f $@ ]; then \
 		echo '#define GIT_DATE	"unknown"' >$@; \
 		echo "#define GIT_YEAR	\"`date +%Y`\"" >>$@; \

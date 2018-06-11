@@ -248,6 +248,16 @@ get_cwd(void)
 	return getcwd(dir, PATH_MAX);
 }
 
+static char *
+get_instance(void)
+{
+	char *conf_id = MALLOC(strlen(config_id) + 1);
+
+	strcpy(conf_id, config_id);
+
+	return conf_id;
+}
+
 vector_t *
 alloc_strvec_r(char *string)
 {
@@ -860,6 +870,7 @@ static void
 set_std_definitions(void)
 {
 	add_std_definition("_PWD", NULL, get_cwd);
+	add_std_definition("_INSTANCE", NULL, get_instance);
 }
 
 static void
@@ -1212,6 +1223,8 @@ init_data(const char *conf_file, vector_t * (*init_keywords) (void))
 
 	free_keywords(keywords);
 	free_parser_data();
+#ifdef _WITH_VRRP_
 	clear_rt_names();
+#endif
 	notify_resource_release();
 }
