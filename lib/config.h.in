@@ -31,6 +31,14 @@
    you don't. */
 #undef HAVE_DECL_ETHERTYPE_IPV6
 
+/* Define to 1 if you have the declaration of `FRA_DPORT_RANGE', and to 0 if
+   you don't. */
+#undef HAVE_DECL_FRA_DPORT_RANGE
+
+/* Define to 1 if you have the declaration of `FRA_IP_PROTO', and to 0 if you
+   don't. */
+#undef HAVE_DECL_FRA_IP_PROTO
+
 /* Define to 1 if you have the declaration of `FRA_L3MDEV', and to 0 if you
    don't. */
 #undef HAVE_DECL_FRA_L3MDEV
@@ -38,6 +46,14 @@
 /* Define to 1 if you have the declaration of `FRA_OIFNAME', and to 0 if you
    don't. */
 #undef HAVE_DECL_FRA_OIFNAME
+
+/* Define to 1 if you have the declaration of `FRA_PROTOCOL', and to 0 if you
+   don't. */
+#undef HAVE_DECL_FRA_PROTOCOL
+
+/* Define to 1 if you have the declaration of `FRA_SPORT_RANGE', and to 0 if
+   you don't. */
+#undef HAVE_DECL_FRA_SPORT_RANGE
 
 /* Define to 1 if you have the declaration of `FRA_SUPPRESS_IFGROUP', and to 0
    if you don't. */

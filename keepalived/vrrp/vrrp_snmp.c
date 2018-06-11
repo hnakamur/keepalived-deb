@@ -246,6 +246,12 @@ enum snmp_rule_magic {
 	VRRP_SNMP_RULE_UID_RANGE_START,
 	VRRP_SNMP_RULE_UID_RANGE_END,
 	VRRP_SNMP_RULE_L3MDEV,
+	VRRP_SNMP_RULE_PROTOCOL,
+	VRRP_SNMP_RULE_IP_PROTO,
+	VRRP_SNMP_RULE_SRC_PORT_START,
+	VRRP_SNMP_RULE_SRC_PORT_END,
+	VRRP_SNMP_RULE_DST_PORT_START,
+	VRRP_SNMP_RULE_DST_PORT_END,
 };
 
 enum snmp_route_magic {
@@ -1462,10 +1468,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rule->from_addr->ifa.ifa_prefixlen;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_RULE_TOS:
-		if (rule->mask & IPRULE_BIT_DSFIELD)
-			long_ret.u = rule->tos;
-		else
-			break;
+		long_ret.u = rule->tos;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_RULE_FWMARK:
 		if (rule->mask & IPRULE_BIT_FWMARK)
@@ -1521,7 +1524,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		return (u_char *)&long_ret;
 #if HAVE_DECL_FRA_SUPPRESS_PREFIXLEN
 	case VRRP_SNMP_RULE_SUPPRESSPREFIXLEN:
-		if (rule->mask & IPRULE_BIT_SUP_PREFIXLEN)
+		if (rule->suppress_prefix_len != -1)
 			long_ret.u = rule->suppress_prefix_len;
 		else
 			break;
@@ -1573,6 +1576,50 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_RULE_L3MDEV:
 		if (rule->l3mdev)
 			long_ret.u = 1;
+		else
+			break;
+		return (u_char *)&long_ret;
+#endif
+#if HAVE_DECL_FRA_PROTOCOL
+	case VRRP_SNMP_RULE_PROTOCOL:
+		if (rule->mask & IPRULE_BIT_PROTOCOL)
+			long_ret.u = rule->protocol;
+		else
+			break;
+		return (u_char *)&long_ret;
+#endif
+#if HAVE_DECL_FRA_IP_PROTO
+	case VRRP_SNMP_RULE_IP_PROTO:
+		if (rule->mask & IPRULE_BIT_IP_PROTO)
+			long_ret.u = rule->ip_proto;
+		else
+			break;
+		return (u_char *)&long_ret;
+#endif
+#if HAVE_DECL_FRA_SPORT_RANGE
+	case VRRP_SNMP_RULE_SRC_PORT_START:
+		if (rule->mask & IPRULE_BIT_SPORT_RANGE)
+			long_ret.u = rule->src_port.start;
+		else
+			break;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_RULE_SRC_PORT_END:
+		if (rule->mask & IPRULE_BIT_SPORT_RANGE)
+			long_ret.u = rule->src_port.end;
+		else
+			break;
+		return (u_char *)&long_ret;
+#endif
+#if HAVE_DECL_FRA_DPORT_RANGE
+	case VRRP_SNMP_RULE_DST_PORT_START:
+		if (rule->mask & IPRULE_BIT_DPORT_RANGE)
+			long_ret.u = rule->dst_port.start;
+		else
+			break;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_RULE_DST_PORT_END:
+		if (rule->mask & IPRULE_BIT_DPORT_RANGE)
+			long_ret.u = rule->dst_port.end;
 		else
 			break;
 		return (u_char *)&long_ret;
