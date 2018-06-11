@@ -1,3 +1,9 @@
+keepalived (1:2.0.2-1ubuntu1ppa1~ubuntu18.04.1) bionic; urgency=medium
+
+  * New upstream version 2.0.2
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Mon, 11 Jun 2018 10:41:14 +0900
+
 keepalived (1:2.0.0-1ubuntu1ppa1~ubuntu18.04) bionic; urgency=medium
 
   * New upstream version 2.0.0
