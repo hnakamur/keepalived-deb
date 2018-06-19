@@ -133,7 +133,7 @@ am_libvrrp_a_OBJECTS = vrrp_daemon.$(OBJEXT) vrrp_print.$(OBJEXT) \
 	vrrp_sync.$(OBJEXT) vrrp_index.$(OBJEXT) vrrp_arp.$(OBJEXT) \
 	vrrp_if.$(OBJEXT) vrrp_track.$(OBJEXT) \
 	vrrp_ipaddress.$(OBJEXT) vrrp_ndisc.$(OBJEXT) \
-	vrrp_if_config.$(OBJEXT)
+	vrrp_if_config.$(OBJEXT) vrrp_static_track.$(OBJEXT)
 am__EXTRA_libvrrp_a_SOURCES_DIST = vrrp_vmac.c vrrp_ipsecah.c \
 	vrrp_dbus.c vrrp_iproute.c vrrp_iprule.c \
 	vrrp_ip_rule_route_parser.c vrrp_iptables.c \
@@ -317,7 +317,7 @@ libvrrp_a_SOURCES = vrrp_daemon.c vrrp_print.c vrrp_data.c \
 	vrrp_parser.c vrrp.c vrrp_notify.c vrrp_scheduler.c \
 	vrrp_sync.c vrrp_index.c vrrp_arp.c vrrp_if.c vrrp_track.c \
 	vrrp_ipaddress.c vrrp_ndisc.c vrrp_if_config.c \
-	../include/vrrp_daemon.h
+	vrrp_static_track.c ../include/vrrp_daemon.h
 libvrrp_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
 	$(am__append_7) $(am__append_9) $(am__append_11) \
 	$(am__append_13) $(am__append_15)
@@ -395,6 +395,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_print.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_scheduler.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_snmp.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_static_track.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_sync.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_track.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_vmac.Po@am__quote@

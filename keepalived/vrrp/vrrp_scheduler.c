@@ -385,30 +385,74 @@ vrrp_thread_requeue_read_relative(vrrp_t *vrrp, uint32_t timer)
 	vrrp_thread_requeue_read(vrrp);
 }
 
+#ifdef _INCLUDE_UNUSED_CODE_
 // TODO //static int
-//static vrrp_t *
-//vrrp_timer_timeout(const int fd)
-//{
-//	vrrp_t *vrrp;
-//	element e;
-//	list l = &vrrp_data->vrrp_index_fd[FD_INDEX_HASH(fd)];
-//	timeval_t timer;
-//	vrrp_t *best_vrrp = NULL;
-//
-//	/* Multiple instances on the same interface */
-//	timerclear(&timer);
-//	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-//		vrrp = ELEMENT_DATA(e);
-//		if (vrrp->fd_in == fd &&
-//		    (!timerisset(&timer) ||
-//		     timercmp(&vrrp->sands, &timer, <))) {
-//			timer = vrrp->sands;
-//			best_vrrp = vrrp;
-//		}
-//	}
-//
-//	return best_vrrp;
-//}
+static vrrp_t *
+vrrp_timer_timeout(const int fd)
+{
+	vrrp_t *vrrp;
+	element e;
+	list l = &vrrp_data->vrrp_index_fd[FD_INDEX_HASH(fd)];
+	timeval_t timer;
+	vrrp_t *best_vrrp = NULL;
+
+	/* Multiple instances on the same interface */
+	timerclear(&timer);
+	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
+		vrrp = ELEMENT_DATA(e);
+		if (vrrp->fd_in == fd &&
+		    (!timerisset(&timer) ||
+		     timercmp(&vrrp->sands, &timer, <))) {
+			timer = vrrp->sands;
+			best_vrrp = vrrp;
+		}
+	}
+
+	return best_vrrp;
+}
+#endif
+
+/* We shouldn't receive anything on the send socket since IP_MULTICAST_ALL is cleared,
+ * and no multicast groups are subscribed to on the socket. However, Debian Jessie
+ * with a 3.16.0 kernel, CentOS 7 with a 3.10.0 kernel, and Fedora 16 with a
+ * 3.6.11 kernel all exhibit the problem of multicast packets being queued on the
+ * send socket. Whether this is a kernel problem that has been subsequently resolved,
+ * or a system default configuration problem isn't yet known.
+ *
+ * The workaround to the problem is to read on the send sockets, and to discard any
+ * received data.
+ *
+ * If anyone can provide more information about this issue it would be very helpful.
+ */
+static int
+vrrp_write_fd_read_thread(thread_t *thread)
+{
+	sock_t *sock;
+	struct sockaddr_storage src_addr;
+	socklen_t src_addr_len = sizeof(src_addr);
+	ssize_t len;
+	static bool problem_reported = false;
+
+	sock = THREAD_ARG(thread);
+
+	if (thread->type == THREAD_READ_TIMEOUT || sock->fd_out == -1) {
+		/* This shouldn't happen */
+		log_message(LOG_INFO, "VRRP send socket %d, thread_type %d", sock->fd_out, thread->type);
+	} else {
+		len = recvfrom(sock->fd_out, vrrp_buffer, vrrp_buffer_len, MSG_DONTWAIT, (struct sockaddr *)&src_addr, &src_addr_len);
+		if (len == -1)
+			log_message(LOG_INFO, "Read on vrrp send socket %d failed - errno %d (%m)", sock->fd_out, errno);
+		else if (!problem_reported) {
+			log_message(LOG_INFO, "Kernel/system configuration issue causing multicast packets to be received but IP_MULTICAST_ALL unset");
+			problem_reported = true;
+		}
+	}
+
+	if (sock->fd_out != -1)
+		thread_add_read(thread->master, vrrp_write_fd_read_thread, sock, sock->fd_out, TIMER_NEVER);
+
+	return 0;
+}
 
 /* Thread functions */
 static void
@@ -453,6 +497,9 @@ vrrp_register_workers(list l)
 		if (sock->fd_in != -1)
 			sock->thread = thread_add_read(master, vrrp_read_dispatcher_thread,
 						       sock, sock->fd_in, vrrp_timer);
+		if (sock->fd_out != -1 && !(global_data->vrrp_rx_bufs_policy & RX_BUFS_NO_SEND_RX))
+			thread_add_read(master, vrrp_write_fd_read_thread,
+						       sock, sock->fd_out, TIMER_NEVER);
 	}
 }
 
@@ -464,24 +511,24 @@ vrrp_thread_add_read(vrrp_t *vrrp)
 }
 
 /* VRRP dispatcher functions */
-static int
+static sock_t *
 already_exist_sock(list l, sa_family_t family, int proto, ifindex_t ifindex, bool unicast)
 {
 	sock_t *sock;
 	element e;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		sock = ELEMENT_DATA(e);
+	LIST_FOREACH(l, sock, e) {
 		if ((sock->family == family)	&&
 		    (sock->proto == proto)	&&
 		    (sock->ifindex == ifindex)	&&
 		    (sock->unicast == unicast))
-			return 1;
+			return sock;
 	}
-	return 0;
+
+	return NULL;
 }
 
-static void
+static sock_t *
 alloc_sock(sa_family_t family, list l, int proto, ifindex_t ifindex, bool unicast)
 {
 	sock_t *new;
@@ -493,20 +540,21 @@ alloc_sock(sa_family_t family, list l, int proto, ifindex_t ifindex, bool unicas
 	new->unicast = unicast;
 
 	list_add(l, new);
+
+	return new;
 }
 
 static void
 vrrp_create_sockpool(list l)
 {
 	vrrp_t *vrrp;
-	list p = vrrp_data->vrrp;
 	element e;
 	ifindex_t ifindex;
 	int proto;
 	bool unicast;
+	sock_t *sock;
 
-	for (e = LIST_HEAD(p); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
 		ifindex =
 #ifdef _HAVE_VRRP_VMAC_
 			  (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? IF_BASE_INDEX(vrrp->ifp) :
@@ -521,8 +569,17 @@ vrrp_create_sockpool(list l)
 			proto = IPPROTO_VRRP;
 
 		/* add the vrrp element if not exist */
-		if (!already_exist_sock(l, vrrp->family, proto, ifindex, unicast))
-			alloc_sock(vrrp->family, l, proto, ifindex, unicast);
+		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifindex, unicast)))
+			sock = alloc_sock(vrrp->family, l, proto, ifindex, unicast);
+
+		if (vrrp->kernel_rx_buf_size)
+			sock->rx_buf_size += vrrp->kernel_rx_buf_size;
+		else if (global_data->vrrp_rx_bufs_policy & RX_BUFS_SIZE)
+			sock->rx_buf_size += global_data->vrrp_rx_bufs_size;
+		else if (global_data->vrrp_rx_bufs_policy & RX_BUFS_POLICY_ADVERT)
+			sock->rx_buf_size += global_data->vrrp_rx_bufs_multiples * vrrp_adv_len(vrrp);
+		else if (global_data->vrrp_rx_bufs_policy & RX_BUFS_POLICY_MTU)
+			sock->rx_buf_size += global_data->vrrp_rx_bufs_multiples * vrrp->ifp->mtu;
 	}
 }
 
@@ -533,20 +590,19 @@ vrrp_open_sockpool(list l)
 	element e;
 	interface_t *ifp;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		sock = ELEMENT_DATA(e);
+	LIST_FOREACH(l, sock, e) {
 		if (!sock->ifindex) {
 			sock->fd_in = sock->fd_out = -1;
 			continue;
 		}
 		ifp = if_get_by_ifindex(sock->ifindex);
 		sock->fd_in = open_vrrp_read_socket(sock->family, sock->proto,
-					       ifp, sock->unicast);
+					       ifp, sock->unicast, sock->rx_buf_size);
 		if (sock->fd_in == -1)
 			sock->fd_out = -1;
 		else
 			sock->fd_out = open_vrrp_send_socket(sock->family, sock->proto,
-							     ifp, sock->unicast);
+							     ifp, sock->unicast, sock->rx_buf_size);
 	}
 }
 
@@ -840,8 +896,11 @@ vrrp_dispatcher_read_timeout(int fd)
 
 		prev_state = vrrp->state;
 
-		if (vrrp->state == VRRP_STATE_BACK)
+		if (vrrp->state == VRRP_STATE_BACK) {
+			if (__test_bit(LOG_DETAIL_BIT, &debug))
+				log_message(LOG_INFO, "(%s) Receive advertisement timeout", vrrp->iname);
 			vrrp_goto_master(vrrp);
+		}
 		else if (vrrp->state == VRRP_STATE_MAST)
 			vrrp_master(vrrp);
 

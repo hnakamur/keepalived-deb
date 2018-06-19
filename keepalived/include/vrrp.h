@@ -47,6 +47,7 @@
 #endif
 #include "vrrp_if.h"
 #include "vrrp_sock.h"
+#include "vrrp_track.h"
 
 /* Special value for parameters when we want to know they haven't been set */
 #define	PARAMETER_UNSET		UINT_MAX
@@ -248,6 +249,8 @@ typedef struct _vrrp_t {
 	unsigned		accept;			/* Allow the non-master owner to process
 							 * the packets destined to VIP.
 							 */
+	size_t			kernel_rx_buf_size;	/* Socket receive buffer size */
+
 	bool			iptable_rules_set;	/* Iptable drop rules set to VIP list ? */
 	bool			nopreempt;		/* true if higher prio does not preempt lower */
 	unsigned long		preempt_delay;		/* Seconds*TIMER_HZ after startup until
@@ -353,12 +356,14 @@ extern bool have_ipv6_instance;
 
 /* prototypes */
 extern void clear_summary_flags(void);
+extern size_t vrrp_adv_len(vrrp_t *);
 extern vrrphdr_t *vrrp_get_header(sa_family_t, char *, unsigned *);
-extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool);
-extern int open_vrrp_read_socket(sa_family_t, int, interface_t *, bool);
+extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool, int);
+extern int open_vrrp_read_socket(sa_family_t, int, interface_t *, bool, int);
 extern int new_vrrp_socket(vrrp_t *);
 extern void vrrp_send_adv(vrrp_t *, uint8_t);
 extern void vrrp_send_link_update(vrrp_t *, unsigned);
+extern void add_vrrp_to_interface(vrrp_t *, interface_t *, int, bool, track_t);
 extern bool vrrp_state_fault_rx(vrrp_t *, char *, ssize_t);
 extern bool vrrp_state_master_rx(vrrp_t *, char *, ssize_t);
 extern void vrrp_state_master_tx(vrrp_t *);

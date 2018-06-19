@@ -421,54 +421,65 @@ free_ipaddress(void *if_data)
 	FREE(ipaddr);
 }
 
+static void
+format_ipaddress(ip_address_t *ipaddr, char *buf, size_t buf_len)
+{
+	char peer[INET6_ADDRSTRLEN];
+	char *buf_p = buf;
+	char *buf_end = buf + buf_len;
+
+	buf_p += snprintf(buf_p, buf_end - buf_p, "%s", ipaddresstos(NULL, ipaddr));
+	if (!ipaddr->have_peer)
+		buf_p += snprintf(buf_p, buf_end - buf_p, "/%d", ipaddr->ifa.ifa_prefixlen);
+	if (!IP_IS6(ipaddr) && ipaddr->u.sin.sin_brd.s_addr) {
+		buf_p += snprintf(buf_p, buf_end - buf_p, " brd %s",
+			 inet_ntop2(ipaddr->u.sin.sin_brd.s_addr));
+	}
+	buf_p += snprintf(buf_p, buf_end - buf_p, " dev %s scope %s",
+			    IF_NAME(ipaddr->ifp),
+			    get_rttables_scope(ipaddr->ifa.ifa_scope));
+	if (ipaddr->label)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " label %s", ipaddr->label);
+	if (ipaddr->have_peer) {
+		inet_ntop(ipaddr->ifa.ifa_family, &ipaddr->peer, peer, sizeof(peer));
+		buf_p += snprintf(buf_p, buf_end - buf_p, " peer %s/%d" , peer , ipaddr->ifa.ifa_prefixlen);
+	}
+#ifdef IFA_F_HOMEADDRESS		/* Linux 2.6.19 */
+	if (ipaddr->flags & IFA_F_HOMEADDRESS)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " home");
+#endif
+#ifdef IFA_F_NODAD			/* Linux 2.6.19 */
+	if (ipaddr->flagmask & IFA_F_NODAD)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " -nodad");
+#endif
+#ifdef IFA_F_MANAGETEMPADDR		/* Linux 3.14 */
+	if (ipaddr->flags & IFA_F_MANAGETEMPADDR)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " mngtmpaddr");
+#endif
+#ifdef IFA_F_NOPREFIXROUTE		/* Linux 3.14 */
+	if (ipaddr->flags & IFA_F_NOPREFIXROUTE)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " noprefixroute");
+#endif
+#ifdef IFA_F_MCAUTOJOIN			/* Linux 4.1 */
+	if (ipaddr->flags & IFA_F_MCAUTOJOIN)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " autojoin");
+#endif
+	if (ipaddr->dont_track)
+		buf_p += snprintf(buf_p, buf_end - buf_p, "%s", " no_track");
+
+	if (ipaddr->track_group)
+		buf_p += snprintf(buf_p, buf_end - buf_p, " track_group %s", ipaddr->track_group->gname);
+}
+
 void
 dump_ipaddress(FILE *fp, void *if_data)
 {
 	ip_address_t *ipaddr = if_data;
-	char peer[INET6_ADDRSTRLEN];
 	char buf[256];
-	char *buf_p = buf;
 
-	buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, "     %s", ipaddresstos(NULL, ipaddr));
-	if (!ipaddr->have_peer)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, "/%d", ipaddr->ifa.ifa_prefixlen);
-	if (!IP_IS6(ipaddr) && ipaddr->u.sin.sin_brd.s_addr) {
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " brd %s",
-			 inet_ntop2(ipaddr->u.sin.sin_brd.s_addr));
-	}
-	buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " dev %s scope %s",
-			    IF_NAME(ipaddr->ifp),
-			    get_rttables_scope(ipaddr->ifa.ifa_scope));
-	if (ipaddr->label)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " label %s", ipaddr->label);
-	if (ipaddr->have_peer) {
-		inet_ntop(ipaddr->ifa.ifa_family, &ipaddr->peer, peer, sizeof(peer));
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " peer %s/%d" , peer , ipaddr->ifa.ifa_prefixlen);
-	}
-#ifdef IFA_F_HOMEADDRESS		/* Linux 2.6.19 */
-	if (ipaddr->flags & IFA_F_HOMEADDRESS)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " home");
-#endif
-#ifdef IFA_F_NODAD			/* Linux 2.6.19 */
-	if (ipaddr->flagmask & IFA_F_NODAD)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " -nodad");
-#endif
-#ifdef IFA_F_MANAGETEMPADDR		/* Linux 3.14 */
-	if (ipaddr->flags & IFA_F_MANAGETEMPADDR)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " mngtmpaddr");
-#endif
-#ifdef IFA_F_NOPREFIXROUTE		/* Linux 3.14 */
-	if (ipaddr->flags & IFA_F_NOPREFIXROUTE)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " noprefixroute");
-#endif
-#ifdef IFA_F_MCAUTOJOIN			/* Linux 4.1 */
-	if (ipaddr->flags & IFA_F_MCAUTOJOIN)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, " autojoin");
-#endif
-	if (ipaddr->dont_track)
-		buf_p += snprintf(buf_p, buf + sizeof(buf) - buf_p, "%s", " no-track");
+	format_ipaddress(ipaddr, buf, sizeof(buf));
 
-	conf_write(fp, "%s", buf);
+	conf_write(fp, "     %s", buf);
 }
 
 ip_address_t *
@@ -520,7 +531,7 @@ parse_ipaddress(ip_address_t *ip_address, char *str, int allow_default)
 	return new;
 }
 void
-alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp)
+alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_track_group)
 {
 /* The way this works is slightly strange.
  *
@@ -677,8 +688,20 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp)
 			new->flags |= IFA_F_MCAUTOJOIN;
 			new->flagmask |= IFA_F_MCAUTOJOIN;
 #endif
-		} else if (!strcmp(str, "no-track")) {
+		} else if (!strcmp(str, "no_track")) {
 			new->dont_track = true;
+		} else if (allow_track_group && !strcmp(str, "track_group")) {
+			if (!param_avail) {
+				param_missing = true;
+				break;
+			}
+			i++;
+			if (new->track_group) {
+				log_message(LOG_INFO, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				break;
+			}
+			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
+                                log_message(LOG_INFO, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
 		} else
 			log_message(LOG_INFO, "Unknown configuration entry '%s' for ip address - ignoring", str);
 		i++;
@@ -731,6 +754,11 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp)
 			FREE(new->label);
 			new->label = NULL;
 		}
+	}
+
+	if (new->track_group && !new->ifp) {
+		log_message(LOG_INFO, "Static route have track_group if interface not specified");
+		new->track_group = NULL;
 	}
 
 	list_add(ip_list, new);
@@ -918,4 +946,13 @@ iptables_init(void)
 	else
 		global_data->using_ipsets = false;
 #endif
+}
+
+void reinstate_static_address(ip_address_t *ipaddr)
+{
+	char buf[256];
+
+	ipaddr->set = (netlink_ipaddress(ipaddr, IPADDRESS_ADD) > 0);
+	format_ipaddress(ipaddr, buf, sizeof(buf));
+	log_message(LOG_INFO, "Restoring deleted static address %s", buf);
 }

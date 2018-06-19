@@ -685,15 +685,15 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 	element e;
 
 	if (route->type != RTN_UNICAST)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", get_rttables_rtntype(route->type));
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", get_rttables_rtntype(route->type));
 	if (route->dst) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", ipaddresstos(NULL, route->dst));
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", ipaddresstos(NULL, route->dst));
 		if ((route->dst->ifa.ifa_family == AF_INET && route->dst->ifa.ifa_prefixlen != 32 ) ||
 		    (route->dst->ifa.ifa_family == AF_INET6 && route->dst->ifa.ifa_prefixlen != 128 ))
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), "/%u", route->dst->ifa.ifa_prefixlen);
 	}
 	else
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", "default");
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", "default");
 
 	if (route->src) {
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), " from %s", ipaddresstos(NULL, route->src));
@@ -880,8 +880,12 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 #endif
 		}
 	}
+
 	if (route->dont_track)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " no-track");
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " no_track");
+
+	if (route->track_group)
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " track_group %s", route->track_group->gname);
 
 	if (route->set &&
 	    !route->dont_track &&
@@ -904,10 +908,10 @@ dump_iproute(FILE *fp, void *rt_data)
 	format_iproute(route, buf, ROUTE_BUF_SIZE);
 
 	if (fp)
-		conf_write(fp, "%*s%s", 4, "", buf);
+		conf_write(fp, "%*s%s", 5, "", buf);
 	else {
 		for (i = 0, len = strlen(buf); i < len; i += i ? MAX_LOG_MSG - 7 : MAX_LOG_MSG - 5)
-			conf_write(fp, "%*s%s", i ? 6 : 4, "", buf + i);
+			conf_write(fp, "%*s%s", i ? 6 : 5, "", buf + i);
 	}
 
 	FREE(buf);
@@ -1278,7 +1282,7 @@ err:
 }
 
 void
-alloc_route(list rt_list, vector_t *strvec)
+alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 {
 	ip_route_t *new;
 	interface_t *ifp;
@@ -1682,8 +1686,17 @@ alloc_route(list rt_list, vector_t *strvec)
 				do_nexthop = true;
 			break;
 		}
-		else if (!strcmp(str, "no-track"))
+		else if (!strcmp(str, "no_track"))
 			new->dont_track = true;
+		else if (allow_track_group && !strcmp(str, "track_group")) {
+			i++;
+			if (new->track_group) {
+				log_message(LOG_INFO, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				break;
+			}
+			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
+				log_message(LOG_INFO, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
+		}
 		else {
 			if (!strcmp(str, "to"))
 				i++;
@@ -1739,6 +1752,11 @@ alloc_route(list rt_list, vector_t *strvec)
 			log_message(LOG_INFO, "Warning - cannot track route %s with no interface specified, not tracking", dest);
 			new->dont_track = true;
 		}
+	}
+
+	if (new->track_group && !new->oif) {
+		log_message(LOG_INFO, "Static route cannot have track group if no oif specified");
+		new->track_group = NULL;
 	}
 
 	list_add(rt_list, new);
@@ -1814,4 +1832,15 @@ void
 clear_diff_sroutes(void)
 {
 	clear_diff_routes(old_vrrp_data->static_routes, vrrp_data->static_routes);
+}
+
+void
+reinstate_static_route(ip_route_t *route)
+{
+	char buf[256];
+
+	route->set = (netlink_route(route, IPROUTE_ADD) > 0);
+
+	format_iproute(route, buf, sizeof(buf));
+	log_message(LOG_INFO, "Restoring deleted static route %s", buf);
 }
