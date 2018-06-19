@@ -275,6 +275,17 @@ netlink_rule(ip_rule_t *iprule, int cmd)
 }
 
 void
+reinstate_static_rule(ip_rule_t *rule)
+{
+	char buf[256];
+
+	rule->set = (netlink_rule(rule, IPRULE_ADD) > 0);
+
+	format_iprule(rule, buf, sizeof(buf));
+	log_message(LOG_INFO, "Restoring deleted static rule %s", buf);
+}
+
+void
 netlink_rulelist(list rule_list, int cmd, bool force)
 {
 	ip_rule_t *iprule;
@@ -425,7 +436,9 @@ format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
 	else
 		op += snprintf(op, (size_t)(buf_end - op), " type %s", get_rttables_rtntype(rule->action));
 	if (rule->dont_track)
-		op += snprintf(op, (size_t)(buf_end - op), " no-track");
+		op += snprintf(op, (size_t)(buf_end - op), " no_track");
+	if (rule->track_group)
+		op += snprintf(op, (size_t)(buf_end - op), " track_group %s", rule->track_group->gname);
 }
 
 void
@@ -442,7 +455,7 @@ dump_iprule(FILE *fp, void *rule_data)
 }
 
 void
-alloc_rule(list rule_list, vector_t *strvec)
+alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_track_group)
 {
 	ip_rule_t *new;
 	char *str;
@@ -736,8 +749,19 @@ fwmark_err:
 		}
 #endif
 
-		else if (!strcmp(str, "no-track"))
+		else if (!strcmp(str, "no_track"))
 			new->dont_track = true;
+#if HAVE_DECL_FRA_OIFNAME
+		else if (allow_track_group && !strcmp(str, "track_group")) {
+			i++;
+			if (new->track_group) {
+				log_message(LOG_INFO, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				break;
+			}
+			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
+                                log_message(LOG_INFO, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
+		}
+#endif
 		else {
 			uint8_t action = FR_ACT_UNSPEC;
 
@@ -818,6 +842,11 @@ fwmark_err:
 		new->mask |= IPRULE_BIT_PROTOCOL;
 	}
 #endif
+
+	if (new->track_group && !new->iif) {
+		log_message(LOG_INFO, "Static rule cannot have track_group if dev/iif not specified");
+		new->track_group = NULL;
+	}
 
 	new->family = (family == AF_UNSPEC) ? AF_INET : family;
 

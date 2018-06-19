@@ -38,6 +38,7 @@
 #include "vector.h"
 #include "vrrp_ipaddress.h"
 #include "vrrp_if.h"
+#include "vrrp_static_track.h"
 
 /* We hope to get an official definion for this, but until then make a private one */
 #ifndef RTPROT_KEEPALIVED
@@ -229,6 +230,7 @@ typedef struct _ip_route {
 	list			nhs;
 	uint32_t		mask;
 	bool			dont_track;	/* used for virtual routes */
+	static_track_group_t	*track_group;	/* used for static routes */
 	bool			set;
 	uint32_t		configured_ifindex;	/* Index of interface route is configured on */
 } ip_route_t;
@@ -243,8 +245,9 @@ extern void netlink_rtlist(list, int);
 extern void free_iproute(void *);
 extern void format_iproute(ip_route_t *, char *, size_t);
 extern void dump_iproute(FILE *, void *);
-extern void alloc_route(list, vector_t *);
+extern void alloc_route(list, vector_t *, bool);
 extern void clear_diff_routes(list, list);
 extern void clear_diff_sroutes(void);
+extern void reinstate_static_route(ip_route_t *);
 
 #endif

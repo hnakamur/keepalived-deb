@@ -79,6 +79,7 @@
 #include "global_data.h"
 #endif
 #include "keepalived_magic.h"
+#include "vrrp_static_track.h"
 
 /* Set if need to block ip addresses and are able to do so */
 bool block_ipv4;
@@ -343,6 +344,22 @@ vrrp_pkt_len(vrrp_t * vrrp)
 	return len;
 }
 
+size_t
+vrrp_adv_len(vrrp_t *vrrp)
+{
+	size_t len = vrrp_pkt_len(vrrp);
+
+	if (vrrp->family == AF_INET) {
+		len += vrrp_iphdr_len();
+#ifdef _WITH_VRRP_AUTH_
+		if (vrrp->auth_type == VRRP_AUTH_AH)
+			len += vrrp_ipsecah_len();
+#endif
+	}
+
+	return len;
+}
+
 /* VRRP header pointer from buffer */
 vrrphdr_t *
 vrrp_get_header(sa_family_t family, char *buf, unsigned *proto)
@@ -377,13 +394,17 @@ vrrp_get_header(sa_family_t family, char *buf, unsigned *proto)
 static void
 vrrp_update_pkt(vrrp_t *vrrp, uint8_t prio, struct sockaddr_storage* addr)
 {
-	bool final_update;
 	char *bufptr = vrrp->send_buffer;
 	vrrphdr_t *hd;
+#ifdef _WITH_VRRP_AUTH_
+	bool final_update;
 	uint32_t new_saddr = 0;
+#endif
 
+#ifdef _WITH_VRRP_AUTH_
 	/* We will need to be called again if there is more than one unicast peer, so don't calculate checksums */
 	final_update = (LIST_ISEMPTY(vrrp->unicast_peer) || !LIST_HEAD(vrrp->unicast_peer)->next || addr);
+#endif
 
 	if (vrrp->family == AF_INET) {
 		bufptr += vrrp_iphdr_len();
@@ -466,7 +487,9 @@ vrrp_update_pkt(vrrp_t *vrrp, uint8_t prio, struct sockaddr_storage* addr)
 
 				hd->chksum = ~acc & 0xffff;
 
+#ifdef _WITH_VRRP_AUTH_
 				new_saddr = ip->saddr;
+#endif
 			}
 		}
 
@@ -1284,7 +1307,12 @@ vrrp_build_ancillary_data(struct msghdr *msg, char *cbuf, struct sockaddr_storag
 	pkt = (struct in6_pktinfo *) CMSG_DATA(cmsg);
 	memset(pkt, 0, sizeof(struct in6_pktinfo));
 	pkt->ipi6_addr = ((struct sockaddr_in6 *) src)->sin6_addr;
-	pkt->ipi6_ifindex = vrrp->ifp->ifindex;
+#ifdef _HAVE_VRRP_VMAC_
+	if (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags))
+		pkt->ipi6_ifindex = vrrp->ifp->base_ifp->ifindex;
+	else
+#endif
+		pkt->ipi6_ifindex = vrrp->ifp->ifindex;
 
 	return 0;
 }
@@ -1305,7 +1333,7 @@ vrrp_send_pkt(vrrp_t * vrrp, struct sockaddr_storage *addr)
 	iov.iov_len = vrrp->send_buffer_size;
 
 	/* Unicast sending path */
-	if (addr && addr->ss_family) {
+	if (addr && addr->ss_family == AF_INET) {
 		msg.msg_name = addr;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
 	} else if (addr && addr->ss_family == AF_INET6) {
@@ -1329,15 +1357,7 @@ vrrp_send_pkt(vrrp_t * vrrp, struct sockaddr_storage *addr)
 static void
 vrrp_alloc_send_buffer(vrrp_t * vrrp)
 {
-	vrrp->send_buffer_size = vrrp_pkt_len(vrrp);
-
-	if (vrrp->family == AF_INET) {
-		vrrp->send_buffer_size += vrrp_iphdr_len();
-#ifdef _WITH_VRRP_AUTH_
-		if (vrrp->auth_type == VRRP_AUTH_AH)
-			vrrp->send_buffer_size += vrrp_ipsecah_len();
-#endif
-	}
+	vrrp->send_buffer_size = vrrp_adv_len(vrrp);
 
 	vrrp->send_buffer = MALLOC(vrrp->send_buffer_size);
 }
@@ -1347,7 +1367,6 @@ void
 vrrp_send_adv(vrrp_t * vrrp, uint8_t prio)
 {
 	struct sockaddr_storage *addr;
-	list l = vrrp->unicast_peer;
 	element e;
 
 	/* alloc send buffer */
@@ -1359,17 +1378,17 @@ vrrp_send_adv(vrrp_t * vrrp, uint8_t prio)
 	/* build the packet */
 	vrrp_update_pkt(vrrp, prio, NULL);
 
-	if (!LIST_ISEMPTY(l)) {
-		for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-			addr = ELEMENT_DATA(e);
+	if (LIST_ISEMPTY(vrrp->unicast_peer))
+		vrrp_send_pkt(vrrp, NULL);
+	else {
+		LIST_FOREACH(vrrp->unicast_peer, addr, e) {
 			if (vrrp->family == AF_INET)
 				vrrp_update_pkt(vrrp, prio, addr);
 			if (vrrp_send_pkt(vrrp, addr) < 0)
 				log_message(LOG_INFO, "(%s) Cant send advert to %s (%m)"
 						    , vrrp->iname, inet_sockaddrtos(addr));
 		}
-	} else
-		vrrp_send_pkt(vrrp, NULL);
+	}
 
 	++vrrp->stats->advert_sent;
 }
@@ -1975,7 +1994,7 @@ free_tracking_vrrp(void *data)
 	FREE(data);
 }
 
-static void
+void
 add_vrrp_to_interface(vrrp_t *vrrp, interface_t *ifp, int weight, bool log_addr, track_t type)
 {
 	tracking_vrrp_t *etvp = NULL;
@@ -2002,8 +2021,8 @@ add_vrrp_to_interface(vrrp_t *vrrp, interface_t *ifp, int weight, bool log_addr,
 		/* Check if this is already in the list, and adjust the weight appropriately */
 		LIST_FOREACH(ifp->tracking_vrrp, etvp, e) {
 			if (etvp->vrrp == vrrp) {
-				if (etvp->type & ~(TRACK_ADDR | TRACK_ROUTE | TRACK_RULE) &&
-				    type != TRACK_ADDR && type != TRACK_ROUTE && type != TRACK_RULE)
+				if (etvp->type & (TRACK_VRRP | TRACK_IF | TRACK_SG) &&
+				    type == TRACK_VRRP && type == TRACK_IF && type == TRACK_SG)
 					log_message(LOG_INFO, "(%s) track_interface %s is configured on VRRP instance and sync group. Remove vrrp instance or sync group config",
 							vrrp->iname, ifp->ifname);
 
@@ -2049,9 +2068,11 @@ chk_min_cfg(vrrp_t * vrrp)
 
 /* open a VRRP sending socket */
 int
-open_vrrp_send_socket(sa_family_t family, int proto, interface_t *ifp, bool unicast)
+open_vrrp_send_socket(sa_family_t family, int proto, interface_t *ifp, bool unicast, int rx_buf_size)
 {
 	int fd = -1;
+	int val = rx_buf_size;
+	socklen_t len = sizeof(val);
 
 	if (family != AF_INET && family != AF_INET6) {
 		log_message(LOG_INFO, "cant open raw socket. unknown family=%d"
@@ -2068,6 +2089,16 @@ open_vrrp_send_socket(sa_family_t family, int proto, interface_t *ifp, bool unic
 #if !HAVE_DECL_SOCK_CLOEXEC
 	set_sock_flags(fd, F_SETFD, FD_CLOEXEC);
 #endif
+
+	if (rx_buf_size || (global_data->vrrp_rx_bufs_policy & RX_BUFS_NO_SEND_RX))
+	{
+		/* If we are not receiving on the send socket, there is no
+		 * point allocating any buffers to it */
+		if (global_data->vrrp_rx_bufs_policy & RX_BUFS_NO_SEND_RX)
+			val = 0;
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, len))
+			log_message(LOG_INFO, "vrrp set send socket buffer size error %d", errno);
+	}
 
 	if (family == AF_INET) {
 		/* Set v4 related */
@@ -2097,9 +2128,11 @@ open_vrrp_send_socket(sa_family_t family, int proto, interface_t *ifp, bool unic
 
 /* open a VRRP socket and join the multicast group. */
 int
-open_vrrp_read_socket(sa_family_t family, int proto, interface_t *ifp, bool unicast)
+open_vrrp_read_socket(sa_family_t family, int proto, interface_t *ifp, bool unicast, int rx_buf_size)
 {
 	int fd = -1;
+	int val = rx_buf_size;
+	socklen_t len = sizeof(val);
 
 	/* open the socket */
 	fd = socket(family, SOCK_RAW | SOCK_CLOEXEC, proto);
@@ -2111,6 +2144,11 @@ open_vrrp_read_socket(sa_family_t family, int proto, interface_t *ifp, bool unic
 #if !HAVE_DECL_SOCK_CLOEXEC
 	set_sock_flags(fd, F_SETFD, FD_CLOEXEC);
 #endif
+
+	if (rx_buf_size) {
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, len))
+			log_message(LOG_INFO, "vrrp set receive socket buffer size error %d", errno);
+	}
 
 	/* Ensure no unwanted multicast packets are queued to this interface */
 	if (family == AF_INET)
@@ -2175,8 +2213,8 @@ new_vrrp_socket(vrrp_t * vrrp)
 	ifp = vrrp->ifp;
 #endif
 	unicast = !LIST_ISEMPTY(vrrp->unicast_peer);
-	vrrp->fd_in = open_vrrp_read_socket(vrrp->family, proto, ifp, unicast);
-	vrrp->fd_out = open_vrrp_send_socket(vrrp->family, proto, ifp, unicast);
+	vrrp->fd_in = open_vrrp_read_socket(vrrp->family, proto, ifp, unicast, vrrp->sockets->rx_buf_size);
+	vrrp->fd_out = open_vrrp_send_socket(vrrp->family, proto, ifp, unicast, vrrp->sockets->rx_buf_size);
 	alloc_vrrp_fd_bucket(vrrp);
 
 	/* Sync the other desc */
@@ -2741,8 +2779,11 @@ vrrp_complete_instance(vrrp_t * vrrp)
 
 			while (true) {
 				/* If there is no VMAC with the name and no existing
-				 * interface with the name, we can use it */
-				if (!e && !if_get_by_ifname(ifname, IF_NO_CREATE))
+				 * interface with the name, we can use it.
+				 * It we are using dynamic interfaces, the interface entry
+				 * may have been created by the configuration, but in that
+				 * case the ifindex will be 0. */
+				if (!e && (!(ifp = if_get_by_ifname(ifname, IF_NO_CREATE)) || !ifp->ifindex))
 					break;
 
 				/* For IPv6 try vrrp6 as second attempt */
@@ -2888,6 +2929,11 @@ vrrp_complete_instance(vrrp_t * vrrp)
 			vip->ifp = vrrp->ifp;
 		if (!vip->dont_track)
 			add_vrrp_to_interface(vrrp, vip->ifp, 0, false, TRACK_ADDR);
+
+		if (vip->ifa.ifa_family == AF_INET)
+			have_ipv4_instance = true;
+		else
+			have_ipv6_instance = true;
 	}
 
 	/* In case of VRRP SYNC, we have to carefully check that we are
@@ -3135,6 +3181,35 @@ sync_group_tracking_init(void)
 	}
 }
 
+#if _HAVE_FIB_ROUTING_
+static void
+process_static_entries(void)
+{
+	element e;
+	ip_route_t *sroute;
+	ip_rule_t *srule;
+
+	LIST_FOREACH(vrrp_data->static_routes, sroute, e) {
+		if (!sroute->track_group)
+			continue;
+
+		if (sroute->family == AF_INET)
+			monitor_ipv4_routes = true;
+		else
+			monitor_ipv6_routes = true;
+	}
+	LIST_FOREACH(vrrp_data->static_rules, srule, e) {
+		if (!srule->track_group)
+			continue;
+
+		if (srule->family == AF_INET)
+			monitor_ipv4_rules = true;
+		else
+			monitor_ipv6_rules = true;
+	}
+}
+#endif
+
 bool
 vrrp_complete_init(void)
 {
@@ -3213,9 +3288,8 @@ vrrp_complete_init(void)
 	}
 
 	/* Build synchronization group index, and remove any
-	 * empty groups, or groups with only one member */
+	 * empty groups */
 	LIST_FOREACH_NEXT(vrrp_data->vrrp_sync_group, sgroup, e, next) {
-		/* A group needs at least two members */
 		if (!sgroup->iname) {
 			log_message(LOG_INFO, "Sync group %s has no virtual router(s) - removing", sgroup->gname);
 			free_list_element(vrrp_data->vrrp_sync_group, e);
@@ -3239,6 +3313,9 @@ vrrp_complete_init(void)
 			max_mtu_len = vrrp->ifp->mtu;
 	}
 
+	/* Build static track groups and remove empty groups */
+	static_track_group_init();
+
 	/* Add pointers from sync group tracked scripts, file and interfaces
 	 * to members of the sync groups.
 	 * This must be called after vrrp_complete_instance() since this adds
@@ -3253,6 +3330,9 @@ vrrp_complete_init(void)
 		set_default_garp_delay();
 
 #ifdef _HAVE_FIB_ROUTING_
+	/* See if any static routes or rules need monitoring */
+	process_static_entries();
+
 	/* If we are tracking any routes/rules, ask netlink to monitor them */
 	set_extra_netlink_monitoring(monitor_ipv4_routes, monitor_ipv6_routes, monitor_ipv4_rules, monitor_ipv6_rules);
 #endif
@@ -3480,8 +3560,12 @@ restore_vrrp_state(vrrp_t *old_vrrp, vrrp_t *vrrp)
 	vrrp->state = old_vrrp->state;
 	vrrp->reload_master = old_vrrp->state == VRRP_STATE_MAST;
 	vrrp->wantstate = old_vrrp->wantstate;
-	if (!old_vrrp->sync)
-		vrrp->effective_priority = old_vrrp->effective_priority + vrrp->base_priority - old_vrrp->base_priority;
+	if (!old_vrrp->sync && vrrp->base_priority != VRRP_PRIO_OWNER) {
+		vrrp->total_priority = old_vrrp->total_priority + vrrp->base_priority - old_vrrp->base_priority;
+		vrrp->effective_priority = (vrrp->total_priority < 0) ? 0 :
+					   (vrrp->total_priority >= VRRP_PRIO_OWNER) ? VRRP_PRIO_OWNER - 1 :
+					   (uint8_t)vrrp->total_priority;
+	}
 
 	/* Save old stats */
 	memcpy(vrrp->stats, old_vrrp->stats, sizeof(vrrp_stats));

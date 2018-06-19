@@ -53,6 +53,7 @@
 #ifdef _HAVE_VRRP_VMAC_
 #include "vrrp_vmac.h"
 #endif
+#include "vrrp_static_track.h"
 
 #ifdef _WITH_LVS_
 #include "check_parser.h"
@@ -71,6 +72,54 @@ static long track_file_init_weight;
 
 static bool script_user_set;
 static bool remove_script;
+
+/* track groups for static items */
+static void
+static_track_group_handler(vector_t *strvec)
+{
+	element e;
+	static_track_group_t *tg;
+	char* gname;
+
+	if (!strvec)
+		return;
+
+	if (vector_count(strvec) != 2) {
+		log_message(LOG_INFO, "track_group must have a name - skipping");
+		skip_block(true);
+		return;
+	}
+
+	gname = strvec_slot(strvec, 1);
+
+	/* check group doesn't already exist */
+	LIST_FOREACH(vrrp_data->static_track_groups, tg, e) {
+		if (!strcmp(gname,tg->gname)) {
+			log_message(LOG_INFO, "track_group %s already defined", gname);
+			skip_block(true);
+			return;
+		}
+	}
+
+	alloc_static_track_group(gname);
+}
+
+static void
+static_track_group_group_handler(vector_t *strvec)
+{
+	static_track_group_t *tgroup = LIST_TAIL_DATA(vrrp_data->static_track_groups);
+
+	if (tgroup->iname) {
+		log_message(LOG_INFO, "Group list already specified for sync group %s", tgroup->gname);
+		skip_block(true);
+		return;
+	}
+
+	tgroup->iname = read_value_block(strvec);
+
+	if (!tgroup->iname)
+		log_message(LOG_INFO, "Warning - track group %s has empty group block", tgroup->gname);
+}
 
 /* Static addresses handler */
 static void
@@ -762,8 +811,8 @@ static void
 vrrp_higher_prio_send_advert_handler(vector_t *strvec)
 {
 	int res;
-
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res >= 0)
@@ -776,6 +825,24 @@ vrrp_higher_prio_send_advert_handler(vector_t *strvec)
 	}
 }
 
+
+static void
+kernel_rx_buf_size_handler(vector_t *strvec)
+{
+	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	unsigned long rx_buf_size;
+	char *endptr;
+
+	if (vector_size(strvec) == 2) {
+		rx_buf_size = strtoul(strvec_slot(strvec, 1), &endptr, 0);
+		if (!*endptr) {
+			vrrp->kernel_rx_buf_size = rx_buf_size;
+			return;
+		}
+	}
+
+	log_message(LOG_INFO, "(%s) invalid kernel_rx_buf_size specified", vrrp->iname);
+}
 
 #if defined _WITH_VRRP_AUTH_
 static void
@@ -1211,7 +1278,9 @@ garp_group_end_handler(void)
 void
 init_vrrp_keywords(bool active)
 {
-	/* Static routes mapping */
+	/* Static addresses/routes/rules */
+	install_keyword_root("track_group", &static_track_group_handler, active);
+	install_keyword("group", &static_track_group_group_handler);
 	install_keyword_root("static_ipaddress", &static_addresses_handler, active);
 #ifdef _HAVE_FIB_ROUTING_
 	install_keyword_root("static_routes", &static_routes_handler, active);
@@ -1303,6 +1372,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
 	install_keyword("lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
+	install_keyword("kernel_rx_buf_size", &kernel_rx_buf_size_handler);
 #if defined _WITH_VRRP_AUTH_
 	install_keyword("authentication", NULL);
 	install_sublevel();

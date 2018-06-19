@@ -44,7 +44,7 @@ static inline void __clear_bit(unsigned idx, unsigned long *bmap)
 	bmap[BIT_WORD(idx)] &= ~BIT_MASK(idx);
 }
 
-static inline bool __test_bit(unsigned idx, unsigned long *bmap)
+static inline bool __test_bit(unsigned idx, const unsigned long *bmap)
 {
 	return !!(bmap[BIT_WORD(idx)] & BIT_MASK(idx));
 }
@@ -74,6 +74,7 @@ enum global_bits {
 #ifdef _WITH_LVS_
 	LOG_ADDRESS_CHANGES,
 #endif
+	CONFIG_TEST_BIT,
 };
 
 #endif
