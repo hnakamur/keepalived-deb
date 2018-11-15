@@ -33,9 +33,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#ifdef HAVE_LIBNFNETLINK_LIBNFNETLINK_H
-#include <libnfnetlink/libnfnetlink.h>
-#endif
 
 /* local include */
 #include "vector.h"
@@ -119,7 +116,9 @@ typedef struct _vrrp_sgroup {
 	list			track_ifp;		/* Interface state we monitor */
 	list			track_script;		/* Script state we monitor */
 	list			track_file;		/* Files whose value we monitor (list of tracked_file_t) */
+#ifdef _WITH_BFD_
 	list			track_bfd;		/* List of tracked_bfd_t */
+#endif
 
 	/* State transition notification */
 	bool			notify_exec;
@@ -194,7 +193,9 @@ typedef struct _vrrp_t {
 #ifdef _HAVE_VRRP_VMAC_
 	unsigned long		vmac_flags;		/* VRRP VMAC flags */
 	char			vmac_ifname[IFNAMSIZ];	/* Name of VRRP VMAC interface */
+	bool			duplicate_vrid_fault;	/* Set if we have a fault due to duplicate VRID */
 #endif
+	interface_t		*configured_ifp;	/* Interface the configuration says we are on */
 	list			track_ifp;		/* Interface state we monitor */
 	list			track_script;		/* Script state we monitor */
 	list			track_file;		/* list of tracked_file_t - Files whose value we monitor */
@@ -278,6 +279,7 @@ typedef struct _vrrp_t {
 	notify_script_t		*script_master;
 	notify_script_t		*script_fault;
 	notify_script_t		*script_stop;
+	notify_script_t		*script_master_rx_lower_pri;
 	notify_script_t		*script;
 
 	/* rfc2338.6.2 */
@@ -306,6 +308,12 @@ typedef struct _vrrp_t {
 	 * to warn the user only if the outoing mtu is too small
 	 */
 	int			ip_id;
+
+	/* RB tree on a sock_t for receiving data */
+	rb_node_t		rb_vrid;
+
+	/* RB tree on a sock_t for vrrp sands */
+	rb_node_t		rb_sands;
 } vrrp_t;
 
 /* VRRP state machine -- rfc2338.6.4 */
@@ -315,6 +323,7 @@ typedef struct _vrrp_t {
 #define VRRP_STATE_FAULT		3	/* internal */
 #define VRRP_STATE_STOP			98	/* internal */
 #define VRRP_DISPATCHER			99	/* internal */
+#define VRRP_EVENT_MASTER_RX_LOWER_PRI	1000	/* Dummy state for sending event notify */
 
 /* VRRP packet handling */
 #define VRRP_PACKET_OK       0
@@ -328,12 +337,6 @@ typedef struct _vrrp_t {
 #define VRRP_VIP_TYPE		(1 << 0)
 #define VRRP_EVIP_TYPE		(1 << 1)
 
-/* VRRP macro */
-#define VRRP_IS_BAD_VERSION(id)		((id) < 2 || (id) > 3)
-#define VRRP_IS_BAD_VID(id)		((id) < 1 || (id) > 255)	/* rfc2338.6.1.vrid */
-#define VRRP_IS_BAD_PRIORITY(p)		((p) < 1 || (p) > VRRP_PRIO_OWNER)	/* rfc2338.6.1.prio */
-#define VRRP_IS_BAD_DEBUG_INT(d)	((d) < 0 || (d) > 4)
-
 /* We have to do some reduction of the calculation for VRRPv3 in order not to overflow a uint32; 625 / 16 == TIMER_CENTI_HZ / 256 */
 #define VRRP_TIMER_SKEW(svr)	((svr)->version == VRRP_VERSION_3 ? (((256U-(svr)->effective_priority) * ((svr)->master_adver_int / TIMER_CENTI_HZ) * 625U) / 16U) : ((256U-(svr)->effective_priority) * TIMER_HZ/256U))
 #define VRRP_TIMER_SKEW_MIN(svr)	((svr)->version == VRRP_VERSION_3 ? ((((svr)->master_adver_int / TIMER_CENTI_HZ) * 625U) / 16U) : (TIMER_HZ/256U))
@@ -342,7 +345,12 @@ typedef struct _vrrp_t {
 #define VRRP_MIN(a, b)	((a) < (b)?(a):(b))
 #define VRRP_MAX(a, b)	((a) > (b)?(a):(b))
 
-#define VRRP_PKT_SADDR(V) (((V)->saddr.ss_family) ? ((struct sockaddr_in *) &(V)->saddr)->sin_addr.s_addr : IF_ADDR((V)->ifp))
+#ifdef _HAVE_VRRP_VMAC_
+#define VRRP_CONFIGURED_IFP(V)	((V)->configured_ifp)
+#else
+#define VRRP_CONFIGURED_IFP(V)	((V)->ifp)
+#endif
+#define VRRP_PKT_SADDR(V) (((V)->saddr.ss_family) ? ((struct sockaddr_in *) &(V)->saddr)->sin_addr.s_addr : IF_ADDR(VRRP_CONFIGURED_IFP(V)))
 
 #define VRRP_ISUP(V)		(!(V)->num_script_if_fault)
 
@@ -358,12 +366,13 @@ extern bool have_ipv6_instance;
 extern void clear_summary_flags(void);
 extern size_t vrrp_adv_len(vrrp_t *);
 extern vrrphdr_t *vrrp_get_header(sa_family_t, char *, unsigned *);
-extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool, int);
+extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool);
 extern int open_vrrp_read_socket(sa_family_t, int, interface_t *, bool, int);
 extern int new_vrrp_socket(vrrp_t *);
 extern void vrrp_send_adv(vrrp_t *, uint8_t);
 extern void vrrp_send_link_update(vrrp_t *, unsigned);
 extern void add_vrrp_to_interface(vrrp_t *, interface_t *, int, bool, track_t);
+extern void del_vrrp_from_interface(vrrp_t *, interface_t *);
 extern bool vrrp_state_fault_rx(vrrp_t *, char *, ssize_t);
 extern bool vrrp_state_master_rx(vrrp_t *, char *, ssize_t);
 extern void vrrp_state_master_tx(vrrp_t *);
@@ -379,5 +388,8 @@ extern void clear_diff_vrrp(void);
 extern void clear_diff_script(void);
 extern void clear_diff_bfd(void);
 extern void vrrp_restore_interface(vrrp_t *, bool, bool);
+#ifdef THREAD_DUMP
+extern void register_vrrp_fifo_addresses(void);
+#endif
 
 #endif

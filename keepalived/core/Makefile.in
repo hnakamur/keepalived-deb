@@ -119,7 +119,7 @@ libcore_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
 am_libcore_a_OBJECTS = main.$(OBJEXT) daemon.$(OBJEXT) \
 	pidfile.$(OBJEXT) layer4.$(OBJEXT) smtp.$(OBJEXT) \
 	global_data.$(OBJEXT) global_parser.$(OBJEXT) \
-	process.$(OBJEXT) keepalived_netlink.$(OBJEXT)
+	keepalived_netlink.$(OBJEXT)
 am__EXTRA_libcore_a_SOURCES_DIST = snmp.c namespaces.c libnl_link.c
 libcore_a_OBJECTS = $(am_libcore_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
@@ -194,6 +194,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -203,6 +204,7 @@ EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 GENHASH_LIBS = @GENHASH_LIBS@
 GREP = @GREP@
+HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 HAVE_SPHINX_BUILD = @HAVE_SPHINX_BUILD@
 INSTALL = @INSTALL@
@@ -298,8 +300,7 @@ AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
 noinst_LIBRARIES = libcore.a
 libcore_a_SOURCES = main.c daemon.c pidfile.c layer4.c smtp.c \
-			  global_data.c global_parser.c process.c \
-			  keepalived_netlink.c
+			  global_data.c global_parser.c keepalived_netlink.c
 
 libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5)
 EXTRA_libcore_a_SOURCES = $(am__append_2) $(am__append_4) \
@@ -361,7 +362,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/main.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/namespaces.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pidfile.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/process.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/snmp.Po@am__quote@
 

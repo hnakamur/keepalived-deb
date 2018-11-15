@@ -37,6 +37,7 @@
 #include "vrrp_iprule.h"
 #include "logger.h"
 #include "timer.h"
+#include "utils.h"
 
 static inline double
 timeval_to_double(const timeval_t *t)
@@ -55,7 +56,7 @@ vrrp_print_json(void)
 	if (LIST_ISEMPTY(vrrp_data->vrrp))
 		return;
 
-	file = fopen ("/tmp/keepalived.json","w");
+	file = fopen_safe("/tmp/keepalived.json", "w");
 	if (!file) {
 		log_message(LOG_INFO, "Can't open /tmp/keepalived.json (%d: %s)",
 			errno, strerror(errno));
@@ -114,7 +115,7 @@ vrrp_print_json(void)
 				tracked_sc_t *tsc = ELEMENT_DATA(f);
 				vrrp_script_t *vscript = tsc->scr;
 				json_object_array_add(track_script,
-					json_object_new_string(vscript->script.cmd_str));
+					json_object_new_string(cmd_str(&vscript->script)));
 			}
 		}
 		json_object_object_add(json_data, "track_script", track_script);
@@ -222,20 +223,23 @@ vrrp_print_json(void)
 		json_object_object_add(json_data, "version",
 			json_object_new_int(vrrp->version));
 		if (vrrp->script_backup)
-		json_object_object_add(json_data, "script_backup",
-			json_object_new_string(vrrp->script_backup->cmd_str));
+			json_object_object_add(json_data, "script_backup",
+				json_object_new_string(cmd_str(vrrp->script_backup)));
 		if (vrrp->script_master)
-		json_object_object_add(json_data, "script_master",
-			json_object_new_string(vrrp->script_master->cmd_str));
+			json_object_object_add(json_data, "script_master",
+				json_object_new_string(cmd_str(vrrp->script_master)));
 		if (vrrp->script_fault)
-		json_object_object_add(json_data, "script_fault",
-			json_object_new_string(vrrp->script_fault->cmd_str));
+			json_object_object_add(json_data, "script_fault",
+				json_object_new_string(cmd_str(vrrp->script_fault)));
 		if (vrrp->script_stop)
-		json_object_object_add(json_data, "script_stop",
-			json_object_new_string(vrrp->script_stop->cmd_str));
+			json_object_object_add(json_data, "script_stop",
+				json_object_new_string(cmd_str(vrrp->script_stop)));
 		if (vrrp->script)
-		json_object_object_add(json_data, "script",
-			json_object_new_string(vrrp->script->cmd_str));
+			json_object_object_add(json_data, "script",
+				json_object_new_string(cmd_str(vrrp->script)));
+		if (vrrp->script_master_rx_lower_pri)
+			json_object_object_add(json_data, "script_master_rx_lower_pri",
+				json_object_new_string(cmd_str(vrrp->script_master_rx_lower_pri)));
 		json_object_object_add(json_data, "smtp_alert",
 			json_object_new_boolean(vrrp->smtp_alert));
 #ifdef _WITH_VRRP_AUTH_

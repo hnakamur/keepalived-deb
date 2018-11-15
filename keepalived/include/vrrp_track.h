@@ -120,12 +120,13 @@ typedef enum {
 	TRACK_VRRP = 0x01,
 	TRACK_IF = 0x02,
 	TRACK_SG = 0x04,
-	TRACK_ADDR = 0x04,
-	TRACK_ROUTE = 0x08,
-	TRACK_RULE = 0x10,
-	TRACK_SADDR = 0x20,
-	TRACK_SROUTE = 0x40,
-	TRACK_SRULE = 0x80,
+	TRACK_ADDR = 0x08,
+	TRACK_ROUTE = 0x10,
+	TRACK_RULE = 0x20,
+	TRACK_SADDR = 0x40,
+	TRACK_SROUTE = 0x80,
+	TRACK_SRULE = 0x100,
+	TRACK_VRRP_DYNAMIC = 0x200,
 } track_t;
 
 /* List structure from scripts, files and interfaces to tracking vrrp */
@@ -159,9 +160,11 @@ extern vrrp_script_t *find_script_by_name(char *);
 extern void update_script_priorities(vrrp_script_t *, bool);
 extern void down_instance(struct _vrrp_t *);
 extern void vrrp_set_effective_priority(struct _vrrp_t *);
-extern void initialise_interface_tracking_priorities(void);
-extern void initialise_tracking_priorities(struct _vrrp_t *);
+extern void initialise_tracking_priorities(void);
 extern void init_track_files(list);
 extern void stop_track_files(void);
+#ifdef THREAD_DUMP
+extern void register_vrrp_inotify_addresses(void);
+#endif
 
 #endif

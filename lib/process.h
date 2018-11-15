@@ -3,7 +3,7 @@
  *              <www.linuxvirtualserver.org>. It monitor & manipulate
  *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        vrrp_index.c include file.
+ * Part:        Process management
  *
  * Author:      Alexandre Cassen, <acassen@linux-vs.org>
  *
@@ -20,26 +20,26 @@
  * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _VRRP_INDEX_H
-#define _VRRP_INDEX_H
+#ifndef _PROCESS_H
+#define _PROCESS_H
 
-/* local includes */
-#include "vrrp.h"
+#include <sys/types.h>
+#include <sys/resource.h>
 
-/* Macro definition */
-#define	FD_INDEX_SIZE		1024
-#define	FD_INDEX_HASH(fd)	(fd % FD_INDEX_SIZE)
-
-#define VRRP_INDEX_FD_SIZE	1151	/* See get_vrrp_hash() for explanation of value */
-
-/* prototypes */
-extern int get_vrrp_hash(const int, const int);
-extern void alloc_vrrp_bucket(vrrp_t *);
-extern void alloc_vrrp_fd_bucket(vrrp_t *);
-extern vrrp_t *vrrp_index_lookup(const int, const int);
-extern void remove_vrrp_fd_bucket(int);
-#ifdef _INCLUDE_UNUSED_CODE_
-extern void set_vrrp_fd_bucket(int, vrrp_t *);
+#if HAVE_DECL_RLIMIT_RTTIME == 1
+#define	RT_RLIMIT_DEFAULT	10000
 #endif
+
+extern void set_process_priorities(
+#ifdef _HAVE_SCHED_RT_
+			           int,
+#if HAVE_DECL_RLIMIT_RTTIME == 1
+			           int,
+#endif
+#endif
+				   int, int);
+extern void reset_process_priorities(void);
+extern void set_child_rlimit(int, struct rlimit *);
+extern pid_t local_fork(void);
 
 #endif

@@ -93,7 +93,7 @@
      sockets e.g. to udp:localhost:705 which will enable keepalived to communicate
      with its own instance of snmpd running in the same network namespace,
      and then set snmp_socket in the keepalived global configuration.
-     To run snmpd use snmpd -Ls0-6d -x udp:localhost:705, which it appears
+     To run snmpd use snmpd -LS0-6d -x udp:localhost:705, which it appears
      should work but it doesn't seem to.
 
  */
@@ -128,6 +128,7 @@
 #include "bitops.h"
 #include "main.h"
 #include "rttables.h"
+#include "parser.h"
 
 #include "snmp.h"
 
@@ -199,6 +200,7 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_INSTANCE_PROMOTE_SECONDARIES,
 	VRRP_SNMP_INSTANCE_USE_LINKBEAT,
 	VRRP_SNMP_INSTANCE_VRRP_VERSION,
+	VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI,
 	VRRP_SNMP_TRACKEDINTERFACE_NAME,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT,
 	VRRP_SNMP_TRACKEDSCRIPT_NAME,
@@ -471,6 +473,7 @@ enum rfcv3_snmp_stats_magic {
 
 /* Static return value */
 static longret_t long_ret;
+static char buf[MAXBUF];
 
 /* global variable */
 #ifdef _WITH_SNMP_RFC_
@@ -529,8 +532,9 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		*var_len = strlen(scr->sname);
 		return (u_char *)scr->sname;
 	case VRRP_SNMP_SCRIPT_COMMAND:
-		*var_len = strlen(scr->script.cmd_str);
-		return (u_char *)scr->script.cmd_str;
+		cmd_str_r(&scr->script, buf, sizeof(buf));
+		*var_len = strlen(buf);
+		return (u_char *)buf;
 	case VRRP_SNMP_SCRIPT_INTERVAL:
 		long_ret.u = scr->interval / TIMER_HZ;
 		return (u_char *)&long_ret;
@@ -1204,16 +1208,16 @@ static u_char*
 vrrp_snmp_encap(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
-#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
-	static char labels[11*MAX_MPLS_LABELS];
-#endif
-	char *op;
 	ip_route_t *route;
 	nexthop_t *nh;
 	encap_t *encap;
 	int state = HEADER_STATE_STATIC_ROUTE;
-	unsigned i;
 	static struct counter64 c64;
+#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
+	static char labels[11*MAX_MPLS_LABELS];
+	char *op;
+	unsigned i;
+#endif
 
 	if (vp->name[vp->namelen - 3] == 7) {
 		if ((route = (ip_route_t *)vrrp_header_ar_table(vp, name, length, exact,
@@ -1666,32 +1670,37 @@ vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_SYNCGROUP_SCRIPTMASTER:
 		if (group->script_master) {
-			*var_len = strlen(group->script_master->cmd_str);
-			return (u_char *)group->script_master->cmd_str;
+			cmd_str_r(group->script_master, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_SYNCGROUP_SCRIPTBACKUP:
 		if (group->script_backup) {
-			*var_len = strlen(group->script_backup->cmd_str);
-			return (u_char *)group->script_backup->cmd_str;
+			cmd_str_r(group->script_backup, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_SYNCGROUP_SCRIPTFAULT:
 		if (group->script_fault) {
-			*var_len = strlen(group->script_fault->cmd_str);
-			return (u_char *)group->script_fault->cmd_str;
+			cmd_str_r(group->script_fault, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_SYNCGROUP_SCRIPTSTOP:
 		if (group->script_stop) {
-			*var_len = strlen(group->script_stop->cmd_str);
-			return (u_char *)group->script_stop->cmd_str;
+			cmd_str_r(group->script_stop, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_SYNCGROUP_SCRIPT:
 		if (group->script) {
-			*var_len = strlen(group->script->cmd_str);
-			return (u_char *)group->script->cmd_str;
+			cmd_str_r(group->script, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	default:
@@ -2033,32 +2042,44 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_INSTANCE_SCRIPTMASTER:
 		if (rt->script_master) {
-			*var_len = strlen(rt->script_master->cmd_str);
-			return (u_char *)rt->script_master->cmd_str;
+			cmd_str_r(rt->script_master, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_SCRIPTBACKUP:
 		if (rt->script_backup) {
-			*var_len = strlen(rt->script_backup->cmd_str);
-			return (u_char *)rt->script_backup->cmd_str;
+			cmd_str_r(rt->script_backup, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_SCRIPTFAULT:
 		if (rt->script_fault) {
-			*var_len = strlen(rt->script_fault->cmd_str);
-			return (u_char *)rt->script_fault->cmd_str;
+			cmd_str_r(rt->script_fault, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_SCRIPTSTOP:
 		if (rt->script_stop) {
-			*var_len = strlen(rt->script_stop->cmd_str);
-			return (u_char *)rt->script_stop->cmd_str;
+			cmd_str_r(rt->script_stop, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
+		}
+		break;
+	case VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI:
+		if (rt->script_master_rx_lower_pri) {
+			cmd_str_r(rt->script_master_rx_lower_pri, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_SCRIPT:
 		if (rt->script) {
-			*var_len = strlen(rt->script->cmd_str);
-			return (u_char *)rt->script->cmd_str;
+			cmd_str_r(rt->script, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_ACCEPT:
@@ -2704,6 +2725,8 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_instance, 3, {3, 1, 29} },
 	{VRRP_SNMP_INSTANCE_VRRP_VERSION, ASN_INTEGER, RONLY,
 	 vrrp_snmp_instance, 3, {3, 1, 30} },
+	{VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 31}},
 
 	/* vrrpTrackedInterfaceTable */
 	{VRRP_SNMP_TRACKEDINTERFACE_NAME, ASN_OCTET_STR, RONLY,
@@ -3441,7 +3464,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		return (u_char*)&((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 	case VRRP_RFC_SNMP_OPER_PIP:
 #ifdef _HAVE_VRRP_VMAC_
-		if (rt->ifp->vmac)
+		if (rt->ifp->vmac_type)
 			ifp = rt->ifp->base_ifp;
 		else
 #endif
@@ -4108,7 +4131,7 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		/* Falls through. */
 	case VRRP_RFCv3_SNMP_OPER_PIP:
 #ifdef _HAVE_VRRP_VMAC_
-		if (rt->ifp->vmac)
+		if (rt->ifp->vmac_type)
 			ifp = rt->ifp->base_ifp;
 		else
 #endif

@@ -42,6 +42,7 @@
 #include "memory.h"
 #include "vrrp_scheduler.h"
 #include "scheduler.h"
+#include "parser.h"
 
 static int inotify_fd = -1;
 static thread_t *inotify_thread;
@@ -72,30 +73,29 @@ alloc_track_if(vrrp_t *vrrp, vector_t *strvec)
 	ifp = if_get_by_ifname(tracked, IF_CREATE_IF_DYNAMIC);
 
 	if (!ifp) {
-		log_message(LOG_INFO, "(%s) tracked interface %s doesn't exist", vrrp->iname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) tracked interface %s doesn't exist", vrrp->iname, tracked);
 		return;
 	}
 
 	/* Check this vrrp isn't already tracking the i/f */
 	LIST_FOREACH(vrrp->track_ifp, tip, e) {
 		if (tip->ifp == ifp) {
-			log_message(LOG_INFO, "(%s) duplicate track_interface %s - ignoring", vrrp->iname, tracked);
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_interface %s - ignoring", vrrp->iname, tracked);
 			return;
 		}
 	}
 
 	if (vector_size(strvec) >= 3 &&
 	    !strcmp(strvec_slot(strvec, 1), "weight")) {
-		weight = atoi(strvec_slot(strvec, 2));
-		if (weight == -254 || weight == 254) {
-			/* This check can be removed once users have migrated away from +/-254 */
-			log_message(LOG_INFO, "(%s) weight for %s cannot be +/-254. Setting to +/-253", vrrp->iname, tracked);
-			weight = weight == -254 ? -253 : 253;
-		}
-		else if (weight < -253 || weight > 253) {
-			log_message(LOG_INFO, "(%s) weight for %s must be between "
-					 "[-253..253] inclusive. Ignoring...", vrrp->iname, tracked);
+		if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight %s for %s must be between "
+					 "[-253..253] inclusive. Ignoring...", vrrp->iname, FMT_STR_VSLOT(strvec, 2), tracked);
 			weight = 0;
+		}
+		else if (weight == -254 || weight == 254) {
+			/* This check can be removed once users have migrated away from +/-254 */
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for %s cannot be +/-254. Setting to +/-253", vrrp->iname, tracked);
+			weight = weight == -254 ? -253 : 253;
 		}
 	}
 
@@ -118,30 +118,29 @@ alloc_group_track_if(vrrp_sgroup_t *sgroup, vector_t *strvec)
 	ifp = if_get_by_ifname(tracked, IF_CREATE_IF_DYNAMIC);
 
 	if (!ifp) {
-		log_message(LOG_INFO, "(%s) tracked interface %s doesn't exist", sgroup->gname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) tracked interface %s doesn't exist", sgroup->gname, tracked);
 		return;
 	}
 
 	/* Check this sgroup isn't already tracking the i/f */
 	LIST_FOREACH(sgroup->track_ifp, tip, e) {
 		if (tip->ifp == ifp) {
-			log_message(LOG_INFO, "(%s) duplicate track_interface %s - ignoring", sgroup->gname, tracked);
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_interface %s - ignoring", sgroup->gname, tracked);
 			return;
 		}
 	}
 
 	if (vector_size(strvec) >= 3 &&
 	    !strcmp(strvec_slot(strvec, 1), "weight")) {
-		weight = atoi(strvec_slot(strvec, 2));
-		if (weight == -254 || weight == 254) {
-			/* This check can be removed once users have migrated away from +/-254 */
-			log_message(LOG_INFO, "(%s) weight for %s cannot be +/-254. Setting to +/-253", sgroup->gname, tracked);
-			weight = weight == -254 ? -253 : 253;
-		}
-		else if (weight < -253 || weight > 253) {
-			log_message(LOG_INFO, "(%s) weight for %s must be between "
+		if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for %s must be between "
 					 "[-253..253] inclusive. Ignoring...", sgroup->gname, tracked);
 			weight = 0;
+		}
+		else if (weight == -254 || weight == 254) {
+			/* This check can be removed once users have migrated away from +/-254 */
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for %s cannot be +/-254. Setting to +/-253", sgroup->gname, tracked);
+			weight = weight == -254 ? -253 : 253;
 		}
 	}
 
@@ -197,7 +196,7 @@ alloc_track_script(vrrp_t *vrrp, vector_t *strvec)
 
 	/* Ignoring if no script found */
 	if (!vsc) {
-		log_message(LOG_INFO, "(%s) track script %s not found, ignoring...", vrrp->iname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track script %s not found, ignoring...", vrrp->iname, tracked);
 		return;
 	}
 
@@ -206,7 +205,7 @@ alloc_track_script(vrrp_t *vrrp, vector_t *strvec)
 		for (e = LIST_HEAD(vrrp->track_script); e; ELEMENT_NEXT(e)) {
 			etsc = ELEMENT_DATA(e);
 			if (etsc->scr == vsc) {
-				log_message(LOG_INFO, "(%s) duplicate track_script %s - ignoring", vrrp->iname, tracked);
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_script %s - ignoring", vrrp->iname, tracked);
 				return;
 			}
 		}
@@ -217,17 +216,16 @@ alloc_track_script(vrrp_t *vrrp, vector_t *strvec)
 
 	if (vector_size(strvec) >= 3 &&
 	    !strcmp(strvec_slot(strvec, 1), "weight")) {
-		weight = atoi(strvec_slot(strvec, 2));
-		if (weight == -254 || weight == 254) {
-			/* This check can be removed once users have migrated away from +/-254 */
-			log_message(LOG_INFO, "(%s) weight for %s cannot be +/-254. Setting to +/-253", vrrp->iname, tracked);
-			weight = weight == -254 ? -253 : 253;
-		}
-		else if (weight < -253 || weight > 253) {
+		if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
 			weight = vsc->weight;
-			log_message(LOG_INFO, "(%s) track script %s: weight must be between [-253..253]"
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) track script %s: weight must be between [-253..253]"
 					 " inclusive, ignoring...",
 			       vrrp->iname, tracked);
+		}
+		else if (weight == -254 || weight == 254) {
+			/* This check can be removed once users have migrated away from +/-254 */
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for %s cannot be +/-254. Setting to +/-253", vrrp->iname, tracked);
+			weight = weight == -254 ? -253 : 253;
 		}
 	}
 
@@ -252,7 +250,7 @@ alloc_group_track_script(vrrp_sgroup_t *sgroup, vector_t *strvec)
 
 	/* Ignoring if no script found */
 	if (!vsc) {
-		log_message(LOG_INFO, "(%s) track script %s not found, ignoring...", sgroup->gname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track script %s not found, ignoring...", sgroup->gname, tracked);
 		return;
 	}
 
@@ -261,7 +259,7 @@ alloc_group_track_script(vrrp_sgroup_t *sgroup, vector_t *strvec)
 		for (e = LIST_HEAD(sgroup->track_script); e; ELEMENT_NEXT(e)) {
 			etsc = ELEMENT_DATA(e);
 			if (etsc->scr == vsc) {
-				log_message(LOG_INFO, "(%s) duplicate track_script %s - ignoring", sgroup->gname, tracked);
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_script %s - ignoring", sgroup->gname, tracked);
 				return;
 			}
 		}
@@ -272,17 +270,16 @@ alloc_group_track_script(vrrp_sgroup_t *sgroup, vector_t *strvec)
 
 	if (vector_size(strvec) >= 3 &&
 	    !strcmp(strvec_slot(strvec, 1), "weight")) {
-		weight = atoi(strvec_slot(strvec, 2));
-		if (weight == -254 || weight == 254) {
-			/* This check can be removed once users have migrated away from +/-254 */
-			log_message(LOG_INFO, "(%s) weight for %s cannot be +/-254. Setting to +/-253", sgroup->gname, tracked);
-			weight = weight == -254 ? -253 : 253;
-		}
-		else if (weight < -253 || weight > 253) {
+		if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
 			weight = vsc->weight;
-			log_message(LOG_INFO, "(%s) track script %s: weight must be between [-253..253]"
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) track script %s: weight must be between [-253..253]"
 					 " inclusive, ignoring...",
 			       sgroup->gname, tracked);
+		}
+		else if (weight == -254 || weight == 254) {
+			/* This check can be removed once users have migrated away from +/-254 */
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for %s cannot be +/-254. Setting to +/-253", sgroup->gname, tracked);
+			weight = weight == -254 ? -253 : 253;
 		}
 	}
 
@@ -338,7 +335,7 @@ alloc_track_file(vrrp_t *vrrp, vector_t *strvec)
 
 	/* Ignoring if no file found */
 	if (!vsf) {
-		log_message(LOG_INFO, "(%s) track file %s not found, ignoring...", vrrp->iname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track file %s not found, ignoring...", vrrp->iname, tracked);
 		return;
 	}
 
@@ -347,7 +344,7 @@ alloc_track_file(vrrp_t *vrrp, vector_t *strvec)
 		for (e = LIST_HEAD(vrrp->track_file); e; ELEMENT_NEXT(e)) {
 			etfile = ELEMENT_DATA(e);
 			if (etfile->file == vsf) {
-				log_message(LOG_INFO, "(%s) duplicate track_file %s - ignoring", vrrp->iname, tracked);
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_file %s - ignoring", vrrp->iname, tracked);
 				return;
 			}
 		}
@@ -356,19 +353,18 @@ alloc_track_file(vrrp_t *vrrp, vector_t *strvec)
 	weight = vsf->weight;
 	if (vector_size(strvec) >= 2) {
 		if (strcmp(strvec_slot(strvec, 1), "weight")) {
-			log_message(LOG_INFO, "(%s) unknown track file option %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown track file option %s - ignoring",
 					 vrrp->iname, FMT_STR_VSLOT(strvec, 1));
 			return;
 		}
 		if (vector_size(strvec) >= 3) {
-			weight = atoi(strvec_slot(strvec, 2));
-			if (weight < -254 || weight > 254) {
-				log_message(LOG_INFO, "(%s) weight for track file %s must be in "
+			if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for track file %s must be in "
 						 "[-254..254] inclusive. Ignoring...", vrrp->iname, tracked);
 				weight = vsf->weight;
 			}
 		} else {
-			log_message(LOG_INFO, "(%s) weight without value specified for track file %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight without value specified for track file %s - ignoring",
 					vrrp->iname, tracked);
 			return;
 		}
@@ -394,7 +390,7 @@ alloc_group_track_file(vrrp_sgroup_t *sgroup, vector_t *strvec)
 
 	/* Ignoring if no file found */
 	if (!vsf) {
-		log_message(LOG_INFO, "(%s) track file %s not found, ignoring...", sgroup->gname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track file %s not found, ignoring...", sgroup->gname, tracked);
 		return;
 	}
 
@@ -403,7 +399,7 @@ alloc_group_track_file(vrrp_sgroup_t *sgroup, vector_t *strvec)
 		for (e = LIST_HEAD(sgroup->track_file); e; ELEMENT_NEXT(e)) {
 			etfile = ELEMENT_DATA(e);
 			if (etfile->file == vsf) {
-				log_message(LOG_INFO, "(%s) duplicate track_file %s - ignoring", sgroup->gname, tracked);
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_file %s - ignoring", sgroup->gname, tracked);
 				return;
 			}
 		}
@@ -412,19 +408,18 @@ alloc_group_track_file(vrrp_sgroup_t *sgroup, vector_t *strvec)
 	weight = vsf->weight;
 	if (vector_size(strvec) >= 2) {
 		if (strcmp(strvec_slot(strvec, 1), "weight")) {
-			log_message(LOG_INFO, "(%s) unknown track file option %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown track file option %s - ignoring",
 					 sgroup->gname, FMT_STR_VSLOT(strvec, 1));
 			return;
 		}
 		if (vector_size(strvec) >= 3) {
-			weight = atoi(strvec_slot(strvec, 2));
-			if (weight < -254 || weight > 254) {
-				log_message(LOG_INFO, "(%s) weight for track file %s must be in "
+			if (!read_int_strvec(strvec, 2, &weight, -254, 254, true)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for track file %s must be in "
 						 "[-254..254] inclusive. Ignoring...", sgroup->gname, tracked);
 				weight = vsf->weight;
 			}
 		} else {
-			log_message(LOG_INFO, "(%s) weight without value specified for track file %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight without value specified for track file %s - ignoring",
 					sgroup->gname, tracked);
 			return;
 		}
@@ -478,14 +473,14 @@ alloc_track_bfd(vrrp_t *vrrp, vector_t *strvec)
 
 	/* Ignoring if no bfd found */
 	if (!vtb) {
-		log_message(LOG_INFO, "(%s) track bfd %s not found, ignoring...", vrrp->iname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track bfd %s not found, ignoring...", vrrp->iname, tracked);
 		return;
 	}
 
 	/* Check this vrrp isn't already tracking the bfd */
 	LIST_FOREACH(vrrp->track_bfd, etbfd, e) {
 		if (etbfd->bfd == vtb) {
-			log_message(LOG_INFO, "(%s) duplicate track_bfd %s - ignoring", vrrp->iname, tracked);
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_bfd %s - ignoring", vrrp->iname, tracked);
 			return;
 		}
 	}
@@ -493,19 +488,18 @@ alloc_track_bfd(vrrp_t *vrrp, vector_t *strvec)
 	weight = vtb->weight;
 	if (vector_size(strvec) >= 2) {
 		if (strcmp(strvec_slot(strvec, 1), "weight")) {
-			log_message(LOG_INFO, "(%s) unknown track bfd option %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown track bfd option %s - ignoring",
 					 vrrp->iname, FMT_STR_VSLOT(strvec, 1));
 			return;
 		}
 		if (vector_size(strvec) >= 3) {
-			weight = atoi(strvec_slot(strvec, 2));
-			if (weight < -253 || weight > 253) {
-				log_message(LOG_INFO, "(%s) weight for track bfd %s must be in "
+			if (!read_int_strvec(strvec, 2, &weight, -253, 253, true)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for track bfd %s must be in "
 						 "[-253..253] inclusive. Ignoring...", vrrp->iname, tracked);
 				weight = vtb->weight;
 			}
 		} else {
-			log_message(LOG_INFO, "(%s) weight without value specified for track bfd %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight without value specified for track bfd %s - ignoring",
 					vrrp->iname, tracked);
 			return;
 		}
@@ -531,14 +525,14 @@ alloc_group_track_bfd(vrrp_sgroup_t *sgroup, vector_t *strvec)
 
 	/* Ignoring if no bfd found */
 	if (!vtb) {
-		log_message(LOG_INFO, "(%s) track bfd %s not found, ignoring...", sgroup->gname, tracked);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track bfd %s not found, ignoring...", sgroup->gname, tracked);
 		return;
 	}
 
 	/* Check this vrrp isn't already tracking the script */
 	LIST_FOREACH(sgroup->track_bfd, etbfd, e) {
 		if (etbfd->bfd == vtb) {
-			log_message(LOG_INFO, "(%s) duplicate track_bfd %s - ignoring", sgroup->gname, tracked);
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) duplicate track_bfd %s - ignoring", sgroup->gname, tracked);
 			return;
 		}
 	}
@@ -546,19 +540,18 @@ alloc_group_track_bfd(vrrp_sgroup_t *sgroup, vector_t *strvec)
 	weight = vtb->weight;
 	if (vector_size(strvec) >= 2) {
 		if (strcmp(strvec_slot(strvec, 1), "weight")) {
-			log_message(LOG_INFO, "(%s) unknown track bfd option %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown track bfd option %s - ignoring",
 					 sgroup->gname, FMT_STR_VSLOT(strvec, 1));
 			return;
 		}
 		if (vector_size(strvec) >= 3) {
-			weight = atoi(strvec_slot(strvec, 2));
-			if (weight < -253 || weight > 253) {
-				log_message(LOG_INFO, "(%s) weight for track bfd %s must be in "
+			if (!read_int_strvec(strvec, 2, &weight, -253, 253, true)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight for track bfd %s must be in "
 						 "[-253..253] inclusive. Ignoring...", sgroup->gname, tracked);
 				weight = vtb->weight;
 			}
 		} else {
-			log_message(LOG_INFO, "(%s) weight without value specified for track bfd %s - ignoring",
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) weight without value specified for track bfd %s - ignoring",
 					sgroup->gname, tracked);
 			return;
 		}
@@ -591,7 +584,6 @@ void
 vrrp_set_effective_priority(vrrp_t *vrrp)
 {
 	uint8_t new_prio;
-	bool increasing_priority;
 	uint32_t old_down_timer;
 
 	/* Don't change priority if address owner */
@@ -611,14 +603,17 @@ vrrp_set_effective_priority(vrrp_t *vrrp)
 	log_message(LOG_INFO, "(%s) Changing effective priority from %d to %d",
 		    vrrp->iname, vrrp->effective_priority, new_prio);
 
-	increasing_priority = (new_prio > vrrp->effective_priority);
-
 	vrrp->effective_priority = new_prio;
 	old_down_timer = vrrp->ms_down_timer;
 	vrrp->ms_down_timer = 3 * vrrp->master_adver_int + VRRP_TIMER_SKEW(vrrp);
 
-	if (vrrp->state == VRRP_STATE_BACK && increasing_priority)
-		vrrp_thread_requeue_read_relative(vrrp, old_down_timer - vrrp->ms_down_timer);
+	if (vrrp->state == VRRP_STATE_BACK) {
+		if (old_down_timer < vrrp->ms_down_timer)
+			vrrp->sands = timer_add_long(vrrp->sands, vrrp->ms_down_timer - old_down_timer);
+		else
+			vrrp->sands = timer_sub_long(vrrp->sands, old_down_timer - vrrp->ms_down_timer);
+		vrrp_thread_requeue_read(vrrp);
+	}
 }
 
 static void
@@ -705,7 +700,6 @@ initialise_track_script_state(tracked_sc_t *tsc, vrrp_t *vrrp)
 	if (vrrp->base_priority == VRRP_PRIO_OWNER)
 		return;
 
-//	if (tsc->scr->last_status != VRRP_SCRIPT_STATUS_NOT_SET)
 	if (tsc->scr->init_state != SCRIPT_INIT_STATE_INIT)
 	{
 		if (tsc->scr->result >= tsc->scr->rise) {
@@ -736,7 +730,7 @@ initialise_track_bfd_state(tracked_bfd_t *tbfd, vrrp_t *vrrp)
 }
 #endif
 
-void
+static void
 initialise_interface_tracking_priorities(void)
 {
 	tracking_vrrp_t *tvp;
@@ -745,16 +739,17 @@ initialise_interface_tracking_priorities(void)
 
 	LIST_FOREACH(get_if_list(), ifp, e) {
 		LIST_FOREACH(ifp->tracking_vrrp, tvp, e1) {
+			if (tvp->weight == VRRP_NOT_TRACK_IF)
+				continue;
+
 			if (!tvp->weight) {
 				if (!IF_ISUP(ifp)) {
 					/* The instance is down */
 					tvp->vrrp->state = VRRP_STATE_FAULT;
 					tvp->vrrp->num_script_if_fault++;
 				}
-				continue;
 			}
-
-			if (IF_ISUP(ifp)) {
+			else if (IF_ISUP(ifp)) {
 				if (tvp->weight > 0)
 					tvp->vrrp->total_priority += tvp->weight;
 			}
@@ -766,8 +761,31 @@ initialise_interface_tracking_priorities(void)
 	}
 }
 
-void
-initialise_tracking_priorities(vrrp_t *vrrp)
+static void
+initialise_file_tracking_priorities(void)
+{
+	vrrp_tracked_file_t *tfile;
+	tracking_vrrp_t *tvp;
+	int status;
+	element e, e1;
+
+	LIST_FOREACH(vrrp_data->vrrp_track_files, tfile, e) {
+		LIST_FOREACH(tfile->tracking_vrrp, tvp, e1) {
+			status = !tvp->weight ? (tfile->last_status ? -254 : 0 ) : tfile->last_status * tvp->weight;
+
+			if (status <= -254) {
+				/* The instance is down */
+				tvp->vrrp->state = VRRP_STATE_FAULT;
+				tvp->vrrp->num_script_if_fault++;
+			}
+			else
+				tvp->vrrp->total_priority += (status > 253 ? 253 : status);
+		}
+	}
+}
+
+static void
+initialise_vrrp_tracking_priorities(vrrp_t *vrrp)
 {
 	element e;
 	tracked_sc_t *tsc;
@@ -799,6 +817,41 @@ initialise_tracking_priorities(vrrp_t *vrrp)
 	}
 
 	vrrp_set_effective_priority(vrrp);
+}
+
+void
+initialise_tracking_priorities(void)
+{
+	vrrp_t *vrrp;
+	element e;
+
+	/* Check for instance down due to an interface */
+	initialise_interface_tracking_priorities();
+
+	initialise_file_tracking_priorities();
+
+	/* Now check for tracking scripts, files, bfd etc. */
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
+		/* Set effective priority and fault state */
+		initialise_vrrp_tracking_priorities(vrrp);
+
+		if (vrrp->sync) {
+			if (vrrp->state == VRRP_STATE_FAULT) {
+				if (vrrp->sync->state != VRRP_STATE_FAULT) {
+					vrrp->sync->state = VRRP_STATE_FAULT;
+					log_message(LOG_INFO, "VRRP_Group(%s): Syncing instances to FAULT state", vrrp->sync->gname);
+				}
+
+				vrrp->sync->num_member_fault++;
+			}
+			if (vrrp->num_script_init) {
+				/* Update init count on sync group if needed */
+				vrrp->sync->num_member_init++;
+				if (vrrp->sync->state != VRRP_STATE_FAULT)
+					vrrp->sync->state = VRRP_STATE_INIT;
+			}
+		}
+	}
 }
 
 static void
@@ -836,14 +889,12 @@ process_update_track_file_status(vrrp_tracked_file_t *tfile, int new_status, tra
 	if (previous_status == new_status)
 		return;
 
-	if (new_status == -254) {
+	if (new_status == -254)
 		down_instance(tvp->vrrp);
-		tvp->vrrp->total_priority += new_status - previous_status;
-	} else {
+	else {
 		if (previous_status == -254)
 			try_up_instance(tvp->vrrp, false);
-
-		if (tvp->vrrp->base_priority != VRRP_PRIO_OWNER) {
+		else if (tvp->vrrp->base_priority != VRRP_PRIO_OWNER) {
 			tvp->vrrp->total_priority += new_status - previous_status;
 			vrrp_set_effective_priority(tvp->vrrp);
 		}
@@ -876,12 +927,10 @@ update_track_file_status(vrrp_tracked_file_t* tfile, int new_status)
 
 		process_update_track_file_status(tfile, status, tvp);
 	}
-
-	tfile->last_status = new_status;
 }
 
 static void
-process_track_file(vrrp_tracked_file_t *tfile)
+process_track_file(vrrp_tracked_file_t *tfile, bool init)
 {
 	long new_status = 0;
 	char buf[128];
@@ -903,7 +952,10 @@ process_track_file(vrrp_tracked_file_t *tfile)
 	else if (new_status < -254)
 		new_status = -254;
 
-	update_track_file_status(tfile, (int)new_status);
+	if (!init)
+		update_track_file_status(tfile, (int)new_status);
+
+	tfile->last_status = new_status;
 }
 
 static int
@@ -948,9 +1000,7 @@ process_inotify(thread_t *thread)
 				continue;
 			}
 
-			for (e = LIST_HEAD(vrrp_data->vrrp_track_files); e; ELEMENT_NEXT(e)) {
-				tfile = ELEMENT_DATA(e);
-
+			LIST_FOREACH(vrrp_data->vrrp_track_files, tfile, e) {
 				/* Is this event for our file */
 				if (tfile->wd != event->wd ||
 				    strcmp(tfile->file_part, event->name))
@@ -962,7 +1012,7 @@ process_inotify(thread_t *thread)
 				}
 				else {	/* event->mask & (IN_MOVED_TO | IN_CLOSE_WRITE) */
 					/* The file has been writted/moved in */
-					process_track_file(tfile);
+					process_track_file(tfile, false);
 				}
 			}
 		}
@@ -1005,7 +1055,7 @@ init_track_files(list track_files)
 	LIST_FOREACH_NEXT(track_files, tfile, e, next) {
 		if (LIST_ISEMPTY(tfile->tracking_vrrp)) {
 			/* No vrrp instance is tracking this file, so forget it */
-			log_message(LOG_INFO, "Track file %s is not being used - removing", tfile->fname);
+			report_config_error(CONFIG_GENERAL_ERROR, "Track file %s is not being used - removing", tfile->fname);
 			remove_track_file(track_files, e);
 			continue;
 		}
@@ -1014,12 +1064,12 @@ init_track_files(list track_files)
 		if (resolved_path) {
 			if (strcmp(tfile->file_path, resolved_path)) {
 				FREE(tfile->file_path);
-				tfile->file_path = MALLOC(strlen(resolved_path + 1));
+				tfile->file_path = MALLOC(strlen(resolved_path) + 1);
 				strcpy(tfile->file_path, resolved_path);
 			}
 
 			/* The file exists, so read it now */
-			process_track_file(tfile);
+			process_track_file(tfile, true);
 		}
 		else if (errno == ENOENT) {
 			/* Resolve the directory */
@@ -1039,7 +1089,7 @@ init_track_files(list track_files)
 			}
 
 			if (!resolved_path) {
-				log_message(LOG_INFO, "Track file directory for %s does not exist - removing", tfile->fname);
+				report_config_error(CONFIG_GENERAL_ERROR, "Track file directory for %s does not exist - removing", tfile->fname);
 				remove_track_file(track_files, e);
 
 				continue;
@@ -1057,7 +1107,7 @@ init_track_files(list track_files)
 				*dir_end = '/';
 		}
 		else {
-			log_message(LOG_INFO, "track file %s is not accessible - ignoring", tfile->fname);
+			report_config_error(CONFIG_GENERAL_ERROR, "track file %s is not accessible - ignoring", tfile->fname);
 			remove_track_file(track_files, e);
 
 			continue;
@@ -1089,3 +1139,11 @@ stop_track_files(void)
 		inotify_fd = -1;
 	}
 }
+
+#ifdef THREAD_DUMP
+void
+register_vrrp_inotify_addresses(void)
+{
+	register_thread_address("process_inotify", process_inotify);
+}
+#endif

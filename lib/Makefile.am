@@ -17,9 +17,11 @@ noinst_LIBRARIES	= liblib.a
 
 liblib_a_SOURCES	= memory.c utils.c notify.c timer.c scheduler.c \
 	vector.c list.c html.c parser.c signals.c logger.c assert.c \
+	list_head.c rbtree.c process.c \
 	bitops.h timer.h scheduler.h vector.h parser.h \
 	signals.h notify.h logger.h list.h memory.h html.h utils.h \
-	keepalived_magic.h
+	keepalived_magic.h list_head.h rbtree.h process.h \
+	rbtree_augmented.h
 
 liblib_a_LIBADD		=
 EXTRA_liblib_a_SOURCES	=
@@ -43,10 +45,8 @@ FORCE:
 # The git commit file will contain the git version and date of last commit,
 # unless this is a tagged version, in which case the git commit is omitted.
 # If there have been any local modifications, '+' is appended to the git
-# version. However, any files that are autoconf/automake generated we want
-# to ignore, since they aren't really "source" files, and are only included
-# so that users without autotools can build keepalived.
-# The other file that needs to be ignored is deletion of snap/snapcraft.yaml,
+# version.
+# The one file that needs to be ignored is deletion of snap/snapcraft.yaml,
 # since in a snapcraft build that file is deleted
 # (see https://bugs.launchpad.net/snapcraft/+bug/1662388).
 $(GIT_COMMIT_FILE): FORCE
@@ -69,8 +69,6 @@ $(GIT_COMMIT_FILE): FORCE
 			fi; \
 			if [ "`git status --porcelain | \
 			       grep -v '^??' | \
-			       grep -v '[ /]Makefile.in$$' | \
-			       grep -Ev ' (aclocal.m4|ar-lib|compile|configure|depcomp|install-sh|missing)$$' | \
 			       grep -v "^ D snap/snapcraft.yaml" | \
 			       wc -l`" -ne 0 ]; then \
 				EXTRA="+"; \

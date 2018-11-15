@@ -20,6 +20,9 @@ Linux flavours
 
 RedHat based systems (RedHat Enterprise/CentOS/Fedora)
 ------------------------------------------------------
+The following build packages are needed:
+	make
+	autoconf automake (to build from git source tree rather than tarball)
 The following libraries need to be installed:
 	openssl-devel libnl3-devel ipset-devel iptables-devel libnfnetlink-devel
 For magic file identification support:
@@ -30,6 +33,8 @@ For DBUS support:
 	glib2-devel
 For JSON support:
 	json-c-devel
+For PCRE support
+	pcre2-devel
 
 For building the documentation, the following packages need to be installed:
 	Fedora: python-sphinx (will pull in: python2-sphinx_rtd_theme)
@@ -42,8 +47,10 @@ Debian/Ubuntu
 -------------
 On Debian, install:
 	pkg-config
+On Ubuntu, install:
+	build-essential pkg-config, and to build from git repo automake autoconf
 The following libraries need to be installed:
-	iptables-dev libipset-dev libnfnetlink-dev libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev
+	iptables-dev libipset-dev libnfnetlink-dev libnl-3-dev libnl-genl-3-dev libssl-dev
 For magic file identification support:
 	libmagic-dev
 For SNMP support:
@@ -52,6 +59,8 @@ For DBUS support:
 	libglib2.0-dev
 For JSON support:
 	libjson-c-dev
+For PCRE support:
+	libpcre2-dev
 
 For building the documentation, the following packages need to be installed:
 	python-sphinx python-sphinx-rtd-theme
@@ -81,10 +90,34 @@ For magic file identification support:
 	TBD
 For SNMP support:
 	pacman -S net-snmp
+for PCRE support:
+	pcre-2 (may be installed by default)
+
 For building the documentation, the following packages need to be installed:
 	python-sphinx python-sphinx_rtd_theme
    For latex or pdf files, the following are also needed:
 	texlive-core texlive-bin texlive-latexextra
+
+Kernel configuration requirements
+---------------------------------
+The following list is probably incomplete, and will be updated as other
+options become known.
+
+BPF
+EPOLL
+SIGNALFD
+TIMERFD
+SYSCTL
+PROC_FS
+INET
+IP_MULTICAST
+IPV6
+IP_VS (unless --disable-lvs is specified)
+  IP_VS suboptions to match the real_server/virtual_server configuration
+NETFILTER_XTABLES - if strict_mode or no_accept.
+  NETFILTER_XT options and IP_SET
+IP_ADVANCED_ROUTER and various associated options if static/dynamic routes specified
+FIB_RULES if static or dynamic rules are specified
 
 Installing from a git repo
 ==========================
@@ -129,7 +162,7 @@ Building RPM files
 
  For tarball and git
   2. ./configure
-  3. make tar
+  3. make rpm
 
  The .rpm files will be created in directory `rpm --eval "%{_rpmdir}"`/ARCH
 

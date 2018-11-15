@@ -32,6 +32,7 @@
 #include "vrrp.h"
 #include "vrrp_data.h"
 #include "vrrp_print.h"
+#include "utils.h"
 
 static const char *dump_file = "/tmp/keepalived.data";
 static const char *stats_file = "/tmp/keepalived.stats";
@@ -39,7 +40,7 @@ static const char *stats_file = "/tmp/keepalived.stats";
 void
 vrrp_print_data(void)
 {
-	FILE *file = fopen (dump_file, "w");
+	FILE *file = fopen_safe(dump_file, "w");
 
 	if (!file) {
 		log_message(LOG_INFO, "Can't open %s (%d: %s)",
@@ -55,8 +56,9 @@ vrrp_print_data(void)
 void
 vrrp_print_stats(void)
 {
-	FILE *file;
-	file = fopen (stats_file, "w");
+	FILE *file = fopen_safe(stats_file, "w");
+	element e;
+	vrrp_t *vrrp;
 
 	if (!file) {
 		log_message(LOG_INFO, "Can't open %s (%d: %s)",
@@ -64,40 +66,35 @@ vrrp_print_stats(void)
 		return;
 	}
 
-	list l = vrrp_data->vrrp;
-	element e;
-	vrrp_t *vrrp;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-		fprintf(file, "VRRP Instance: %s", vrrp->iname);
-		fprintf(file, "  Advertisements:");
-		fprintf(file, "    Received: %" PRIu64 "", vrrp->stats->advert_rcvd);
-		fprintf(file, "    Sent: %d", vrrp->stats->advert_sent);
-		fprintf(file, "  Became master: %d", vrrp->stats->become_master);
-		fprintf(file, "  Released master: %d",
-			vrrp->stats->release_master);
-		fprintf(file, "  Packet Errors:");
-		fprintf(file, "    Length: %" PRIu64 "", vrrp->stats->packet_len_err);
-		fprintf(file, "    TTL: %" PRIu64 "", vrrp->stats->ip_ttl_err);
-		fprintf(file, "    Invalid Type: %" PRIu64 "",
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
+		fprintf(file, "VRRP Instance: %s\n", vrrp->iname);
+		fprintf(file, "  Advertisements:\n");
+		fprintf(file, "    Received: %" PRIu64 "\n", vrrp->stats->advert_rcvd);
+		fprintf(file, "    Sent: %d\n", vrrp->stats->advert_sent);
+		fprintf(file, "  Became master: %d\n", vrrp->stats->become_master);
+		fprintf(file, "  Released master: %d\n", vrrp->stats->release_master);
+		fprintf(file, "  Packet Errors:\n");
+		fprintf(file, "    Length: %" PRIu64 "\n", vrrp->stats->packet_len_err);
+		fprintf(file, "    TTL: %" PRIu64 "\n", vrrp->stats->ip_ttl_err);
+		fprintf(file, "    Invalid Type: %" PRIu64 "\n",
 			vrrp->stats->invalid_type_rcvd);
-		fprintf(file, "    Advertisement Interval: %" PRIu64 "",
+		fprintf(file, "    Advertisement Interval: %" PRIu64 "\n",
 			vrrp->stats->advert_interval_err);
-		fprintf(file, "    Address List: %" PRIu64 "",
+		fprintf(file, "    Address List: %" PRIu64 "\n",
 			vrrp->stats->addr_list_err);
-		fprintf(file, "  Authentication Errors:");
-		fprintf(file, "    Invalid Type: %d",
+		fprintf(file, "  Authentication Errors:\n");
+		fprintf(file, "    Invalid Type: %d\n",
 			vrrp->stats->invalid_authtype);
 #ifdef _WITH_VRRP_AUTH_
-		fprintf(file, "    Type Mismatch: %d",
+		fprintf(file, "    Type Mismatch: %d\n",
 			vrrp->stats->authtype_mismatch);
-		fprintf(file, "    Failure: %d",
+		fprintf(file, "    Failure: %d\n",
 			vrrp->stats->auth_failure);
 #endif
-		fprintf(file, "  Priority Zero:");
-		fprintf(file, "    Received: %" PRIu64 "", vrrp->stats->pri_zero_rcvd);
-		fprintf(file, "    Sent: %" PRIu64 "", vrrp->stats->pri_zero_sent);
+		fprintf(file, "  Priority Zero:\n");
+		fprintf(file, "    Received: %" PRIu64 "\n", vrrp->stats->pri_zero_rcvd);
+		fprintf(file, "    Sent: %" PRIu64 "\n", vrrp->stats->pri_zero_sent);
 	}
 	fclose(file);
 }

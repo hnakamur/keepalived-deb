@@ -29,7 +29,19 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/prctl.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
+#ifdef THREAD_DUMP
+#include "snmp.h"
+#include "scheduler.h"
+#include "smtp.h"
+#include "check_dns.h"
+#include "check_http.h"
+#include "check_misc.h"
+#include "check_smtp.h"
+#include "check_tcp.h"
+#endif
 #include "check_daemon.h"
 #include "check_parser.h"
 #include "ipwrapper.h"
@@ -39,6 +51,7 @@
 #include "pidfile.h"
 #include "signals.h"
 #include "process.h"
+#include "memory.h"
 #include "logger.h"
 #include "main.h"
 #include "parser.h"
@@ -81,13 +94,14 @@ checker_dispatcher_release(void)
 
 /* Daemon stop sequence */
 static int
-checker_terminate_phase2(__attribute__((unused)) thread_t *thread)
+checker_terminate_phase2(void)
 {
+	struct rusage usage;
+
 	/* Remove the notify fifo */
 	notify_fifo_close(&global_data->notify_fifo, &global_data->lvs_notify_fifo);
 
 	/* Destroy master thread */
-	signal_handler_destroy();
 	checker_dispatcher_release();
 	thread_destroy_master(master);
 	master = NULL;
@@ -114,10 +128,17 @@ checker_terminate_phase2(__attribute__((unused)) thread_t *thread)
 	 * Reached when terminate signal catched.
 	 * finally return to parent process.
 	 */
-	log_message(LOG_INFO, "Stopped");
+	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
+		getrusage(RUSAGE_SELF, &usage);
+		log_message(LOG_INFO, "Stopped - used %ld.%6.6ld user time, %ld.%6.6ld system time", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	}
+	else
+		log_message(LOG_INFO, "Stopped");
 
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		close_log_file();
+#endif
 	closelog();
 
 #ifndef _MEM_CHECK_LOG_
@@ -134,12 +155,25 @@ checker_terminate_phase2(__attribute__((unused)) thread_t *thread)
 static int
 checker_shutdown_backstop_thread(thread_t *thread)
 {
-        log_message(LOG_ERR, "backstop thread invoked: shutdown timer %srunning, child count %d",
-			thread->master->shutdown_timer_running ? "" : "not ", thread->master->child.count);
+	int count = 0;
+	thread_t *t;
 
-        checker_terminate_phase2(thread);
+	/* Force terminate all script processes */
+	if (thread->master->child.rb_root.rb_node)
+		script_killall(thread->master, SIGKILL, true);
 
-        return 0;
+	rb_for_each_entry_cached(t, &thread->master->child, n)
+		count++;
+
+	log_message(LOG_ERR, "backstop thread invoked: shutdown timer %srunning, child count %d",
+			thread->master->shutdown_timer_running ? "" : "not ", count);
+
+	if (thread->master->shutdown_timer_running)
+		thread_add_timer_shutdown(thread->master, checker_shutdown_backstop_thread, NULL, TIMER_HZ / 10);
+	else
+		thread_add_terminate_event(thread->master);
+
+	return 0;
 }
 
 static void
@@ -149,26 +183,26 @@ checker_terminate_phase1(bool schedule_next_thread)
 		kernel_netlink_close();
 
 	/* Terminate all script processes */
-	if (master->child.count)
+	if (master->child.rb_root.rb_node)
 		script_killall(master, SIGTERM, true);
 
 	/* Send shutdown messages */
-	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug) &&
-	    !__test_bit(CONFIG_TEST_BIT, &debug))
+	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug))
 		clear_services();
 
 	if (schedule_next_thread) {
 		/* If there are no child processes, we can terminate immediately,
 		 * otherwise add a thread to allow reasonable time for children to terminate */
-		if (master->child.count) {
+		if (master->child.rb_root.rb_node) {
 			/* Add a backstop timer for the shutdown */
-			thread_add_timer(master, checker_shutdown_backstop_thread, NULL, TIMER_HZ);
+			thread_add_timer_shutdown(master, checker_shutdown_backstop_thread, NULL, TIMER_HZ);
 		}
 		else
 			thread_add_terminate_event(master);
 	}
 }
 
+#ifndef _DEBUG_
 static int
 start_checker_termination_thread(__attribute__((unused)) thread_t * thread)
 {
@@ -179,15 +213,19 @@ start_checker_termination_thread(__attribute__((unused)) thread_t * thread)
 
 	return 0;
 }
+#endif
 
 /* Daemon stop sequence */
 static void
 stop_check(int status)
 {
+	if (__test_bit(CONFIG_TEST_BIT, &debug))
+		return;
+
 	/* This runs in the main process, not in the context of a thread */
 	checker_terminate_phase1(false);
 
-	checker_terminate_phase2(NULL);
+	checker_terminate_phase2();
 
 	/* unreachable */
 	exit(status);
@@ -195,7 +233,7 @@ stop_check(int status)
 
 /* Daemon init sequence */
 static void
-start_check(list old_checkers_queue)
+start_check(list old_checkers_queue, data_t *old_global_data)
 {
 	init_checkers_queue();
 
@@ -203,13 +241,15 @@ start_check(list old_checkers_queue)
 	if (reload)
 		global_data = alloc_global_data();
 	check_data = alloc_check_data();
-	if (!check_data)
+	if (!check_data) {
 		stop_check(KEEPALIVED_EXIT_FATAL);
+		return;
+	}
 
 	init_data(conf_file, check_init_keywords);
 
 	if (reload)
-		init_global_data(global_data);
+		init_global_data(global_data, old_global_data);
 
 	/* fill 'vsg' members of the virtual_server_t structure.
 	 * We must do that after parsing config, because
@@ -229,10 +269,8 @@ start_check(list old_checkers_queue)
 #endif
 
 	/* If we are just testing the configuration, then we terminate now */
-	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
-		stop_check(KEEPALIVED_EXIT_CONFIG_TEST);
+	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
-	}
 
 	/* Initialize sub-system if any virtual servers are configured */
 	if ((!LIST_ISEMPTY(check_data->vs) || (reload && !LIST_ISEMPTY(old_check_data->vs))) &&
@@ -267,16 +305,6 @@ start_check(list old_checkers_queue)
 	if (check_data->ssl_required && !init_ssl_ctx())
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
-	/* Set the process priority and non swappable if configured */
-	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-                               global_data->checker_realtime_priority,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-                               global_data->checker_rlimit_rt,
-#endif
-#endif
-			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
-
 	/* Processing differential configuration parsing */
 	if (reload)
 		clear_diff_services(old_checkers_queue);
@@ -297,7 +325,21 @@ start_check(list old_checkers_queue)
 	/* Register checkers thread */
 	register_checkers_thread();
 
-	add_signal_read_thread();
+	/* Set the process priority and non swappable if configured */
+	set_process_priorities(
+#ifdef _HAVE_SCHED_RT_
+			       global_data->checker_realtime_priority,
+#if HAVE_DECL_RLIMIT_RTTIME == 1
+			       global_data->checker_rlimit_rt,
+#endif
+#endif
+			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
+}
+
+void
+check_validate_config(void)
+{
+	start_check(NULL, NULL);
 }
 
 #ifndef _DEBUG_
@@ -308,6 +350,9 @@ reload_check_thread(__attribute__((unused)) thread_t * thread)
 	list old_checkers_queue;
 
 	log_message(LOG_INFO, "Reloading");
+
+	/* Use standard scheduling while reloading */
+	reset_process_priorities();
 
 	/* set the reloading flag */
 	SET_RELOAD;
@@ -323,6 +368,7 @@ reload_check_thread(__attribute__((unused)) thread_t * thread)
 	/* Destroy master thread */
 	checker_dispatcher_release();
 	thread_cleanup_master(master);
+	thread_add_base_threads(master);
 
 	/* Save previous checker data */
 	old_checkers_queue = checkers_queue;
@@ -338,7 +384,7 @@ reload_check_thread(__attribute__((unused)) thread_t * thread)
 	global_data = NULL;
 
 	/* Reload the conf */
-	start_check(old_checkers_queue);
+	start_check(old_checkers_queue, old_global_data);
 
 	/* free backup data */
 	free_check_data(old_check_data);
@@ -367,7 +413,6 @@ sigend_check(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 static void
 check_signal_init(void)
 {
-	signal_handler_child_init();
 	signal_set(SIGHUP, sigreload_check, NULL);
 	signal_set(SIGINT, sigend_check, NULL);
 	signal_set(SIGTERM, sigend_check, NULL);
@@ -378,30 +423,55 @@ check_signal_init(void)
 static int
 check_respawn_thread(thread_t * thread)
 {
-	pid_t pid;
-
-	/* Fetch thread args */
-	pid = THREAD_CHILD_PID(thread);
-
-	/* Restart respawning thread */
-	if (thread->type == THREAD_CHILD_TIMEOUT) {
-		thread_add_child(master, check_respawn_thread, NULL,
-				 pid, RESPAWN_TIMER);
-		return 0;
-	}
-
 	/* We catch a SIGCHLD, handle it */
-	if (!__test_bit(CONFIG_TEST_BIT, &debug))
-		raise(SIGTERM);
-	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Respawning", pid);
+	checkers_child = 0;
+
+	if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
+		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Respawning", thread->u.c.pid);
 		start_check_child();
 	} else {
-		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Exiting", pid);
-		checkers_child = 0;
+		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Exiting", thread->u.c.pid);
 		raise(SIGTERM);
 	}
 	return 0;
+}
+#endif
+
+#ifdef THREAD_DUMP
+static void
+register_check_thread_addresses(void)
+{
+	register_scheduler_addresses();
+	register_signal_thread_addresses();
+	register_notify_addresses();
+
+	register_smtp_addresses();
+	register_keepalived_netlink_addresses();
+#ifdef _WITH_SNMP_
+	register_snmp_addresses();
+#endif
+
+	register_check_dns_addresses();
+	register_check_http_addresses();
+	register_check_misc_addresses();
+	register_check_smtp_addresses();
+	register_check_ssl_addresses();
+	register_check_tcp_addresses();
+#ifdef _WITH_BFD_
+	register_check_bfd_addresses();
+#endif
+
+#ifndef _DEBUG_
+	register_thread_address("reload_check_thread", reload_check_thread);
+	register_thread_address("start_checker_termination_thread", start_checker_termination_thread);
+#endif
+	register_thread_address("lvs_notify_fifo_script_exit", lvs_notify_fifo_script_exit);
+	register_thread_address("checker_shutdown_backstop_thread", checker_shutdown_backstop_thread);
+
+#ifndef _DEBUG_
+	register_signal_handler_address("sigreload_check", sigreload_check);
+	register_signal_handler_address("sigend_check", sigend_check);
+#endif
 }
 #endif
 
@@ -414,8 +484,10 @@ start_check_child(void)
 	char *syslog_ident;
 
 	/* Initialize child process */
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		flush_log_file();
+#endif
 
 	pid = fork();
 
@@ -430,17 +502,15 @@ start_check_child(void)
 
 		/* Start respawning thread */
 		thread_add_child(master, check_respawn_thread, NULL,
-				 pid, RESPAWN_TIMER);
+				 pid, TIMER_NEVER);
 
 		return 0;
 	}
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-	/* Clear any child finder functions set in parent */
-	set_child_finder_name(NULL);
-	destroy_child_finder();
-
 	prog_type = PROG_TYPE_CHECKER;
+
+	initialise_debug_options();
 
 #ifdef _WITH_BFD_
 	/* Close the write end of the BFD checker event notification pipe */
@@ -467,6 +537,7 @@ start_check_child(void)
 		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
 				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
 
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"check",
@@ -476,12 +547,16 @@ start_check_child(void)
 				NULL,
 #endif
 				global_data->instance_name);
+#endif
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_CHECK, "Healthcheck child process");
 #endif
 
 	free_parent_mallocs_startup(true);
+
+	/* Clear any child finder functions set in parent */
+	set_child_finder_name(NULL);
 
 	/* Child process part, write pidfile */
 	if (!pidfile_write(checkers_pidfile, getpid())) {
@@ -490,7 +565,6 @@ start_check_child(void)
 	}
 
 	/* Create the new master thread */
-	signal_handler_destroy();
 	thread_destroy_master(master);	/* This destroys any residual settings from the parent */
 	master = thread_make_master();
 #endif
@@ -506,30 +580,39 @@ start_check_child(void)
 #endif
 
 	/* Start Healthcheck daemon */
-	start_check(NULL);
+	start_check(NULL, NULL);
 
 #ifdef _DEBUG_
 	return 0;
 #endif
 
+#ifdef THREAD_DUMP
+	register_check_thread_addresses();
+#endif
+
 	/* Launch the scheduling I/O multiplexer */
-	launch_scheduler();
+	launch_thread_scheduler(master);
 
 	/* Finish healthchecker daemon process */
 	if (two_phase_terminate)
-		checker_terminate_phase2(NULL);
+		checker_terminate_phase2();
 	else
-		stop_check(EXIT_SUCCESS);
+		stop_check(KEEPALIVED_EXIT_OK);
+
+#ifdef THREAD_DUMP
+	deregister_thread_addresses();
+#endif
 
 	/* unreachable */
-	exit(EXIT_SUCCESS);
+	exit(KEEPALIVED_EXIT_OK);
 }
 
-#ifdef _TIMER_DEBUG_
+#ifdef THREAD_DUMP
 void
-print_check_daemon_addresses(void)
+register_check_parent_addresses(void)
 {
-	log_message(LOG_INFO, "Address of check_respawn_thread() is 0x%p", check_respawn_thread);
-	log_message(LOG_INFO, "Address of reload_check_thread() is 0x%p", reload_check_thread);
+#ifndef _DEBUG_
+	register_thread_address("check_respawn_thread", check_respawn_thread);
+#endif
 }
 #endif

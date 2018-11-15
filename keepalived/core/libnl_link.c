@@ -26,18 +26,6 @@
 #include <netlink/genl/ctrl.h>
 #endif
 
-#if defined _WITH_VRRP_ && defined _HAVE_LIBNL3_ && defined _HAVE_IPV4_DEVCONF_
-#ifdef _HAVE_IF_H_LINK_H_COLLISION_
-#ifdef _HAVE_NET_LINUX_IF_H_COLLISION_
-#define _LINUX_IF_H
-#else
-#include <net/if.h>
-#endif
-#endif
-#include <netlink/route/link.h>
-#include <netlink/route/link/inet.h>
-#endif
-
 #include "libnl_link.h"
 #include "logger.h"
 
@@ -70,35 +58,12 @@ int (*nla_memcpy_addr)(void *, const struct nlattr *, int);
 int (*nla_parse_nested_addr)(struct nlattr **, int, struct nlattr *, struct nla_policy *);
 #endif
 #endif
-#ifdef _HAVE_LIBNL3_
-#if defined _WITH_VRRP_ && defined _HAVE_IPV4_DEVCONF_
-struct rtnl_link *(*rtnl_link_alloc_addr)(void);
-int (*rtnl_link_alloc_cache_addr)(struct nl_sock *, int, struct nl_cache **);
-int (*rtnl_link_change_addr)(struct nl_sock *, struct rtnl_link *, struct rtnl_link *, int);
-struct rtnl_link *(*rtnl_link_get_addr_l)(struct nl_cache *, int);
-int (*rtnl_link_inet_get_conf_addr)(struct rtnl_link *, const unsigned int, uint32_t *);
-int (*rtnl_link_inet_set_conf_addr)(struct rtnl_link *, const unsigned int, uint32_t);
-void (*rtnl_link_put_addr)(struct rtnl_link *);
-#endif
-int (*nl_connect_addr)(struct nl_sock *, int);
-int (*nl_socket_add_membership_addr)(struct nl_sock *, int);
-int (*nl_socket_drop_membership_addr)(struct nl_sock *, int);
-int (*nl_socket_get_fd_addr)(const struct nl_sock *);
-uint32_t (*nl_socket_get_local_port_addr)(const struct nl_sock *);
-int (*nl_socket_set_buffer_size_addr)(struct nl_sock *, int, int);
-int (*nl_socket_set_nonblocking_addr)(const struct nl_sock *);
-#endif
 
 
 static void* libnl_handle;
 #ifdef LIBIPVS_USE_NL
 static void* libnl_genl_handle;
 #endif
-#ifdef _HAVE_LIBNL3_
-static void* libnl_route_handle;
-#endif
-
-bool use_nl = true;
 
 bool
 libnl_init(void)
@@ -126,13 +91,6 @@ libnl_init(void)
 	if (!(libnl_genl_handle = dlopen("libnl-genl-3.so", RTLD_NOW)) &&
 	    !(libnl_genl_handle = dlopen(NL3_GENL_LIB_NAME, RTLD_NOW))) {
 		log_message(LOG_INFO, "Unable to load nl-genl-3 library - %s", dlerror());
-		return false;
-	}
-#endif
-#if defined _WITH_VRRP_ && defined _HAVE_IPV4_DEVCONF_
-	if (!(libnl_route_handle = dlopen("libnl-route-3.so", RTLD_NOW)) &&
-	    !(libnl_route_handle = dlopen(NL3_ROUTE_LIB_NAME, RTLD_NOW))) {
-		log_message(LOG_INFO, "Unable to load nl-route-3 library - %s", dlerror());
 		return false;
 	}
 #endif
@@ -171,31 +129,8 @@ libnl_init(void)
 	    !(nla_parse_nested_addr = dlsym(libnl_handle, "nla_parse_nested")) ||
 #endif
 #endif
-
-#ifdef _HAVE_LIBNL3_
-#if defined _WITH_VRRP_ && defined _HAVE_IPV4_DEVCONF_
-	    !(rtnl_link_alloc_addr = dlsym(libnl_route_handle, "rtnl_link_alloc")) ||
-	    !(rtnl_link_alloc_cache_addr = dlsym(libnl_route_handle, "rtnl_link_alloc_cache")) ||
-	    !(rtnl_link_change_addr = dlsym(libnl_route_handle, "rtnl_link_change")) ||
-	    !(rtnl_link_get_addr_l = dlsym(libnl_route_handle, "rtnl_link_get")) ||
-	    !(rtnl_link_inet_get_conf_addr = dlsym(libnl_route_handle, "rtnl_link_inet_get_conf")) ||
-	    !(rtnl_link_inet_set_conf_addr = dlsym(libnl_route_handle, "rtnl_link_inet_set_conf")) ||
-	    !(rtnl_link_put_addr = dlsym(libnl_route_handle, "rtnl_link_put")) ||
-#endif
-	    !(nl_connect_addr = dlsym(libnl_route_handle, "nl_connect")) ||
-	    !(nl_socket_add_membership_addr = dlsym(libnl_route_handle, "nl_socket_add_membership")) ||
-	    !(nl_socket_drop_membership_addr = dlsym(libnl_route_handle, "nl_socket_drop_membership")) ||
-	    !(nl_socket_get_fd_addr = dlsym(libnl_route_handle, "nl_socket_get_fd")) ||
-	    !(nl_socket_get_local_port_addr = dlsym(libnl_route_handle, "nl_socket_get_local_port")) ||
-	    !(nl_socket_set_buffer_size_addr = dlsym(libnl_route_handle, "nl_socket_set_buffer_size")) ||
-	    !(nl_socket_set_nonblocking_addr = dlsym(libnl_route_handle, "nl_socket_set_nonblocking")) ||
-#endif
-	    false) {
+	    false)
 		log_message(LOG_INFO, "Failed to dynamic link a libnli/libnl-3 function");
-		use_nl = false;
-	}
-
-	use_nl = true;
 
 	return true;
 }

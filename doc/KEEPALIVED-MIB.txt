@@ -22,12 +22,16 @@ IMPORTS
         FROM SNMPv2-TC;
 
 keepalived MODULE-IDENTITY
-     LAST-UPDATED "201806040000Z"
+     LAST-UPDATED "201808140000Z"
      ORGANIZATION "Keepalived"
      CONTACT-INFO "http://www.keepalived.org"
      DESCRIPTION
         "This MIB describes objects used by keepalived, both
          for VRRP and health checker."
+     REVISION "201808140000Z"
+     DESCRIPTION "add MH LVS scheduler"
+     REVISION "201807180000Z"
+     DESCRIPTION "add script master rx lower priority"
      REVISION "201806040000Z"
      DESCRIPTION "add ip rule protocol, ip_proto, src and dst port ranges"
      REVISION "201805170000Z"
@@ -735,7 +739,8 @@ VrrpInstanceEntry ::= SEQUENCE {
     vrrpInstanceAccept INTEGER,
     vrrpInstancePromoteSecondaries INTEGER,
     vrrpInstanceUseLinkbeat INTEGER,
-    vrrpInstanceVrrpVersion INTEGER
+    vrrpInstanceVrrpVersion INTEGER,
+    vrrpInstanceScriptMstrRxLowerPri DisplayString
 }
 
 vrrpInstanceIndex OBJECT-TYPE
@@ -994,6 +999,14 @@ vrrpInstanceVrrpVersion OBJECT-TYPE
     DESCRIPTION
         "VRRP protocol version."
     ::= { vrrpInstanceEntry 30 }
+
+vrrpInstanceScriptMstrRxLowerPri OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Script to execute when master instance receives lower priority advert."
+    ::= { vrrpInstanceEntry 31 }
 
 vrrpTrackedInterfaceTable OBJECT-TYPE
     SYNTAX SEQUENCE OF VrrpTrackedInterfaceEntry
@@ -2773,7 +2786,9 @@ VirtualServerEntry ::= SEQUENCE {
     virtualServerDelayBeforeRetry Unsigned32,
     virtualServerWarmup Unsigned32,
     virtualServerWeight INTEGER,
-    virtualServerSmtpAlert INTEGER
+    virtualServerSmtpAlert INTEGER,
+    virtualServerMHFallback TruthValue,
+    virtualServerMHPort TruthValue
 }
 
 virtualServerIndex OBJECT-TYPE
@@ -2864,6 +2879,7 @@ virtualServerLoadBalancingAlgo OBJECT-TYPE
     nq(10),
     fo(11),
     ovf(12),
+    mh(13),
     unknown(99)
     }
     MAX-ACCESS read-only
@@ -3328,6 +3344,23 @@ virtualServerSmtpAlert OBJECT-TYPE
     DESCRIPTION
         "Will SMTP alert be sent for this virtual server?"
     ::= { virtualServerEntry 61 }
+
+virtualServerMHFallback OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "If set to true(1), MH scheduler fallback."
+    ::= { virtualServerEntry 62 }
+
+virtualServerMHPort OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "If set to true(1), MH scheduler use port."
+    ::= { virtualServerEntry 63 }
+
 
 -- real servers
 
@@ -4108,6 +4141,7 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpInstancePromoteSecondaries,
     vrrpInstanceUseLinkbeat,
     vrrpInstanceVrrpVersion,
+    vrrpInstanceScriptMstrRxLowerPri,
     vrrpTrackedInterfaceName,
     vrrpTrackedInterfaceWeight,
     vrrpTrackedScriptName,
@@ -4372,7 +4406,9 @@ virtualServerGroup OBJECT-GROUP
     virtualServerDelayBeforeRetry,
     virtualServerWarmup,
     virtualServerWeight,
-    virtualServerSmtpAlert
+    virtualServerSmtpAlert,
+    virtualServerMHFallback,
+    virtualServerMHPort
     }
     STATUS current
     DESCRIPTION

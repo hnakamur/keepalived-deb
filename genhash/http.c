@@ -81,7 +81,7 @@ const hash_t hashes[hash_guard] = {
 #define HASH_INIT(sock)		((sock)->hash->init(&(sock)->context))
 #define HASH_UPDATE(sock, buf, len) \
 	if ((sock)->content_len == -1 || (sock)->rx_bytes < (sock)->content_len) \
-		((sock)->hash->update(&(sock)->context, (buf), (sock)->content_len == -1 || (unsigned int)((sock)->content_len - (sock)->rx_bytes >= len ? len : (sock)->content_len - (sock)->rx_bytes)))
+		((sock)->hash->update(&(sock)->context, (buf), (sock)->content_len == -1 || (unsigned int)(sock)->content_len - (sock)->rx_bytes >= len ? len : (sock)->content_len - (sock)->rx_bytes))
 #define HASH_FINAL(sock, digest) \
 	((sock)->hash->final((digest), &(sock)->context))
 
@@ -101,7 +101,7 @@ free_all(thread_t * thread)
 	 * Decrement the current global get number.
 	 * => free the reserved thread
 	 */
-	req->response_time = timer_tol(timer_now());
+	req->response_time = timer_long(timer_now());
 	thread_add_terminate_event(thread->master);
 }
 
@@ -129,7 +129,7 @@ finalize(thread_t * thread)
 	if (req->verbose) {
 		printf("\n");
 		printf(HTML_HASH);
-		dump_buffer((char *) digest, digest_length, stdout);
+		dump_buffer((char *) digest, digest_length, stdout, 0);
 
 		printf(HTML_HASH_FINAL);
 	}
@@ -149,7 +149,7 @@ finalize(thread_t * thread)
 static void
 http_dump_header(char *buffer, size_t size)
 {
-	dump_buffer(buffer, size, stdout);
+	dump_buffer(buffer, size, stdout, 0);
 	printf(HTTP_HEADER_ASCII);
 	printf("%*s\n", (int)size, buffer);
 }
@@ -172,7 +172,7 @@ find_content_len(char *buffer, size_t size)
 		content_len = strtoul(p, &end, 10);
 
 		/* Make sure we have read to the end of the line */
-		if (!*end || *end == '\r' || *end != '\n')
+		if (!*end || *end == '\r' || *end == '\n')
 			valid_len = true;
 	}
 	buffer[size] = sav_char;
@@ -204,7 +204,7 @@ http_process_stream(SOCK * sock_obj, int r)
 			if (r) {
 				if (req->verbose) {
 					printf(HTML_HEADER_HEXA);
-					dump_buffer(sock_obj->extracted, (size_t)r, stdout);
+					dump_buffer(sock_obj->extracted, (size_t)r, stdout, 0);
 				}
 				memmove(sock_obj->buffer, sock_obj->extracted, (size_t)r);
 				HASH_UPDATE(sock_obj, sock_obj->buffer, (ssize_t)r);
@@ -226,7 +226,7 @@ http_process_stream(SOCK * sock_obj, int r)
 		}
 	} else if (sock_obj->size) {
 		if (req->verbose)
-			dump_buffer(sock_obj->buffer, (size_t)r, stdout);
+			dump_buffer(sock_obj->buffer, (size_t)r, stdout, 0);
 		HASH_UPDATE(sock_obj, sock_obj->buffer, (ssize_t)sock_obj->size);
 		sock_obj->rx_bytes += sock_obj->size;
 		sock_obj->size = 0;
