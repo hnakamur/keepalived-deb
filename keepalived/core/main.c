@@ -22,19 +22,19 @@
 
 #include "config.h"
 
-#include "git-commit.h"
-
 #include <stdlib.h>
 #include <sys/utsname.h>
 #include <sys/resource.h>
 #include <stdbool.h>
 #ifdef HAVE_SIGNALFD
 #include <sys/signalfd.h>
+#include <sys/epoll.h>
 #endif
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -62,6 +62,9 @@
 #include "vrrp_daemon.h"
 #include "vrrp_parser.h"
 #include "vrrp_if.h"
+#ifdef _WITH_CN_PROC_
+#include "track_process.h"
+#endif
 #ifdef _WITH_JSON_
 #include "vrrp_json.h"
 #endif
@@ -77,6 +80,22 @@
 #include "scheduler.h"
 #include "keepalived_netlink.h"
 #include "git-commit.h"
+#if defined THREAD_DUMP || defined _EPOLL_DEBUG_ || defined _EPOLL_THREAD_DUMP_
+#include "scheduler.h"
+#endif
+#include "process.h"
+#ifdef _TIMER_CHECK_
+#include "timer.h"
+#endif
+#ifdef _SMTP_ALERT_DEBUG_
+#include "smtp.h"
+#endif
+#if defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_
+#include "check_http.h"
+#endif
+#ifdef _TSM_DEBUG_
+#include "vrrp_scheduler.h"
+#endif
 
 /* musl libc doesn't define the following */
 #ifndef	W_EXITCODE
@@ -86,7 +105,6 @@
 #define	WCOREFLAG		((int32_t)WCOREDUMP(0xffffffff))
 #endif
 
-#define	LOG_FACILITY_MAX	7
 #define	VERSION_STRING		PACKAGE_NAME " v" PACKAGE_VERSION " (" GIT_DATE ")"
 #define COPYRIGHT_STRING	"Copyright(C) 2001-" GIT_YEAR " Alexandre Cassen, <acassen@gmail.com>"
 
@@ -136,10 +154,14 @@ unsigned child_wait_time = CHILD_WAIT_SECS;		/* Time to wait for children to exi
 /* Log facility table */
 static struct {
 	int facility;
-} LOG_FACILITY[LOG_FACILITY_MAX + 1] = {
+} LOG_FACILITY[] = {
 	{LOG_LOCAL0}, {LOG_LOCAL1}, {LOG_LOCAL2}, {LOG_LOCAL3},
 	{LOG_LOCAL4}, {LOG_LOCAL5}, {LOG_LOCAL6}, {LOG_LOCAL7}
 };
+#define	LOG_FACILITY_MAX	((sizeof(LOG_FACILITY) / sizeof(LOG_FACILITY[0])) - 1)
+
+/* umask settings */
+bool umask_cmdline;
 
 /* Control producing core dumps */
 static bool set_core_dump_pattern = false;
@@ -147,48 +169,37 @@ static bool create_core_dump = false;
 static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
 
-#ifdef _TIMER_DEBUG_
-extern void print_smtp_addresses(void);
-extern void print_check_daemon_addresses(void);
-extern void print_check_dns_addresses(void);
-extern void print_check_http_addresses(void);
-extern void print_check_misc_addresses(void);
-extern void print_check_smtp_addresses(void);
-extern void print_check_tcp_addresses(void);
-#ifdef _WITH_DBUS_
-extern void print_vrrp_dbus_addresses(void);
+/* debug flags */
+#if defined _TIMER_CHECK_ || defined _SMTP_ALERT_DEBUG_ || defined _EPOLL_DEBUG_ || defined _EPOLL_THREAD_DUMP_ || defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_ || defined _TSM_DEBUG_ || defined _VRRP_FD_DEBUG_ || defined _NETLINK_TIMERS_
+#define WITH_DEBUG_OPTIONS 1
 #endif
-extern void print_vrrp_if_addresses(void);
-extern void print_vrrp_netlink_addresses(void);
-extern void print_vrrp_daemon_addresses(void);
-extern void print_check_ssl_addresses(void);
-extern void print_vrrp_scheduler_addresses(void);
 
-void global_print(void)
-{
-	print_smtp_addresses();
-#ifdef _WITH_LVS_
-	print_check_daemon_addresses();
-	print_check_dns_addresses();
-	print_check_http_addresses();
-	print_check_misc_addresses();
-	print_check_smtp_addresses();
-	print_check_ssl_addresses();
-	print_check_tcp_addresses();
-#ifdef _WITH_BFD_
-	print_check_bfd_addresses();
+#ifdef _TIMER_CHECK_
+static char timer_debug;
 #endif
+#ifdef _SMTP_ALERT_DEBUG_
+static char smtp_debug;
 #endif
-#ifdef _WITH_VRRP_
-#ifdef _WITH_DBUS_
-	print_vrrp_dbus_addresses();
+#ifdef _EPOLL_DEBUG_
+static char epoll_debug;
 #endif
-	print_vrrp_if_addresses();
-	print_vrrp_netlink_addresses();
-	print_vrrp_daemon_addresses();
-	print_vrrp_scheduler_addresses();
+#ifdef _EPOLL_THREAD_DUMP_
+static char epoll_thread_debug;
 #endif
-}
+#ifdef _REGEX_DEBUG_
+static char regex_debug;
+#endif
+#ifdef _WITH_REGEX_TIMERS_
+static char regex_timers;
+#endif
+#ifdef _TSM_DEBUG_
+static char tsm_debug;
+#endif
+#ifdef _VRRP_FD_DEBUG_
+static char vrrp_fd_debug;
+#endif
+#ifdef _NETLINK_TIMERS_
+static char netlink_timer_debug;
 #endif
 
 void
@@ -205,15 +216,11 @@ free_parent_mallocs_startup(bool am_child)
 #endif
 		syslog_ident = NULL;
 
-		if (orig_core_dump_pattern) {
-			FREE_PTR(orig_core_dump_pattern);
-			orig_core_dump_pattern = NULL;
-		}
+		FREE_PTR(orig_core_dump_pattern);
 	}
 
 	if (free_main_pidfile) {
 		FREE_PTR(main_pidfile);
-		main_pidfile = NULL;
 		free_main_pidfile = false;
 	}
 }
@@ -265,8 +272,8 @@ make_syslog_ident(const char* name)
 #if HAVE_DECL_CLONE_NEWNET
 	if (global_data->network_namespace) {
 		strcat(ident, "_");
-			strcat(ident, global_data->network_namespace);
-		}
+		strcat(ident, global_data->network_namespace);
+	}
 #endif
 	if (global_data->instance_name) {
 		strcat(ident, "_");
@@ -304,41 +311,6 @@ make_pidfile_name(const char* start, const char* instance, const char* extn)
 
 	return name;
 }
-
-#ifndef _DEBUG_
-static void
-parent_child_remover(thread_t *thread)
-{
-
-        if (prog_type == PROG_TYPE_PARENT) {
-#ifdef _WITH_VRRP_
-                if (thread->u.c.pid == vrrp_child)
-                        vrrp_child = 0;
-#endif
-#ifdef _WITH_LVS_
-                if (thread->u.c.pid == checkers_child)
-                        checkers_child = 0;
-#endif
-#ifdef _WITH_BFD_
-                if (thread->u.c.pid == bfd_child)
-                        bfd_child = 0;
-#endif
-
-		if (__test_bit(CONFIG_TEST_BIT, &debug)) {
-#ifdef _WITH_VRRP_
-			if (vrrp_child == 0)
-#endif
-#ifdef _WITH_LVS_
-			if (checkers_child == 0)
-#endif
-#ifdef _WITH_BFD_
-			if (bfd_child == 0)
-#endif
-				raise(SIGTERM);
-		}
-	}
-}
-#endif
 
 #ifdef _WITH_VRRP_
 bool
@@ -420,7 +392,6 @@ stop_keepalived(void)
 {
 #ifndef _DEBUG_
 	/* Just cleanup memory & exit */
-	signal_handler_destroy();
 	thread_destroy_master(master);
 
 #ifdef _WITH_VRRP_
@@ -443,9 +414,11 @@ stop_keepalived(void)
 }
 
 /* Daemon init sequence */
-static void
+static int
 start_keepalived(void)
 {
+	bool have_child = false;
+
 #ifdef _WITH_BFD_
 	/* must be opened before vrrp and bfd start */
 	open_bfd_pipes();
@@ -453,24 +426,84 @@ start_keepalived(void)
 
 #ifdef _WITH_LVS_
 	/* start healthchecker child */
-	if (running_checker())
+	if (running_checker()) {
 		start_check_child();
+		have_child = true;
+	}
 #endif
 #ifdef _WITH_VRRP_
 	/* start vrrp child */
-	if (running_vrrp())
+	if (running_vrrp()) {
 		start_vrrp_child();
+		have_child = true;
+	}
 #endif
 #ifdef _WITH_BFD_
 	/* start bfd child */
-	if (running_bfd())
+	if (running_bfd()) {
 		start_bfd_child();
+		have_child = true;
+	}
+#endif
+
+	return have_child;
+}
+
+static void
+validate_config(void)
+{
+#ifdef _WITH_VRRP_
+	kernel_netlink_read_interfaces();
+#endif
+
+#ifdef _WITH_LVS_
+	/* validate healthchecker config */
+#ifndef _DEBUG_
+	prog_type = PROG_TYPE_CHECKER;
+#endif
+	check_validate_config();
+#endif
+#ifdef _WITH_VRRP_
+	/* validate vrrp config */
+#ifndef _DEBUG_
+	prog_type = PROG_TYPE_VRRP;
+#endif
+	vrrp_validate_config();
+#endif
+#ifdef _WITH_BFD_
+	/* validate bfd config */
+#ifndef _DEBUG_
+	prog_type = PROG_TYPE_BFD;
+#endif
+	bfd_validate_config();
 #endif
 }
 
+static void
+config_test_exit(void)
+{
+	config_err_t config_err = get_config_status();
+
+	switch (config_err) {
+	case CONFIG_OK:
+		exit(KEEPALIVED_EXIT_OK);
+	case CONFIG_FILE_NOT_FOUND:
+	case CONFIG_BAD_IF:
+	case CONFIG_FATAL:
+		exit(KEEPALIVED_EXIT_CONFIG);
+	case CONFIG_SECURITY_ERROR:
+		exit(KEEPALIVED_EXIT_CONFIG_TEST_SECURITY);
+	default:
+		exit(KEEPALIVED_EXIT_CONFIG_TEST);
+	}
+}
+
+#ifndef _DEBUG_
 static bool reload_config(void)
 {
 	bool unsupported_change = false;
+
+	log_message(LOG_INFO, "Reloading ...");
 
 	/* Make sure there isn't an attempt to change the network namespace or instance name */
 	old_global_data = global_data;
@@ -479,7 +512,7 @@ static bool reload_config(void)
 
 	read_config_file();
 
-	init_global_data(global_data);
+	init_global_data(global_data, old_global_data);
 
 #if HAVE_DECL_CLONE_NEWNET
 	if (!!old_global_data->network_namespace != !!global_data->network_namespace ||
@@ -501,6 +534,17 @@ static bool reload_config(void)
 	global_data->instance_name = old_global_data->instance_name;
 	old_global_data->instance_name = NULL;
 
+#ifdef _WITH_NFTABLES_
+	if (!!old_global_data->vrrp_nf_table_name != !!global_data->vrrp_nf_table_name ||
+	    (global_data->vrrp_nf_table_name && strcmp(old_global_data->vrrp_nf_table_name, global_data->vrrp_nf_table_name))) {
+		log_message(LOG_INFO, "Cannot change nftables table name at a reload - please restart %s", PACKAGE);
+		unsupported_change = true;
+	}
+	FREE_PTR(global_data->vrrp_nf_table_name);
+	global_data->vrrp_nf_table_name = old_global_data->vrrp_nf_table_name;
+	old_global_data->vrrp_nf_table_name = NULL;
+#endif
+
 	if (unsupported_change) {
 		/* We cannot reload the configuration, so continue with the old config */
 		free_global_data (global_data);
@@ -509,13 +553,13 @@ static bool reload_config(void)
 	else
 		free_global_data (old_global_data);
 
+
 	return !unsupported_change;
 }
 
 /* SIGHUP/USR1/USR2 handler */
-#ifndef _DEBUG_
 static void
-propogate_signal(__attribute__((unused)) void *v, int sig)
+propagate_signal(__attribute__((unused)) void *v, int sig)
 {
 	if (sig == SIGHUP) {
 		if (!reload_config())
@@ -556,14 +600,13 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	int wait_count = 0;
 	struct timeval start_time, now;
 #ifdef HAVE_SIGNALFD
-	struct timeval timeout = {
-		.tv_sec = child_wait_time,
-		.tv_usec = 0
-	};
-	int signal_fd = signal_rfd();
-	fd_set read_set;
+	int timeout = child_wait_time * 1000;
+	int signal_fd = master->signal_fd;
 	struct signalfd_siginfo siginfo;
 	sigset_t sigmask;
+	struct epoll_event ev = { .events = EPOLLIN, .data.fd = master->signal_fd };
+	int efd;
+	int wstatus;
 #else
 	sigset_t old_set, child_wait;
 	struct timespec timeout = {
@@ -582,7 +625,6 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGCHLD);
 	signalfd(signal_fd, &sigmask, 0);
-	FD_ZERO(&read_set);
 #else
 	sigmask_func(0, NULL, &old_set);
 	if (!sigismember(&old_set, SIGCHLD)) {
@@ -594,7 +636,7 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 
 #ifdef _WITH_VRRP_
 	if (vrrp_child > 0) {
-		if (!__test_bit(CONFIG_TEST_BIT, &debug) && kill(vrrp_child, SIGTERM)) {
+		if (kill(vrrp_child, SIGTERM)) {
 			/* ESRCH means no such process */
 			if (errno == ESRCH)
 				vrrp_child = 0;
@@ -605,7 +647,7 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #endif
 #ifdef _WITH_LVS_
 	if (checkers_child > 0) {
-		if (!__test_bit(CONFIG_TEST_BIT, &debug) && kill(checkers_child, SIGTERM)) {
+		if (kill(checkers_child, SIGTERM)) {
 			if (errno == ESRCH)
 				checkers_child = 0;
 		}
@@ -615,7 +657,7 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #endif
 #ifdef _WITH_BFD_
 	if (bfd_child > 0) {
-		if (!__test_bit(CONFIG_TEST_BIT, &debug) && kill(bfd_child, SIGTERM)) {
+		if (kill(bfd_child, SIGTERM)) {
 			if (errno == ESRCH)
 				bfd_child = 0;
 		}
@@ -624,23 +666,27 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	}
 #endif
 
+#ifdef HAVE_SIGNALFD
+	efd = epoll_create(1);
+	epoll_ctl(efd, EPOLL_CTL_ADD, signal_fd, &ev);
+#endif
+
 	gettimeofday(&start_time, NULL);
 	while (wait_count) {
 #ifdef HAVE_SIGNALFD
-		FD_SET(signal_fd, &read_set);
-		ret = select(signal_fd + 1, &read_set, NULL, NULL, &timeout);
+		ret = epoll_wait(efd, &ev, 1, timeout);
 		if (ret == 0)
 			break;
 		if (ret == -1) {
 			if (errno == EINTR)
 				continue;
 
-			log_message(LOG_INFO, "Terminating select returned errno %d", errno);
+			log_message(LOG_INFO, "Terminating epoll_wait returned errno %d", errno);
 			break;
 		}
 
-		if (!FD_ISSET(signal_fd, &read_set)) {
-			log_message(LOG_INFO, "Terminating select did not return select_fd");
+		if (ev.data.fd != signal_fd) {
+			log_message(LOG_INFO, "Terminating epoll_wait did not return signal_fd");
 			continue;
 		}
 
@@ -656,6 +702,14 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #ifdef _WITH_VRRP_
 		if (vrrp_child > 0 && vrrp_child == (pid_t)siginfo.ssi_pid) {
 			report_child_status(status, vrrp_child, PROG_VRRP);
+			ret = waitpid(vrrp_child, &wstatus, WNOHANG);
+			if (ret == 0 || (ret == -1 && errno == EINTR))
+				continue;
+			if (ret == -1)
+				log_message(LOG_INFO, "Wait for vrrp child return errno %d", errno);
+
+			/* We could check ret == vrrp_child, but it seems unneccessary */
+
 			vrrp_child = 0;
 			wait_count--;
 		}
@@ -664,6 +718,11 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #ifdef _WITH_LVS_
 		if (checkers_child > 0 && checkers_child == (pid_t)siginfo.ssi_pid) {
 			report_child_status(status, checkers_child, PROG_CHECK);
+			ret = waitpid(checkers_child, &wstatus, WNOHANG);
+			if (ret == 0 || (ret == -1 && errno == EINTR))
+				continue;
+			if (ret == -1)
+				log_message(LOG_INFO, "Wait for checker child return errno %d", errno);
 			checkers_child = 0;
 			wait_count--;
 		}
@@ -671,6 +730,11 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #ifdef _WITH_BFD_
 		if (bfd_child > 0 && bfd_child == (pid_t)siginfo.ssi_pid) {
 			report_child_status(status, bfd_child, PROG_BFD);
+			ret = waitpid(bfd_child, &wstatus, WNOHANG);
+			if (ret == 0 || (ret == -1 && errno == EINTR))
+				continue;
+			if (ret == -1)
+				log_message(LOG_INFO, "Wait for bfd child return errno %d", errno);
 			bfd_child = 0;
 			wait_count--;
 		}
@@ -707,29 +771,29 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 			wait_count--;
 		}
 #endif
-
 #endif
 
 		if (wait_count) {
 			gettimeofday(&now, NULL);
-			timeout.tv_sec = child_wait_time - (now.tv_sec - start_time.tv_sec);
 #ifdef HAVE_SIGNALFD
-			timeout.tv_usec = (start_time.tv_usec - now.tv_usec);
-			if (timeout.tv_usec < 0) {
-				timeout.tv_usec += 1000000L;
-				timeout.tv_sec--;
-			}
+			timeout = (child_wait_time - (now.tv_sec - start_time.tv_sec)) * 1000 + (start_time.tv_usec - now.tv_usec) / 1000;
+			if (timeout < 0)
+				break;
 #else
+			timeout.tv_sec = child_wait_time - (now.tv_sec - start_time.tv_sec);
 			timeout.tv_nsec = (start_time.tv_usec - now.tv_usec) * 1000;
 			if (timeout.tv_nsec < 0) {
 				timeout.tv_nsec += 1000000000L;
 				timeout.tv_sec--;
 			}
-#endif
 			if (timeout.tv_sec < 0)
 				break;
+#endif
 		}
 	}
+#ifdef HAVE_SIGNALFD
+	close(efd);
+#endif
 
 	/* A child may not have terminated, so force its termination */
 #ifdef _WITH_VRRP_
@@ -762,13 +826,12 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 static void
 signal_init(void)
 {
-	signal_handler_init();
 #ifndef _DEBUG_
-	signal_set(SIGHUP, propogate_signal, NULL);
-	signal_set(SIGUSR1, propogate_signal, NULL);
-	signal_set(SIGUSR2, propogate_signal, NULL);
+	signal_set(SIGHUP, propagate_signal, NULL);
+	signal_set(SIGUSR1, propagate_signal, NULL);
+	signal_set(SIGUSR2, propagate_signal, NULL);
 #ifdef _WITH_JSON_
-	signal_set(SIGJSON, propogate_signal, NULL);
+	signal_set(SIGJSON, propagate_signal, NULL);
 #endif
 	signal_set(SIGINT, sigend, NULL);
 	signal_set(SIGTERM, sigend, NULL);
@@ -800,7 +863,7 @@ update_core_dump_pattern(const char *pattern_str)
 	fd = open ("/proc/sys/kernel/core_pattern", O_RDWR);
 
 	if (fd == -1 ||
-	    ( initialising && read(fd, orig_core_dump_pattern, CORENAME_MAX_SIZE - 1) == -1) ||
+	    (initialising && read(fd, orig_core_dump_pattern, CORENAME_MAX_SIZE - 1) == -1) ||
 	    write(fd, pattern_str, strlen(pattern_str)) == -1) {
 		log_message(LOG_INFO, "Unable to read/write core_pattern");
 
@@ -808,23 +871,20 @@ update_core_dump_pattern(const char *pattern_str)
 			close(fd);
 
 		FREE(orig_core_dump_pattern);
-		orig_core_dump_pattern = NULL;
 
 		return;
 	}
 
 	close(fd);
 
-	if (!initialising) {
-		FREE(orig_core_dump_pattern);
-		orig_core_dump_pattern = NULL;
-	}
+	if (!initialising)
+		FREE_PTR(orig_core_dump_pattern);
 }
 
 static void
 core_dump_init(void)
 {
-	struct rlimit rlim;
+	struct rlimit orig_rlim, rlim;
 
 	if (set_core_dump_pattern) {
 		/* If we set the core_pattern here, we will attempt to restore it when we
@@ -837,10 +897,247 @@ core_dump_init(void)
 		rlim.rlim_cur = RLIM_INFINITY;
 		rlim.rlim_max = RLIM_INFINITY;
 
-		if (setrlimit(RLIMIT_CORE, &rlim) == -1)
+		if (getrlimit(RLIMIT_CORE, &orig_rlim) == -1)
+			log_message(LOG_INFO, "Failed to get core file size");
+		else if (setrlimit(RLIMIT_CORE, &rlim) == -1)
 			log_message(LOG_INFO, "Failed to set core file size");
+		else
+			set_child_rlimit(RLIMIT_CORE, &orig_rlim);
 	}
 }
+
+static mode_t
+set_umask(const char *optarg)
+{
+	long umask_long;
+	mode_t umask_bits;
+	char *endptr;
+
+	umask_long = strtoll(optarg, &endptr, 0);
+
+	if (*endptr || umask_long < 0 || umask_long & ~(S_IRWXU | S_IRWXG | S_IRWXO)) {
+		fprintf(stderr, "Invalid --umask option %s", optarg);
+		return 0;
+	}
+
+	umask_bits = umask_long & (S_IRWXU | S_IRWXG | S_IRWXO);
+	umask(umask_bits);
+
+	umask_cmdline = true;
+
+#ifdef _MEM_CHECK_
+	update_mem_check_log_perms(umask_bits);
+#endif
+#ifdef ENABLE_LOG_TO_FILE
+	update_log_file_perms(umask_bits);
+#endif
+
+	return umask_bits;
+}
+
+void
+initialise_debug_options(void)
+{
+#if defined WITH_DEBUG_OPTIONS && !defined _DEBUG_
+	char mask = 0;
+
+	if (prog_type == PROG_TYPE_PARENT)
+		mask = 1 << PROG_TYPE_PARENT;
+#if _WITH_BFD_
+	else if (prog_type == PROG_TYPE_BFD)
+		mask = 1 << PROG_TYPE_BFD;
+#endif
+#if _WITH_LVS_
+	else if (prog_type == PROG_TYPE_CHECKER)
+		mask = 1 << PROG_TYPE_CHECKER;
+#endif
+#if _WITH_VRRP_
+	else if (prog_type == PROG_TYPE_VRRP)
+		mask = 1 << PROG_TYPE_VRRP;
+#endif
+
+#ifdef _TIMER_CHECK_
+	do_timer_check = !!(timer_debug & mask);
+#endif
+#ifdef _SMTP_ALERT_DEBUG_
+	do_smtp_alert_debug = !!(smtp_debug & mask);
+#endif
+#ifdef _EPOLL_DEBUG_
+	do_epoll_debug = !!(epoll_debug & mask);
+#endif
+#ifdef _EPOLL_THREAD_DUMP_
+	do_epoll_thread_dump = !!(epoll_thread_debug & mask);
+#endif
+#ifdef _REGEX_DEBUG_
+	do_regex_debug = !!(regex_debug & mask);
+#endif
+#ifdef _WITH_REGEX_TIMERS_
+	do_regex_timers = !!(regex_timers & mask);
+#endif
+#ifdef _TSM_DEBUG_
+	do_tsm_debug = !!(tsm_debug & mask);
+#endif
+#ifdef _VRRP_FD_DEBUG_
+	do_vrrp_fd_debug = !!(vrrp_fd_debug & mask);
+#endif
+#ifdef _NETLINK_TIMERS_
+	do_netlink_timers = !!(netlink_timer_debug & mask);
+#endif
+#endif
+}
+
+#ifdef  WITH_DEBUG_OPTIONS
+static void
+set_debug_options(const char *options)
+{
+	char all_processes, processes;
+	char opt;
+	const char *opt_p = options;
+
+#ifdef _DEBUG_
+	all_processes = 1;
+#else
+	all_processes = (1 << PROG_TYPE_PARENT);
+#if _WITH_BFD_
+	all_processes |= (1 << PROG_TYPE_BFD);
+#endif
+#if _WITH_LVS_
+	all_processes |= (1 << PROG_TYPE_CHECKER);
+#endif
+#if _WITH_VRRP_
+	all_processes |= (1 << PROG_TYPE_VRRP);
+#endif
+#endif
+
+	if (!options) {
+#ifdef _TIMER_CHECK_
+		timer_debug = all_processes;
+#endif
+#ifdef _SMTP_ALERT_DEBUG_
+		smtp_debug = all_processes;
+#endif
+#ifdef _EPOLL_DEBUG_
+		epoll_debug = all_processes;
+#endif
+#ifdef _EPOLL_THREAD_DUMP_
+		epoll_thread_debug = all_processes;
+#endif
+#ifdef _REGEX_DEBUG_
+		regex_debug = all_processes;
+#endif
+#ifdef _WITH_REGEX_TIMERS_
+		regex_timers = all_processes;
+#endif
+#ifdef _TSM_DEBUG_
+		tsm_debug = all_processes;
+#endif
+#ifdef _VRRP_FD_DEBUG_
+		vrrp_fd_debug = all_processes;
+#endif
+#ifdef _NETLINK_TIMERS_
+		netlink_timer_debug = all_processes;
+#endif
+
+		return;
+	}
+
+	opt_p = options;
+	do {
+		if (!isupper(*opt_p)) {
+			fprintf(stderr, "Unknown debug option'%c' in '%s'\n", *opt_p, options);
+			return;
+		}
+		opt = *opt_p++;
+
+#ifdef _DEBUG_
+		processes = all_processes;
+#else
+		if (!*opt_p || isupper(*opt_p))
+			processes = all_processes;
+		else {
+			processes = 0;
+			while (*opt_p && !isupper(*opt_p)) {
+				switch (*opt_p) {
+				case 'p':
+					processes |= (1 << PROG_TYPE_PARENT);
+					break;
+#if _WITH_BFD_
+				case 'b':
+					processes |= (1 << PROG_TYPE_BFD);
+					break;
+#endif
+#if _WITH_LVS_
+				case 'c':
+					processes |= (1 << PROG_TYPE_CHECKER);
+					break;
+#endif
+#if _WITH_VRRP_
+				case 'v':
+					processes |= (1 << PROG_TYPE_VRRP);
+					break;
+#endif
+				default:
+					fprintf(stderr, "Unknown debug process '%c' in '%s'\n", *opt_p, options);
+					return;
+				}
+				opt_p++;
+			}
+		}
+#endif
+
+		switch (opt) {
+#ifdef _TIMER_CHECK_
+		case 'T':
+			timer_debug = processes;
+			break;
+#endif
+#ifdef _SMTP_ALERT_DEBUG_
+		case 'M':
+			smtp_debug = processes;
+			break;
+#endif
+#ifdef _EPOLL_DEBUG_
+		case 'E':
+			epoll_debug = processes;
+			break;
+#endif
+#ifdef _EPOLL_THREAD_DUMP_
+		case 'D':
+			epoll_thread_debug = processes;
+			break;
+#endif
+#ifdef _REGEX_DEBUG_
+		case 'R':
+			regex_debug = processes;
+			break;
+#endif
+#ifdef _WITH_REGEX_TIMERS_
+		case 'X':
+			regex_timers = processes;
+			break;
+#endif
+#ifdef _TSM_DEBUG_
+		case 'S':
+			tsm_debug = processes;
+			break;
+#endif
+#ifdef _VRRP_FD_DEBUG_
+		case 'F':
+			vrrp_fd_debug = processes;
+			break;
+#endif
+#ifdef _NETLINK_TIMERS_
+		case 'N':
+			netlink_timer_debug = processes;
+			break;
+#endif
+		default:
+			fprintf(stderr, "Unknown debug type '%c' in '%s'\n", opt, options);
+			return;
+		}
+	} while (opt_p && *opt_p);
+}
+#endif
 
 /* Usage function */
 static void
@@ -859,9 +1156,12 @@ usage(const char *prog)
 	fprintf(stderr, "  -l, --log-console            Log messages to local console\n");
 	fprintf(stderr, "  -D, --log-detail             Detailed log messages\n");
 	fprintf(stderr, "  -S, --log-facility=[0-7]     Set syslog facility to LOG_LOCAL[0-7]\n");
+#ifdef ENABLE_LOG_TO_FILE
 	fprintf(stderr, "  -g, --log-file=FILE          Also log to FILE (default /tmp/keepalived.log)\n");
 	fprintf(stderr, "      --flush-log-file         Flush log file on write\n");
+#endif
 	fprintf(stderr, "  -G, --no-syslog              Don't log via syslog\n");
+	fprintf(stderr, "  -u, --umask=MASK             umask for file creation (in numeric form)\n");
 #ifdef _WITH_VRRP_
 	fprintf(stderr, "  -X, --release-vips           Drop VIP on transition from signal.\n");
 	fprintf(stderr, "  -V, --dont-release-vrrp      Don't remove VRRP VIPs and VROUTEs on daemon stop\n");
@@ -903,7 +1203,42 @@ usage(const char *prog)
 								", JSON"
 #endif
 								"\n");
-	fprintf(stderr, "  -t, --config-test            Check the configuration for obvious errors\n");
+	fprintf(stderr, "  -t, --config-test[=LOG_FILE] Check the configuration for obvious errors, output to\n"
+			"                                stderr by default\n");
+#ifdef _WITH_PERF_
+	fprintf(stderr, "      --perf[=PERF_TYPE]       Collect perf data, PERF_TYPE=all, run(default) or end\n");
+#endif
+#ifdef WITH_DEBUG_OPTIONS
+	fprintf(stderr, "      --debug[=...]            Enable debug options. p, b, c, v specify parent, bfd, checker and vrrp processes\n");
+#ifdef _TIMER_CHECK_
+	fprintf(stderr, "                                   T - timer debug\n");
+#endif
+#ifdef _SMTP_ALERT_DEBUG_
+	fprintf(stderr, "                                   M - email alert debug\n");
+#endif
+#ifdef _EPOLL_DEBUG_
+	fprintf(stderr, "                                   E - epoll debug\n");
+#endif
+#ifdef _EPOLL_THREAD_DUMP_
+	fprintf(stderr, "                                   D - epoll thread dump debug\n");
+#endif
+#ifdef _VRRP_FD_DEBUG
+	fprintf(stderr, "                                   F - vrrp fd dump debug\n");
+#endif
+#ifdef _REGEX_DEBUG_
+	fprintf(stderr, "                                   R - regex debug\n");
+#endif
+#ifdef _WITH_REGEX_TIMERS_
+	fprintf(stderr, "                                   X - regex timers\n");
+#endif
+#ifdef _TSM_DEBUG_
+	fprintf(stderr, "                                   S - TSM debug\n");
+#endif
+#ifdef _NETLINK_TIMERS_
+	fprintf(stderr, "                                   N - netlink timer debug\n");
+#endif
+	fprintf(stderr, "                                 Example --debug=TpMEvcp\n");
+#endif
 	fprintf(stderr, "  -v, --version                Display the version number\n");
 	fprintf(stderr, "  -h, --help                   Display this help message\n");
 }
@@ -919,6 +1254,8 @@ parse_cmdline(int argc, char **argv)
 	int longindex;
 	int curind;
 	bool bad_option = false;
+	unsigned facility;
+	mode_t new_umask_val;
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -934,8 +1271,11 @@ parse_cmdline(int argc, char **argv)
 		{"log-detail",		no_argument,		NULL, 'D'},
 		{"log-facility",	required_argument,	NULL, 'S'},
 		{"log-file",		optional_argument,	NULL, 'g'},
+#ifdef ENABLE_LOG_TO_FILE
 		{"flush-log-file",	no_argument,		NULL,  2 },
+#endif
 		{"no-syslog",		no_argument,		NULL, 'G'},
+		{"umask",		required_argument,	NULL, 'u'},
 #ifdef _WITH_VRRP_
 		{"release-vips",	no_argument,		NULL, 'X'},
 		{"dont-release-vrrp",	no_argument,		NULL, 'V'},
@@ -971,7 +1311,13 @@ parse_cmdline(int argc, char **argv)
 #endif
 		{"config-id",		required_argument,	NULL, 'i'},
 		{"signum",		required_argument,	NULL,  4 },
-		{"config-test",		no_argument,		NULL, 't'},
+		{"config-test",		optional_argument,	NULL, 't'},
+#ifdef _WITH_PERF_
+		{"perf",		optional_argument,	NULL,  5 },
+#endif
+#ifdef WITH_DEBUG_OPTIONS
+		{"debug",		optional_argument,	NULL,  6 },
+#endif
 		{"version",		no_argument,		NULL, 'v'},
 		{"help",		no_argument,		NULL, 'h'},
 
@@ -980,9 +1326,9 @@ parse_cmdline(int argc, char **argv)
 
 	/* Unfortunately, if a short option is used, getopt_long() doesn't change the value
 	 * of longindex, so we need to ensure that before calling getopt_long(), longindex
-	 * is set to a know invalid value */
+	 * is set to a known invalid value */
 	curind = optind;
-	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndDRS:f:p:i:mM::g::Gt"
+	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndu:DRS:f:p:i:mM::g::Gt::"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 					    "PC"
 #endif
@@ -1070,28 +1416,56 @@ parse_cmdline(int argc, char **argv)
 			break;
 #endif
 		case 'S':
-			log_facility = LOG_FACILITY[atoi(optarg)].facility;
-			reopen_log = true;
+			if (!read_unsigned(optarg, &facility, 0, LOG_FACILITY_MAX, false))
+				fprintf(stderr, "Invalid log facility '%s'\n", optarg);
+			else {
+				log_facility = LOG_FACILITY[facility].facility;
+				reopen_log = true;
+			}
 			break;
 		case 'g':
+#ifdef ENABLE_LOG_TO_FILE
 			if (optarg && optarg[0])
 				log_file_name = optarg;
 			else
 				log_file_name = "/tmp/keepalived.log";
 			open_log_file(log_file_name, NULL, NULL, NULL);
+#else
+			fprintf(stderr, "-g requires configure option --enable-log-file\n");
+			bad_option = true;
+#endif
 			break;
+#ifdef ENABLE_LOG_TO_FILE
+		case 2:		/* --flush-log-file */
+			set_flush_log_file();
+			break;
+#endif
 		case 'G':
 			__set_bit(NO_SYSLOG_BIT, &debug);
 			reopen_log = true;
 			break;
+		case 'u':
+			new_umask_val = set_umask(optarg);
+			if (umask_cmdline)
+				umask_val = new_umask_val;
+			break;
 		case 't':
 			__set_bit(CONFIG_TEST_BIT, &debug);
+			__set_bit(DONT_RESPAWN_BIT, &debug);
+			__set_bit(DONT_FORK_BIT, &debug);
+			__set_bit(NO_SYSLOG_BIT, &debug);
+			if (optarg && optarg[0]) {
+				int fd = open(optarg, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+				if (fd == -1) {
+					fprintf(stderr, "Unable to open config-test log file %s\n", optarg);
+					exit(EXIT_FAILURE);
+				}
+				dup2(fd, STDERR_FILENO);
+				close(fd);
+			}
 			break;
 		case 'f':
 			conf_file = optarg;
-			break;
-		case 2:		/* --flush-log-file */
-			set_flush_log_file();
 			break;
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 		case 'P':
@@ -1181,11 +1555,33 @@ parse_cmdline(int argc, char **argv)
 			__set_bit(DAEMON_BFD, &daemon_mode);
 #endif
 			break;
+#ifdef _WITH_PERF_
+		case 5:
+			if (optarg && optarg[0]) {
+				if (!strcmp(optarg, "run"))
+					perf_run = PERF_RUN;
+				else if (!strcmp(optarg, "all"))
+					perf_run = PERF_ALL;
+				else if (!strcmp(optarg, "end"))
+					perf_run = PERF_END;
+				else
+					log_message(LOG_INFO, "Unknown perf start point %s", optarg);
+			}
+			else
+				perf_run = PERF_RUN;
+
+			break;
+#endif
+#ifdef WITH_DEBUG_OPTIONS
+		case 6:
+			set_debug_options(optarg && optarg[0] ? optarg : NULL);
+			break;
+#endif
 		case '?':
 			if (optopt && argv[curind][1] != '-')
 				fprintf(stderr, "Unknown option -%c\n", optopt);
 			else
-				fprintf(stderr, "Unknown option --%s\n", argv[curind]);
+				fprintf(stderr, "Unknown option %s\n", argv[curind]);
 			bad_option = true;
 			break;
 		case ':':
@@ -1215,6 +1611,31 @@ parse_cmdline(int argc, char **argv)
 	return reopen_log;
 }
 
+#ifdef THREAD_DUMP
+static void
+register_parent_thread_addresses(void)
+{
+	register_scheduler_addresses();
+	register_signal_thread_addresses();
+
+#ifdef _WITH_LVS_
+	register_check_parent_addresses();
+#endif
+#ifdef _WITH_VRRP_
+	register_vrrp_parent_addresses();
+#endif
+#ifdef _WITH_BFD_
+	register_bfd_parent_addresses();
+#endif
+
+#ifndef _DEBUG_
+	register_signal_handler_address("propagate_signal", propagate_signal);
+	register_signal_handler_address("sigend", sigend);
+#endif
+	register_signal_handler_address("thread_child_handler", thread_child_handler);
+}
+#endif
+
 /* Entry point */
 int
 keepalived_main(int argc, char **argv)
@@ -1222,6 +1643,14 @@ keepalived_main(int argc, char **argv)
 	bool report_stopped = true;
 	struct utsname uname_buf;
 	char *end;
+	int exit_code = KEEPALIVED_EXIT_OK;
+
+	/* Ensure time_now is set. We then don't have to check anywhere
+	 * else if it is set. */
+	set_time_now();
+
+	/* Save command line options in case need to log them later */
+	save_cmd_line_options(argc, argv);
 
 	/* Init debugging level */
 	debug = 0;
@@ -1230,12 +1659,6 @@ keepalived_main(int argc, char **argv)
 #ifndef _DEBUG_
 	prog_type = PROG_TYPE_PARENT;
 #endif
-
-	/* Initialise pointer to child finding function */
-	set_child_finder_name(find_keepalived_child_name);
-
-	/* If one of our children terminates, we want to clear it out */
-	set_child_remover(parent_child_remover);
 
 	/* Initialise daemon_mode */
 #ifdef _WITH_VRRP_
@@ -1247,6 +1670,9 @@ keepalived_main(int argc, char **argv)
 #ifdef _WITH_BFD_
 	__set_bit(DAEMON_BFD, &daemon_mode);
 #endif
+
+	/* Set default file creation mask */
+	umask(umask_val);
 
 	/* Open log with default settings so we can log initially */
 	openlog(PACKAGE_NAME, LOG_PID, log_facility);
@@ -1325,7 +1751,9 @@ keepalived_main(int argc, char **argv)
 		}
 	}
 
-	netlink_set_recv_buf_size();
+#ifndef _DEBUG_
+	log_command_line(0);
+#endif
 
 	/* Check we can read the configuration file(s).
 	   NOTE: the working directory will be / if we
@@ -1334,14 +1762,19 @@ keepalived_main(int argc, char **argv)
 	   This means that if any config file names are not
 	   absolute file names, the behaviour will be different
 	   depending on whether we forked or not. */
-	if (!check_conf_file(conf_file))
+	if (!check_conf_file(conf_file)) {
+		if (__test_bit(CONFIG_TEST_BIT, &debug))
+			config_test_exit();
+
+		exit_code = KEEPALIVED_EXIT_NO_CONFIG;
 		goto end;
+	}
 
 	global_data = alloc_global_data();
 
 	read_config_file();
 
-	init_global_data(global_data);
+	init_global_data(global_data, NULL);
 
 #if HAVE_DECL_CLONE_NEWNET
 	if (override_namespace) {
@@ -1354,11 +1787,12 @@ keepalived_main(int argc, char **argv)
 	}
 #endif
 
-	if (global_data->instance_name
+	if (!__test_bit(CONFIG_TEST_BIT, &debug) &&
+	    (global_data->instance_name
 #if HAVE_DECL_CLONE_NEWNET
-			  || global_data->network_namespace
+	     || global_data->network_namespace
 #endif
-					      ) {
+					      )) {
 		if ((syslog_ident = make_syslog_ident(PACKAGE_NAME))) {
 			log_message(LOG_INFO, "Changing syslog ident to %s", syslog_ident);
 			closelog();
@@ -1369,6 +1803,7 @@ keepalived_main(int argc, char **argv)
 
 		use_pid_dir = true;
 
+#ifdef ENABLE_LOG_TO_FILE
 		open_log_file(log_file_name,
 				NULL,
 #if HAVE_DECL_CLONE_NEWNET
@@ -1377,16 +1812,24 @@ keepalived_main(int argc, char **argv)
 				NULL,
 #endif
 				global_data->instance_name);
-	}
-
-#ifdef _TIMER_DEBUG_
-	global_print();
 #endif
-
-	if (use_pid_dir) {
-		/* Create the directory for pid files */
-		create_pid_dir();
 	}
+
+	/* Initialise pointer to child finding function */
+	set_child_finder_name(find_keepalived_child_name);
+
+	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
+		if (use_pid_dir) {
+			/* Create the directory for pid files */
+			create_pid_dir();
+		}
+	}
+
+	/* If we want to monitor processes, we have to do it before calling
+	 * setns() */
+#ifdef _WITH_CN_PROC_
+	open_track_processes();
+#endif
 
 #if HAVE_DECL_CLONE_NEWNET
 	if (global_data->network_namespace) {
@@ -1397,102 +1840,115 @@ keepalived_main(int argc, char **argv)
 	}
 #endif
 
-	if (global_data->instance_name) {
-		if (!main_pidfile && (main_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE, global_data->instance_name, PID_EXTENSION)))
-			free_main_pidfile = true;
+	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
+		if (global_data->instance_name) {
+			if (!main_pidfile && (main_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE, global_data->instance_name, PID_EXTENSION)))
+				free_main_pidfile = true;
 #ifdef _WITH_LVS_
-		if (!checkers_pidfile && (checkers_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR CHECKERS_PID_FILE, global_data->instance_name, PID_EXTENSION)))
-			free_checkers_pidfile = true;
+			if (!checkers_pidfile && (checkers_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR CHECKERS_PID_FILE, global_data->instance_name, PID_EXTENSION)))
+				free_checkers_pidfile = true;
 #endif
 #ifdef _WITH_VRRP_
-		if (!vrrp_pidfile && (vrrp_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR VRRP_PID_FILE, global_data->instance_name, PID_EXTENSION)))
-			free_vrrp_pidfile = true;
+			if (!vrrp_pidfile && (vrrp_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR VRRP_PID_FILE, global_data->instance_name, PID_EXTENSION)))
+				free_vrrp_pidfile = true;
 #endif
 #ifdef _WITH_BFD_
-		if (!bfd_pidfile && (bfd_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR VRRP_PID_FILE, global_data->instance_name, PID_EXTENSION)))
-			free_bfd_pidfile = true;
+			if (!bfd_pidfile && (bfd_pidfile = make_pidfile_name(KEEPALIVED_PID_DIR VRRP_PID_FILE, global_data->instance_name, PID_EXTENSION)))
+				free_bfd_pidfile = true;
 #endif
-	}
+		}
 
-	if (use_pid_dir) {
-		if (!main_pidfile)
-			main_pidfile = KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
+		if (use_pid_dir) {
+			if (!main_pidfile)
+				main_pidfile = KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
 #ifdef _WITH_LVS_
-		if (!checkers_pidfile)
-			checkers_pidfile = KEEPALIVED_PID_DIR CHECKERS_PID_FILE PID_EXTENSION;
+			if (!checkers_pidfile)
+				checkers_pidfile = KEEPALIVED_PID_DIR CHECKERS_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_VRRP_
-		if (!vrrp_pidfile)
-			vrrp_pidfile = KEEPALIVED_PID_DIR VRRP_PID_FILE PID_EXTENSION;
+			if (!vrrp_pidfile)
+				vrrp_pidfile = KEEPALIVED_PID_DIR VRRP_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_BFD_
-		if (!bfd_pidfile)
-			bfd_pidfile = KEEPALIVED_PID_DIR BFD_PID_FILE PID_EXTENSION;
+			if (!bfd_pidfile)
+				bfd_pidfile = KEEPALIVED_PID_DIR BFD_PID_FILE PID_EXTENSION;
 #endif
-	}
-	else
-	{
-		if (!main_pidfile)
-			main_pidfile = PID_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
+		}
+		else
+		{
+			if (!main_pidfile)
+				main_pidfile = PID_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
 #ifdef _WITH_LVS_
-		if (!checkers_pidfile)
-			checkers_pidfile = PID_DIR CHECKERS_PID_FILE PID_EXTENSION;
+			if (!checkers_pidfile)
+				checkers_pidfile = PID_DIR CHECKERS_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_VRRP_
-		if (!vrrp_pidfile)
-			vrrp_pidfile = PID_DIR VRRP_PID_FILE PID_EXTENSION;
+			if (!vrrp_pidfile)
+				vrrp_pidfile = PID_DIR VRRP_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_BFD_
-		if (!bfd_pidfile)
-			bfd_pidfile = PID_DIR BFD_PID_FILE PID_EXTENSION;
+			if (!bfd_pidfile)
+				bfd_pidfile = PID_DIR BFD_PID_FILE PID_EXTENSION;
 #endif
-	}
+		}
 
-	/* Check if keepalived is already running */
-	if (keepalived_running(daemon_mode)) {
-		log_message(LOG_INFO, "daemon is already running");
-		report_stopped = false;
-		goto end;
+		/* Check if keepalived is already running */
+		if (keepalived_running(daemon_mode)) {
+			log_message(LOG_INFO, "daemon is already running");
+			report_stopped = false;
+			goto end;
+		}
 	}
 
 	/* daemonize process */
 	if (!__test_bit(DONT_FORK_BIT, &debug) &&
 	    xdaemon(false, false, true) > 0) {
 		closelog();
-		FREE(config_id);
-		FREE(orig_core_dump_pattern);
+		FREE_PTR(config_id);
+		FREE_PTR(orig_core_dump_pattern);
 		close_std_fd();
 		exit(0);
 	}
-
-	/* Set file creation mask */
-	umask(0);
 
 #ifdef _MEM_CHECK_
 	enable_mem_log_termination();
 #endif
 
+	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
+		validate_config();
+
+		config_test_exit();
+	}
+
 	/* write the father's pidfile */
 	if (!pidfile_write(main_pidfile, getpid()))
 		goto end;
 
-	/* Signal handling initialization  */
-	signal_init();
-
 	/* Create the master thread */
 	master = thread_make_master();
 
-	add_signal_read_thread();
+	/* Signal handling initialization  */
+	signal_init();
 
 	/* Init daemon */
-	signal_set(SIGCHLD, thread_child_handler, master);	/* Set this before creating children */
-	start_keepalived();
+	if (!start_keepalived())
+		log_message(LOG_INFO, "Warning - keepalived has no configuration to run");
+
+	initialise_debug_options();
+
+#ifdef THREAD_DUMP
+	register_parent_thread_addresses();
+#endif
 
 	/* Launch the scheduling I/O multiplexer */
-	launch_scheduler();
+	launch_thread_scheduler(master);
 
 	/* Finish daemon process */
 	stop_keepalived();
+
+#ifdef THREAD_DUMP
+	deregister_thread_addresses();
+#endif
 
 	/*
 	 * Reached when terminate signal catched.
@@ -1533,5 +1989,5 @@ end:
 #endif
 	close_std_fd();
 
-	exit(0);
+	exit(exit_code);
 }

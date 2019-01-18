@@ -32,18 +32,29 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
+
+#include "vector.h"
 #ifdef _DEBUG_
-#include <sys/syslog.h>
+#include "logger.h"
 #endif
 
 /* Global debugging logging facilities */
 #ifdef _DEBUG_
-#define DBG(fmt, msg...) syslog(LOG_DEBUG, fmt, ## msg)
+#define DBG(fmt, msg...) log_message(LOG_DEBUG, fmt, ## msg)
 #else
 #define DBG(fmt, msg...)
 #endif
 
 #define STR(x)  #x
+
+#ifdef _WITH_PERF_
+typedef enum {
+	PERF_NONE,
+	PERF_RUN,
+	PERF_ALL,
+	PERF_END,
+} perf_t;
+#endif
 
 /* inline stuff */
 static inline int __ip6_addr_equal(const struct in6_addr *a1,
@@ -101,17 +112,63 @@ static inline bool inaddr_equal(sa_family_t family, void *addr1, void *addr2)
 	return false;
 }
 
+static inline uint16_t csum_incremental_update32(const uint16_t old_csum, const uint32_t old_val, const uint32_t new_val)
+{
+	/* This technique for incremental IP checksum update is described in RFC1624,
+	 * along with accompanying errata */
+
+	if (old_val == new_val)
+		return old_csum;
+
+	uint32_t acc = (~old_csum & 0xffff) + (~(old_val >> 16 ) & 0xffff) + (~old_val & 0xffff);
+
+	acc += (new_val >> 16) + (new_val & 0xffff);
+
+	/* finally compute vrrp checksum */
+	acc = (acc & 0xffff) + (acc >> 16);
+	acc += acc >> 16;
+
+	return ~acc & 0xffff;
+}
+
+static inline uint16_t csum_incremental_update16(const uint16_t old_csum, const uint16_t old_val, const uint16_t new_val)
+{
+	/* This technique for incremental IP checksum update is described in RFC1624,
+	 * along with accompanying errata */
+
+	if (old_val == new_val)
+		return old_csum;
+
+	uint32_t acc = (~old_csum & 0xffff) + (~old_val & 0xffff);
+
+	acc += new_val;
+
+	/* finally compute vrrp checksum */
+	acc = (acc & 0xffff) + (acc >> 16);
+	acc += acc >> 16;
+
+	return ~acc & 0xffff;
+}
+
 /* global vars exported */
 extern unsigned long debug;
+extern mode_t umask_val;
+#ifdef _WITH_PERF_
+extern perf_t perf_run;
+#endif
 
 /* Prototypes defs */
-extern void dump_buffer(char *, size_t, FILE *);
+extern void dump_buffer(char *, size_t, FILE *, int);
 #ifdef _WITH_STACKTRACE_
 extern void write_stacktrace(const char *, const char *);
 #endif
+extern char *make_file_name(const char *, const char *, const char *, const char *);
+#ifdef _WITH_PERF_
+extern void run_perf(const char *, const char *, const char *);
+#endif
 extern uint16_t in_csum(const uint16_t *, size_t, uint32_t, uint32_t *);
 extern char *inet_ntop2(uint32_t);
-extern uint32_t inet_stor(const char *);
+extern bool inet_stor(const char *, uint32_t *);
 extern int domain_stosockaddr(const char *, const char *, struct sockaddr_storage *);
 extern int inet_stosockaddr(char *, const char *, struct sockaddr_storage *);
 extern void inet_ip4tosockaddr(struct in_addr *, struct sockaddr_storage *);
@@ -126,13 +183,15 @@ extern int inet_inaddrcmp(int, const void *, const void *);
 extern int inet_sockaddrcmp(const struct sockaddr_storage *, const struct sockaddr_storage *);
 extern char *get_local_name(void);
 extern bool string_equal(const char *, const char *);
+extern FILE *fopen_safe(const char *, const char *);
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
 #if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-extern int fork_exec(char **argv);
+extern int fork_exec(char **);
 #endif
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
 extern int open_pipe(int [2]);
 #endif
+extern int memcmp_constant_time(const void *, const void *, size_t);
 
 #endif

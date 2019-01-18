@@ -256,7 +256,70 @@ It will normally be quite straightforward to add additional pre-defiend
 definitions, so if you need one, or have a good idea for one, then raise
 an issue at https://github.com/acasson/keepalived/issues requesting it.
 
-0.6 Configuration file syntax parser
+0.6 Sequence blocks
+
+A line starting ~SEQ(var, start, step, end) will cause the remainder of the
+line to be processed multiple times, with the variable $var set initially to
+start, and then $var will be incremented by step repeatedly, terminating when
+it is greater than end. step may be omitted, in which case it defaults to 1 or
+-1, depending on whether end is greater or less than start. Start may also be
+omitted, in which case it defaults to 1 if end > 0 or -1 if end < 0.
+
+For example:
+  ~SEQ(SUBNET, 0, 3) ip_address 10.0.$SUBNET.1
+would produce:
+  ip_address 10.0.0.1
+  ip_address 10.0.1.1
+  ip_address 10.0.2.1
+  ip_address 10.0.3.1
+
+There can be multiple ~SEQ elements on a line, so
+  $VI4= \
+  vrrp_track_file offset_instance_4.${IF}.${NUM}.${ID} { \
+      file "${_PWD}/679/track_files/4.${IF}.${NUM}.${ID}" \
+      weight -100 \
+  } \
+  \
+  vrrp_instance vrrp4.${IF}.${NUM}.${ID} { \
+      interface bond${IF}.${NUM} \
+      use_vmac vrrp4.${IF}.${NUM}.${ID} \
+      virtual_router_id ${ID} \
+      priority 130 \
+      virtual_ipaddress { \
+          10.${IF}.${NUM}.${ID}/24 \
+      } \
+  \
+      track_file { \
+          offset_instance_4.${IF}.${NUM}.${ID} \
+      } \
+  }
+
+  ~SEQ(IF,0,7) ~SEQ(NUM,0,31) ~SEQ(ID,1,254) $VI4
+
+will produce 65024 vrrp instances with names from vrrp4.0.0.1 through to
+vrrp4.7.31.254.
+
+0.7 Quoted strings
+
+Quoted strings are specified between " characters; more specifically a string
+will only end after a quoted string if there is whitespace afterwards. For
+example,
+"abcd" efg h jkl "mnop"
+will be the single string "abcd efg h jkl mnop", i.e. the embedded " characters
+are removed.
+
+Quoted strings can also have escaped characters, like the shell. \a, \b, \E, \f,
+\n, \r, \t, \v, \nnn and \xXX (where nnn is up to 3 octal digits, and XX is any
+sequence of hex digits) and \cC (which produces the control version of
+character C) are all supported. \C for any other character C is just
+treated as an escaped version of character C, so \\ is a \ character, and
+\" will be a " character, but it won't start or terminate a quoted string.
+
+For specifying scripts with parameters, unquoted spaces will separate the
+parameters.  If it is required for a parameter to contain a space, it should
+be enclosed in single quotes (').
+
+0.8 Configuration file syntax parser
 
 Traditionally the configuration file parser has not been one of the strengths of
 keepalived. yukki maintains a project on github that is a keepalived syntax
@@ -294,6 +357,7 @@ global_defs {                                 # Block identification
     smtp_alert <BOOL>                         # Sets default state for all smtp_alerts
     smtp_alert_vrrp <BOOL>                    # Sets default state for vrrp smtp_alerts
     smtp_alert_checker <BOOL>                 # Sets default state for checker smtp_alerts
+    checker_log_all_failures <BOOL>           # log all checker failures when checker up
     no_email_faults                           # Don't send smtp alerts for fault conditions
     router_id <STRING>                        # String identifying router
     vrrp_garp_interval <DECIMAL>              # Sets the default interval between Gratuitous ARP
@@ -315,6 +379,7 @@ global_defs {                                 # Block identification
                                               #  ttl (1..255)
                                               #  group - multicast group address (IPv4 or IPv6)
                                               # NOTE: maxlen, port, ttl and group are only available on Linux 4.3 or later.
+    lvs_timeouts [tcp TO] [tcpfin TO] [udp [TO] # LVS session timeouts
     lvs_flush                                 # flush any existing LVS configuration at startup
     vrrp_garp_master_delay <INTEGER>          # delay in seconds for second set of gratuitous ARP
                                               #  messages after MASTER state transition, default 5.
@@ -351,6 +416,17 @@ global_defs {                                 # Block identification
                                               # If ipset6 is not specified, '6' as appended to the ipset4 name.
                                               #   If ipset_if6 is not specified, any trailing '6' from ipset6
                                               #   is removed and '_if6' appended
+    nftables [TABLENAME]                      # Use nftables to implement no_accept mode.
+                                              #   TABLENAME must not exist, and must be different for each
+                                              #   instance of keepalived running in the same network namespace.
+                                              #   Default tablename is keepalived.
+                                              #   keepalived will create base chains in the table.
+    nftables_priority                         # The priority of the base chains, default -1.
+    nftables_counters                         # Add counters to the rules (primarily for debugging purposes.
+    nftables_ifindex                          # Create IPv6 link local sets using ifindex rather than ifnames.
+                                              #   This is the default unless the vrrp_instance has set dont_track_primary.
+                                              #   The alternative is to use interface names as part of the set key
+                                              #   but nftables prior to v0.8.3 will then no longer work.
     vrrp_check_unicast_src                    # Check source address of a unicast packet is a
                                               # unicast peer
     vrrp_strict                               # Enforce strict VRRP protocol compliance. This will prohibit:
@@ -373,7 +449,7 @@ global_defs {                                 # Block identification
     vrrp_rt_priority <INTEGER:1..99>          # Set the vrrp child process to use real-time scheduling at the specified priority
     checker_rt_priority <INTEGER:1..99>       # Set the checker child process to use real-time scheduling at the specified priority
     bfd_rt_priority <INTEGER:1..99>           # Set the BFD child process to use real-time scheduling at the specified  priority
-    vrrp_rlimit_rtime <INTEGER>               # Set the limit on CPU time between blocking system calls, in microseconds (default 1000)
+    vrrp_rlimit_rtime <INTEGER>               # Set the limit on CPU time between blocking system calls, in microseconds (default 10000)
     checker_rlimit_rtime <INTEGER>            #   as above
     bfd_rlimit_rtime <INTEGER>                #   as above
                                               #
@@ -404,7 +480,7 @@ global_defs {                                 # Block identification
                                               # See vrrp_notify_fifo and lvs_notify_fifo for format of output
                                               # For further details, see the description under vrrp_sync_group see
                                               # doc/samples/sample_notify_fifo.sh for sample usage.
-    notify_fifo_script STRING [username [groupname]]
+    notify_fifo_script STRING|QUOTED_STRING [username [groupname]]
                                               # script to be run by keepalived to process notify events
                                               # The FIFO name will be passed to the script as the last parameter
     vrrp_notify_fifo FIFO_NAME                # FIFO to write vrrp notify events to (must be different from other FIFO names)
@@ -412,7 +488,7 @@ global_defs {                                 # Block identification
                                               # and will be terminated with a new line character.
                                               # For further details of the output, see the description under vrrp_sync_group
                                               # and doc/samples/sample_notify_fifo.sh for sample usage.
-    vrrp_notify_fifo_script STRING [username [groupname]]
+    vrrp_notify_fifo_script STRING|QUOTED_STRING [username [groupname]]
                                               # script to be run by keepalived to process vrrp notify events
                                               # The FIFO name will be passed to the script as the last parameter
     lvs_notify_fifo FIFO_NAME                 # FIFO to write notify healthchecker events to (must be different from other FIFO names)
@@ -420,11 +496,17 @@ global_defs {                                 # Block identification
                                               #   VS [192.168.201.15]:tcp:80 {UP|DOWN}
                                               #   RS [1.2.3.4]:tcp:80 [192.168.201.15]:tcp:80 {UP|DOWN}
                                               # and will be terminated with a new line character.
-    lvs_notify_fifo_script STRING [username [groupname]]
+    lvs_notify_fifo_script STRING|QUOTED_STRING [username [groupname]]
                                               # script to be run by keepalived to process healthchecher notify events
                                               # The FIFO name will be passed to the script as the last parameter
-    dynamic_interfaces                        # Allow configuration to include interfaces that don't exist at startup.
-                                              #   This allows keepalived to work with interfaces that may be deleted and restored.
+    dynamic_interfaces [allow_if_changes]     # Allow configuration to include interfaces that don't exist at startup.
+                                              #   This allows keepalived to work with interfaces that may be deleted
+                                              #   and restored and also allows virtual and static routes and rules on 
+                                              #   VMAC interfaces.
+                                              #   allow_if_changes allows an interface to be deleted and recreated with a
+                                              #   different type or underlying interface, eg changing from vlan to macvlan
+                                              #   or changing a macvlan from eth1 to eth2. This is predominantly used for
+                                              #   reporting duplicate VRID errors at startup if allow_if_changes is not set.
 
                                               # The following options are only needed for large configurations, where either
                                               # keepalived creates a large number of interface, or the system has a large
@@ -436,38 +518,35 @@ global_defs {                                 # Block identification
     vrrp_netlink_cmd_rcv_bufs_force <BOOL>    #  very large configurations where a large number of interfaces exist, and
     vrrp_netlink_monitor_rcv_bufs BYTES       #  the initial read of the interfaces on the system causes a netlink buffer
     vrrp_netlink_monitor_rcv_bufs_force <BOOL> # overrun.
-    lvs_netlink_cmd_rcv_bufs BYTES            #  The vrrp netlink command and monitor socket and the checker command
-    lvs_netlink_cmd_rcv_bufs_force <BOOL>     #  and monitor socket buffer sizes can be independently set. 
+    lvs_netlink_cmd_rcv_bufs BYTES            #  The vrrp netlink command and monitor socket, the checker command and
+    lvs_netlink_cmd_rcv_bufs_force <BOOL>     #  monitor socket and process monitor buffer sizes can be independently set.
     lvs_netlink_monitor_rcv_bufs BYTES        #  The force flag means to use SO_RCVBUFFORCE, so that the buffer size can
     lvs_netlink_monitor_rcv_bufs_force <BOOL> #  exceed /proc/sys/net/core/rmem_max.
+    process_monitor_rcv_bufs BYTES            # For 1400 processes terminating simultaneously, 212992 (the default on my
+    process_monitor_rcv_bufs_force <BOOL>     #  system) is insufficient, whereas 500000 is sufficient.
 
-                                              # When a socket is opened, the kernel confugures the max rx buffer size for
+                                              # When a socket is opened, the kernel configures the max rx buffer size for
                                               # the socket to /proc/sys/net/core/rmem_default. On some systems this can be
                                               # very large, and even generally this can be much larger than necessary.
                                               # This isn't a problem so long as keepalived is reading all queued data from
-                                              # it's sockets, but, for example, keepalived shouldin't need to read from the
-                                              # vrrp send sockets, since they are configured not to receive any multicasts.
-                                              # This feature, at least for kernels from 3.6.11 to 3.16 doesn't work, and
-                                              # multicast messages are queued. When keepalived wasn't reading from those
-                                              # sockets, the receive queue was growing, and if rmem_default was set
-                                              # sufficiently large, it could consume all system memory.
+                                              # it's sockets, but if rmem_default was set sufficiently large, and if for
+                                              # some reason keepalived stopped reading, it could consume all system memory.
                                               # The vrrp_rx_bufs_policy allows configuring of the rx bufs size when the
                                               # sockets are opened. If the policy is MTU, the rx buf size is configured
                                               # to the total of interface's MTU * vrrp_rx_bufs_multiplier for each vrrp
                                               # instance using the socket. Likewise, if the policy is ADVERT, then it is
                                               # the total of each vrrp instances advert packet size * multiplier.
                                               # If policy is set to a number, the rx buf size is configured to that number.
-                                              # NO_SEND_RX means that keepalived will not listen on the send sockets,
-                                              # which is safe to do from 4.x kernels (x not yet known but <= 16). If you
-                                              # can run keepalived using multicasting and a backup vrrp instance does not
-                                              # show a increasing receive queue for the keepalived process when viewed
-                                              # with `netstat -anp`, then this is safe to use.
-    vrrp_rx_bufs_policy [MTU|ADVERT|NUMBER] [NO_SEND_RX] # default is to use system default
+    vrrp_rx_bufs_policy [MTU|ADVERT|NUMBER]   # default is to use system default
     vrrp_rx_bufs_multiplier NUMBER            # default 3
 
     rs_init_notifies			      # Send notifies at startup for real servers that are starting up
     no_checker_emails                         # Don't send an email every time a real server checker changes state;
                                               #   only send email when a real server is added or removed
+    umask [NUMBER|BITS]                       # The umask to use for creating files. The number can be specified in hex, octal
+                                              #   or decimal. BITS are I{R|W|X}{USR|GRP|OTH}, e.g. IRGRP, separated by '|'s.
+                                              #   The default umask is IWGRP | IWOTH. This option cannot override the
+                                              #   command-line option.
 }
 
 net_namespace NAME                            # Set the network namespace to run in
@@ -494,9 +573,9 @@ child_wait_time SECS                          # Time for main process to allow f
 
     1.2. Static track groups
 
-    Static track groups are used to allow vrrp instances to track static addresses
-    routes and rules. If an static address/route/rule specifies a track group, then
-    if the address/route/rule is deleted, the vrrp instance will transition to vackup
+    Static track groups are used to allow vrrp instances to track static addresses,
+    routes and rules. If a static address/route/rule specifies a track group, then
+    if the address/route/rule is deleted, the vrrp instance will transition to backup,
     or to fault state if the address/route/rule cannot be re-added.
 
     The syntax for a track group is:
@@ -543,6 +622,8 @@ static_rules {                                # block identification
                                               #   due to vrrp instances transitioning from master to backup etc, rules need
                                               #   to have a preference. If a preference is not specified, keepalived will
                                               #   assign one, but it will probably not be what you want.
+                                              # If the rule could apply to either IPv4 or IPv6 it will default to IPv4.
+                                              #   To force a rule to be IPv6, add the keyword "inet6"
     from 192.168.28.0/24 to 192.168.29.0/26 table small iif p33p1 oif wlan0 tos 22 fwmark 24/12 preference 39 realms 30/20 track_group GROUP1
     to 1:2:3:4:5:6:7:0/112 from 7:6:5:4:3:2::/96 table 6908 uidrange 10000-19999 no_track
     to 1:2:3:4:6:6:7:0/112 from 8:6:5:4:3:2::/96 l3mdev protocol 12 ip_proto UDP sport 10-20 dport 20-30
@@ -556,6 +637,8 @@ static_routes {                               # block identification
                                               # The syntax is the same as ip route add, without "ip route add"
                                               #   (except shorted option names aren't supported due to ambiguities)
                                               # For a description of track_group and no_track, see static_addresses
+                                              # If the route could apply to either IPv4 or IPv6 it will default to IPv4.
+                                              #   To force a route to be IPv6, add the keyword "inet6"
     192.168.100.0/24 table 6909 nexthop via 192.168.101.1 dev wlan0 onlink weight 1 nexthop via 192.168.101.2 dev wlan0 onlink weight 2
     192.168.200.0/24 dev p33p1.2 table 6909 tos 0x04 protocol bird scope link priority 12 mtu 1000 hoplimit 100 advmss 101 rtt 102 rttvar 103 reordering 104 window 105 cwnd 106 ssthresh lock 107 realms PQA/0x14 rto_min 108 initcwnd 109 initrwnd 110 features ecn track_group GROUP1
     2001:470:69e9:1:2::4 dev p33p1.2 table 6909 tos 0x04 protocol bird scope link priority 12 mtu 1000 hoplimit 100 advmss 101 rtt 102 rttvar 103 reordering 104 window 105 cwnd 106 ssthresh lock 107 rto_min 108 initcwnd 109 initrwnd 110 features ecn fastopen_no_cookie 1 no_track
@@ -567,6 +650,7 @@ This block is divided in 5 sub-blocks:
 
     * VRRP scripts
     * VRRP track files
+    * VRRP track processes
     * VRRP track BFDs
     * VRRP synchronization group
     * VRRP gratuitous ARP/NA intervals
@@ -639,7 +723,77 @@ If a vrrp instance using a track_file is a member of a sync group, unless
 sync_group_tracking_weight is set on the group weight 0 must be set.
 Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
 
-    2.3. BFD Configuration
+    2.3. VRRP track processes
+
+    The configuration block looks like:
+
+vrrp_track_process <STRING> {   # VRRP track file declaration
+    process <QUOTED_STRING>     # process to monitor
+    weight <-254..254>          # default weight (default is 1)
+    quorum NUM                  # minimum number of processes for success
+    delay SECS                  # time to delay after process quorum lost before
+                                #   consider process failed (in fractions of second)
+    full_command                # Normally process string is matched against the process name,
+                                #   as shown on the Name: line in /proc/PID/status.
+                                #   This option matches the full command line
+}
+
+To avoid having to frequently run a track_script to monitor the existance
+of processes (often haproxy or nginx), vrrp_track_process can monitor whether
+other processes are running.
+
+One difference from pgrep is track_process doesn't do a regular expression match of the
+command string, but does an exact match. 'pgrep ssh' will match an sshd process, this
+track_process will not (it is equivalent to pgrep "^ssh$").
+
+If full_command is used (equivalent to pgrep -f), /proc/PID/cmdline is used, but
+any updates to cmdline will not be detected (a process shouldn't normally change it,
+although it is possible with great care, for example systemd).
+
+Quorum is the number of matching processes that must be run for an OK status.
+
+Delay might be useful if it anticipated that a process may be reloaded (stopped and
+restarted), and it isn't desired to down and up a vrrp instance.
+
+A positive weight means that an OK status will add <weight> to the priority of all
+VRRP instances which monitor it. On the opposite, a negative weight will be subtracted
+from the initial priority in case of insufficient processes.
+
+If the vrrp instance or sync group is not the address owner and the result is between
+-253 and 253, the result will be added to the initial priority of the VRRP instance
+(a negative value will reduce the priority), although the effective priority will
+be limited to the range [1,254].
+
+If a vrrp instance using a track_process is a member of a sync group, unless
+sync_group_tracking_weight is set on the group weight 0 must be set.
+Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
+
+Rational for not using pgrep/pidof/killall and the likes:
+
+Every time pgrep or its equivalent is run, it iterates though the /proc/[1-9][0-9]*
+directories, and opens the status and cmdline pseudo files in each directory.
+The cmdline pseudo file is mapped to the process's address space, and so if that
+part of the process is swapped out, it will have to be fetched from the swap space.
+pgrep etc also include zombie processes whereas keepalived does not, since they aren't
+running.
+
+This implementation only iterates though /proc/[1-9][0-9]*/ directories at start up, and
+it won't even read the cmdline pseudo files if 'full_command' is not specified for any of
+the vrrp_track_process entries. After startup, it uses the process_events
+kernel <-> userspace connector to receive notification of process changes. If full_command
+is specified for any track_process instance, the cmdline pseudo file will have to be
+read upon notification of the creation of the new process, but at that time it is very
+unlikely that it will have already been swapped out.
+
+On a busy system with a high number of process creations/terminations, using a
+track_script with pgrep/pidof/killall may be more efficient, although those processes
+are inefficient compared to the minimum that keepalived needs.
+
+Using pgrep etc on a system that is swapping can have a significant detrimental impact
+on the performance of the system, due to having to fetch swapped memory from the swap
+space, thereby causing additional swapping.
+
+    2.4. BFD Configuration
 
     This is an implementation of RFC5880 (Bidirectional forwarding detection),
     and this can be configured to work between 2 keepalived instances, but using
@@ -655,7 +809,7 @@ Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
 bfd_instance <STRING> {
     neighbor_ip <IP ADDRESS>           # BFD Neighbor IP (synonym neighbour_ip)
     source_ip <IP ADDRESS>             # Source IP to use (optional)
-    mix_rx <INTEGER>                   # Required min RX interval, in ms
+    min_rx <INTEGER>                   # Required min RX interval, in ms
                                        # (default is 10 ms)
     min_tx <INTEGER>                   # Desired min TX interval, in ms
                                        # (default is 10 ms)
@@ -669,11 +823,11 @@ bfd_instance <STRING> {
     hoplimit <INTEGER 0..255>          # outgoing IPv6 hoplimit to use (default 64)
     max_hops <INTEGER 0..255>          # maximum reduction of ttl/hoplimit in received packet (default 0)
                                        #   (255 disables hop count checking)
-    weight                             # Default tracking weight
+    weight <INTEGER -253..253>         # Default tracking weight
     vrrp|checker                       # Only notify vrrp or checker process. Default is notify both.
 }
 
-    2.4. VRRP synchronization group
+    2.5. VRRP synchronization group
 
     The configuration block looks like :
 
@@ -703,6 +857,11 @@ vrrp_sync_group <STRING> {      # VRRP sync group declaration
     }
     track_file {                # Files state we monitor
       <STRING>			# weight defaults to value configured in the vrrp_track_file
+      <STRING> weight <INTEGER: -254..254>
+      ...
+    }
+    track_process {             # Processes we monitor
+      <STRING>			# weight defaults to value configured in the vrrp_track_process
       <STRING> weight <INTEGER: -254..254>
       ...
     }
@@ -737,15 +896,15 @@ vrrp_sync_group <STRING> {      # VRRP sync group declaration
     the sync group.
 
 (1) The "notify" script is called AFTER the corresponding notify_* script has
-    been called, and is given exactly 4 arguments (the whole string is interpreted
-    as a literal filename so don't add parameters!):
+    been called, and is given 4 additional arguments following the configured
+    arguments:
 
-    $1 = A string indicating whether it's a "GROUP" or an "INSTANCE"
-    $2 = The name of said group or instance
-    $3 = The state it's transitioning to ("MASTER", "BACKUP", "FAULT" or "STOP")
-    $4 = The priority value
+    $(n-3) = A string indicating whether it's a "GROUP" or an "INSTANCE"
+    $(n-2) = The name of said group or instance
+    $(n-1) = The state it's transitioning to ("MASTER", "BACKUP", "FAULT" or "STOP")
+    $(n)   = The priority value
 
-    $1 and $3 are ALWAYS sent in uppercase, and the possible strings sent are the
+    $(n-3) and $(n-1) are ALWAYS sent in uppercase, and the possible strings sent are the
     same ones listed above ("GROUP"/"INSTANCE", "MASTER"/"BACKUP"/"FAULT"/"STOP")
     (note: STOP is only applicable to instances)
 
@@ -758,7 +917,15 @@ Important: for a SYNC group to run reliably, it is vital that all instances in
            their tracking weights automatically set to zero, in order to avoid
            inconsistent priorities across instances.
 
-    2.5. VRRP gratuitous ARP/NA intervals
+(2) The notify fifo output is the same as the last 4 parameters for the "notify"
+    script, with the addition of "MASTER_RX_LOWER_PRI" instead of state for an
+    instance. This is used if a master needs to set some external state, such as
+    setting a secondary IP address when using Amazon AWS; if another keepalived
+    has transitioned to master due to a communications break, the lower priority
+    instance will have taken over the secondary IP address, and the proper master
+    needs to be able to restore it.
+
+    2.6. VRRP gratuitous ARP/NA intervals
 
     This section allows the setting of delays between sending gratuitous ARPs
     and unsolicited neighbour advertisements. This is intended for when an
@@ -787,7 +954,7 @@ garp_group {
     interfaces that aren't specified in a garp_group will inherit the global
     settings.
 
-    2.6. VRRP instance
+    2.7. VRRP instance
 
     The configuration block looks like :
 
@@ -832,6 +999,11 @@ vrrp_instance <STRING> {                      # VRRP instance declaration
       <STRING> weight <INTEGER: -254..254>
       ...
     }
+    track_process {                           # Processes we monitor
+      <STRING>
+      <STRING> weight <INTEGER: -254..254>
+      ...
+    }
     track_bfd {                               # BFD instance we monitor
       <STRING>
       <STRING>
@@ -860,8 +1032,8 @@ vrrp_instance <STRING> {                      # VRRP instance declaration
     # See their descriptions for the meaning of the parameters.
     garp_master_delay <INTEGER>
     garp_master_repeat <INTEGER>
-    garp_lower_priority_delay <INTEGER>
-    garp_lower_priority_repeat <INTEGER>
+    garp_lower_prio_delay <INTEGER>
+    garp_lower_prio_repeat <INTEGER>
     garp_master_refresh <INTEGER>
     garp_master_refresh_repeat <INTEGER>
 
@@ -878,7 +1050,7 @@ vrrp_instance <STRING> {                      # VRRP instance declaration
                                               # advert, send an advert (which will be lower priority
                                               # than the other master), before we transition to
                                               # backup. This means that if the other master has
-                                              # garp_lower_priority_repeat set, it will resend garp
+                                              # garp_lower_prio_repeat set, it will resend garp
                                               # messages. This is to get around the problem of their
                                               # having been two simultaneous masters, and the last GARP
                                               # messages seen were from us.
@@ -936,6 +1108,8 @@ vrrp_instance <STRING> {                      # VRRP instance declaration
                                               # Script to launch when stopping vrrp
     notify <STRING>|<QUOTED-STRING> [username [groupname]]
                                               # Same as vrrp_sync_group
+    notify_master_rx_lower_pri <STRING>|<QUOTED-STRING> [username [groupname]]
+                                              # Script to run if a master receives a lower priority advert
     smtp_alert <BOOL>                         # Same as vrrp_sync_group
                                               #   (default no, unless global smtp_alert/smtp_alert_vrrp set)
     kernel_rx_buf_size                        # Set socket receive buffer size (see global_defs
@@ -985,11 +1159,11 @@ This block is divided in 2 sub-block :
     The configuration block looks like :
 
 virtual_server_group <STRING> {
-    <IP ADDRESS> <PORT>         # VIP VPORT
-    <IP ADDRESS> <PORT>
+    <IP ADDRESS> [<PORT>]       # VIP [VPORT]
+    <IP ADDRESS> [<PORT>]
     ...
-    <IP ADDRESS RANGE> <PORT>   # VIP range VPORT
-    <IP ADDRESS RANGE> <PORT>
+    <IP ADDRESS RANGE> [<PORT>] # VIP range [VPORT]
+    <IP ADDRESS RANGE> [<PORT>]
     ...
     fwmark <INTEGER>            # fwmark
     fwmark <INTEGER>
@@ -1020,12 +1194,15 @@ Note:   <IP ADDRESS RANGE> has the form of : XXX.YYY.ZZZ.WWW-VVV, define
     address family of the real/sorry servers if they are all the same, otherwise
     it will default to IPv4 (use ip_family inet6 to override this).
 
-virtual_server <IP ADDRESS> <PORT> {          # VS IP/PORT declaration
-virtual_server fwmark <INTEGER>    {          # VS fwmark declaration
-virtual_server group <STRING>      {          # VS group declaration
+    Note 3: The port for the virtual server can only be omitted if the virtual service
+    is persistent.
+
+virtual_server <IP ADDRESS> [<PORT>] {        # VS IP/PORT declaration
+virtual_server fwmark <INTEGER>      {        # VS fwmark declaration
+virtual_server group <STRING>        {        # VS group declaration
     ip_family inet|inet6                      # Address family
     delay_loop <INTEGER>                      # delay timer for service polling
-    lvs_sched rr|wrr|lc|wlc|lblc|sh|dh|fo|ovf|lblcr|sed|nq
+    lvs_sched rr|wrr|lc|wlc|lblc|sh|mh|dh|fo|ovf|lblcr|sed|nq
                                               # LVS scheduler used
     hashed                                    # Apply hashing
     flag-1                                    # Apply scheduler flag 1
@@ -1035,6 +1212,10 @@ virtual_server group <STRING>      {          # VS group declaration
                                               #  same as flag-2 for sh scheduler)
     sh-fallback                               # Apply sh-fallback scheduler flag (only for sh scheduler,
                                               #  same as flag-1 for sh scheduler)
+    mh-port                                   # Apply mh-port scheduler flag (only for mh scheduler,
+                                              #  same as flag-2 for mh scheduler)
+    mh-fallback                               # Apply mh-fallback scheduler flag (only for mh scheduler,
+                                              #  same as flag-1 for mh scheduler)
     ops                                       # Apply One-Packet-Scheduling (only for UDP)
     lvs_method NAT|DR|TUN                     # default LVS method to use
     persistence_engine <STRING>               # LVS persistence engine name
@@ -1134,6 +1315,7 @@ virtual_server group <STRING>      {          # VS group declaration
             delay_before_retry <INTEGER>      # delay before retry (default 1 unless otherwise specified)
             warmup <INTEGER>                  # random delay for maximum N seconds
             delay_loop <INTEGER>              # delay timer for service polling
+            log_all_failures <BOOL>           # log all failures when checker up
         }
 
         # The following options are additional checker specific
@@ -1154,6 +1336,30 @@ virtual_server group <STRING>      {          # VS group declaration
               digest <STRING>
               status_code <INTEGER>
               virtualhost <STRING>
+              regex <STRING>                  # Regular expression to search returned
+                                              #  data against. A failure to match causes
+                                              #  the check to fail.
+              regex_no_match                  # Reverse the sense of the match, so a
+                                              #  match of the returned text causes the
+                                              #  check to fail.
+              regex_options <OPTIONS>         # Space separated list of options for regex.
+                                              #  See man pcre2api for a description of the options.
+                                              #  The following option are supported:
+                                              #   allow_empty_class alt_bsux auto_callout caseless
+                                              #   dollar_endonly dotall dupnames extended firstline
+                                              #   match_unset_backref multiline never_ucp never_utf
+                                              #   no_auto_capture no_auto_possess no_dotstar_anchor
+                                              #   no_start_optimize ucp ungreedy utf never_backslash_c
+                                              #   alt_circumflex alt_verbnames use_offset_limit
+              regex_stack <START> <MAX>       # For complicated regular expressions a larger stack
+                                              #   may be needed, and this allows the start and maximum
+                                              #   sizes in bytes to be specified. For more details see
+                                              #   the documentation for pcre2_jit_stack_create()
+              regex_min_offset <OFFSET>       # The minimum offset into the returned data to start
+                                              #   checking for the regex pattern match. This can save
+                                              #   processing time if the returned data is large.
+              regex_max_offset <OFFSET>       # The maximum offset into the returned data for the
+                                              #   start of the subject match.
             }
             ...
 

@@ -18,17 +18,6 @@
 
 #include <stdbool.h>
 
-#if defined _WITH_VRRP_ && defined _HAVE_LIBNL3_ && defined _HAVE_IPV4_DEVCONF_
-#ifdef _HAVE_IF_H_LINK_H_COLLISION_
-#ifdef _HAVE_NET_LINUX_IF_H_COLLISION_
-#define _LINUX_IF_H
-#else
-#include <net/if.h>
-#endif
-#endif
-#include <netlink/route/link.h>
-#include <netlink/route/link/inet.h>
-#endif
 #include <netlink/socket.h>
 #include <netlink/netlink.h>
 #ifdef LIBIPVS_USE_NL
@@ -66,24 +55,6 @@ extern int (*nla_memcpy_addr)(void *, const struct nlattr *, int);
 extern int (*nla_parse_nested_addr)(struct nlattr **, int, struct nlattr *, struct nla_policy *);
 #endif
 #endif
-#ifdef _HAVE_LIBNL3_
-#if defined _WITH_VRRP_ && defined _HAVE_IPV4_DEVCONF_
-extern struct rtnl_link *(*rtnl_link_alloc_addr)(void);
-extern int (*rtnl_link_alloc_cache_addr)(struct nl_sock *, int, struct nl_cache **);
-extern int (*rtnl_link_change_addr)(struct nl_sock *, struct rtnl_link *, struct rtnl_link *, int);
-extern struct rtnl_link *(*rtnl_link_get_addr_l)(struct nl_cache *, int);
-extern int (*rtnl_link_inet_get_conf_addr)(struct rtnl_link *, const unsigned int, uint32_t *);
-extern int (*rtnl_link_inet_set_conf_addr)(struct rtnl_link *, const unsigned int, uint32_t);
-extern void (*rtnl_link_put_addr)(struct rtnl_link *);
-#endif
-extern int (*nl_connect_addr)(struct nl_sock *, int);
-extern int (*nl_socket_add_membership_addr)(struct nl_sock *, int);
-extern int (*nl_socket_drop_membership_addr)(struct nl_sock *, int);
-extern int (*nl_socket_get_fd_addr)(const struct nl_sock *);
-extern uint32_t (*nl_socket_get_local_port_addr)(const struct nl_sock *);
-extern int (*nl_socket_set_buffer_size_addr)(struct nl_sock *, int, int);
-extern int (*nl_socket_set_nonblocking_addr)(const struct nl_sock *);
-#endif
 
 /* We can make it look as though normal linking is being used */
 #define nl_socket_alloc (*nl_socket_alloc_addr)
@@ -115,26 +86,6 @@ extern int (*nl_socket_set_nonblocking_addr)(const struct nl_sock *);
 #define nla_parse_nested (*nla_parse_nested_addr)
 #endif
 #endif
-#ifdef _HAVE_LIBNL3_
-#if defined _WITH_VRRP_ && defined _HAVE_IPV4_DEVCONF_
-#define rtnl_link_alloc (*rtnl_link_alloc_addr)
-#define rtnl_link_alloc_cache (*rtnl_link_alloc_cache_addr)
-#define rtnl_link_change (*rtnl_link_change_addr)
-#define rtnl_link_get (*rtnl_link_get_addr_l)
-#define rtnl_link_inet_get_conf (*rtnl_link_inet_get_conf_addr)
-#define rtnl_link_inet_set_conf (*rtnl_link_inet_set_conf_addr)
-#define rtnl_link_put (*rtnl_link_put_addr)
-#endif
-#define nl_connect (*nl_connect_addr)
-#define nl_socket_add_membership (*nl_socket_add_membership_addr)
-#define nl_socket_drop_membership (*nl_socket_drop_membership_addr)
-#define nl_socket_get_fd (*nl_socket_get_fd_addr)
-#define nl_socket_get_local_port (*nl_socket_get_local_port_addr)
-#define nl_socket_set_buffer_size (*nl_socket_set_buffer_size_addr)
-#define nl_socket_set_nonblocking (*nl_socket_set_nonblocking_addr)
-#endif
-
-extern bool use_nl;
 
 extern bool libnl_init(void);
 

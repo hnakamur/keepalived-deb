@@ -39,14 +39,15 @@
  */
 typedef struct _sock {
 	sa_family_t		family;
-	struct sockaddr_storage	saddr;
 	int			proto;
-	ifindex_t		ifindex;
+	interface_t		*ifp;
 	bool			unicast;
 	int			fd_in;
 	int			fd_out;
 	int			rx_buf_size;
 	thread_t		*thread;
+	rb_root_t		rb_vrid;
+	rb_root_cached_t	rb_sands;
 } sock_t;
 
 #endif

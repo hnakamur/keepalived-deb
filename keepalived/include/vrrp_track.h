@@ -37,6 +37,9 @@
 #ifdef _WITH_BFD_
 #include "bfd.h"
 #endif
+#ifdef _WITH_CN_PROC_
+#include "rbtree.h"
+#endif
 
 /* VRRP script tracking defaults */
 #define VRRP_SCRIPT_DI 1	/* external script track interval (in sec) */
@@ -96,6 +99,35 @@ typedef struct _tracked_file {
 	int			weight;		/* Multiplier for file value */
 } tracked_file_t;
 
+#ifdef _WITH_CN_PROC_
+/* process we track */
+typedef struct _vrrp_process {
+	char			*pname;		/* Process name */
+	char			*process_path;	/* Path to process */
+	int			weight;		/* Default weight */
+	unsigned		quorum;		/* Minimum number of process instances required */
+	int			delay;		/* Lauhcn timer thread which can be cancelled */
+	bool			full_command;	/* Set if match against full command line */
+	thread_t		*timer_thread;	/* For handling delay */
+	list			tracking_vrrp;	/* List of tracking_vrrp_t for vrrp instances tracking this process */
+	unsigned		num_cur_proc;
+	unsigned		sav_num_cur_proc; /* Used if have ENOBUFS on netlink socket read */
+} vrrp_tracked_process_t;
+
+/* Tracked process structure definition */
+typedef struct _tracked_process {
+	vrrp_tracked_process_t	*process;	/* track process pointer, cannot be NULL */
+	int			weight;		/* Multiplier for process value */
+} tracked_process_t;
+
+/* A monitored process instance */
+typedef struct _tracked_process_instance {
+	pid_t			pid;
+	rb_node_t		pid_tree;
+	list			processes;	/* list of vrrp_tracked_process_t* */
+} tracked_process_instance_t;
+#endif
+
 #ifdef _WITH_BFD_
 /* external bfd we read to track forwarding to remote systems */
 typedef struct _vrrp_bfd {
@@ -120,12 +152,13 @@ typedef enum {
 	TRACK_VRRP = 0x01,
 	TRACK_IF = 0x02,
 	TRACK_SG = 0x04,
-	TRACK_ADDR = 0x04,
-	TRACK_ROUTE = 0x08,
-	TRACK_RULE = 0x10,
-	TRACK_SADDR = 0x20,
-	TRACK_SROUTE = 0x40,
-	TRACK_SRULE = 0x80,
+	TRACK_ADDR = 0x08,
+	TRACK_ROUTE = 0x10,
+	TRACK_RULE = 0x20,
+	TRACK_SADDR = 0x40,
+	TRACK_SROUTE = 0x80,
+	TRACK_SRULE = 0x100,
+	TRACK_VRRP_DYNAMIC = 0x200,
 } track_t;
 
 /* List structure from scripts, files and interfaces to tracking vrrp */
@@ -148,6 +181,12 @@ extern void dump_track_file(FILE *, void *);
 extern void free_track_file(void *);
 extern void alloc_track_file(struct _vrrp_t *, vector_t *);
 extern void alloc_group_track_file(struct _vrrp_sgroup *, vector_t *);
+#ifdef _WITH_CN_PROC_
+extern void dump_track_process(FILE *, void *);
+extern void free_track_process(void *);
+extern void alloc_track_process(struct _vrrp_t *, vector_t *);
+extern void alloc_group_track_process(struct _vrrp_sgroup *, vector_t *);
+#endif
 #ifdef _WITH_BFD_
 extern vrrp_tracked_bfd_t *find_vrrp_tracked_bfd_by_name(const char *);
 extern void dump_vrrp_tracked_bfd(FILE *, void *);
@@ -159,9 +198,14 @@ extern vrrp_script_t *find_script_by_name(char *);
 extern void update_script_priorities(vrrp_script_t *, bool);
 extern void down_instance(struct _vrrp_t *);
 extern void vrrp_set_effective_priority(struct _vrrp_t *);
-extern void initialise_interface_tracking_priorities(void);
-extern void initialise_tracking_priorities(struct _vrrp_t *);
+extern void initialise_tracking_priorities(void);
 extern void init_track_files(list);
 extern void stop_track_files(void);
+#ifdef _WITH_CN_PROC_
+extern void process_update_track_process_status(vrrp_tracked_process_t *, bool);
+#endif
+#ifdef THREAD_DUMP
+extern void register_vrrp_inotify_addresses(void);
+#endif
 
 #endif

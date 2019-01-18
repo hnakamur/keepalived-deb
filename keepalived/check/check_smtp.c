@@ -38,6 +38,9 @@
 #endif
 #include "layer4.h"
 #include "smtp.h"
+#ifdef THREAD_DUMP
+#include "scheduler.h"
+#endif
 
 static conn_opts_t* default_co;	/* Default conn_opts for SMTP_CHECK */
 static conn_opts_t *sav_co;	/* Saved conn_opts while host{} block processed */
@@ -284,14 +287,17 @@ smtp_final(thread_t *thread, int error, const char *format, ...)
 	bool rs_was_alive;
 
 	/* Error or no error we should always have to close the socket */
-	close(thread->u.fd);
+	thread_close_fd(thread);
 
 	/* If we're here, an attempt HAS been made already for the current host */
 	checker->retry_it++;
 
 	if (error) {
 		/* Always syslog the error when the real server is up */
-		if (checker->is_up) {
+		if (checker->is_up &&
+		    (global_data->checker_log_all_failures ||
+		     checker->log_all_failures ||
+		     checker->retry_it > checker->retry)) {
 			if (format != NULL) {
 				/* prepend format with the "SMTP_CHECK " string */
 				strncpy(error_buff, "SMTP_CHECK ", sizeof(error_buff) - 1);
@@ -300,9 +306,8 @@ smtp_final(thread_t *thread, int error, const char *format, ...)
 				va_start(varg_list, format);
 				vlog_message(LOG_INFO, error_buff, varg_list);
 				va_end(varg_list);
-			} else {
+			} else
 				log_message(LOG_INFO, "SMTP_CHECK Unknown error");
-			}
 		}
 
 		/*
@@ -310,7 +315,7 @@ smtp_final(thread_t *thread, int error, const char *format, ...)
 		 * scheduling the main thread to check it again after the
 		 * configured backoff delay. Otherwise down the RS.
 		 */
-		if (checker->retry_it < checker->retry) {
+		if (checker->retry_it <= checker->retry) {
 			thread_add_timer(thread->master, smtp_connect_thread, checker,
 					 checker->delay_before_retry);
 			return 0;
@@ -477,6 +482,7 @@ smtp_get_line(thread_t *thread, int (*callback) (thread_t *))
 	/* schedule the I/O with our helper function  */
 	thread_add_read(thread->master, smtp_get_line_cb, checker,
 		thread->u.fd, smtp_host->connection_to);
+	thread_del_write(thread);
 	return;
 }
 
@@ -550,6 +556,7 @@ smtp_put_line(thread_t *thread, int (*callback) (thread_t *))
 	/* schedule the I/O with our helper function  */
 	thread_add_write(thread->master, smtp_put_line_cb, checker,
 			 thread->u.fd, smtp_host->connection_to);
+	thread_del_read(thread);
 	return;
 }
 
@@ -564,16 +571,15 @@ smtp_get_status(thread_t *thread)
 	checker_t *checker = THREAD_ARG(thread);
 	smtp_checker_t *smtp_checker = CHECKER_ARG(checker);
 	char *buff = smtp_checker->buff;
+	int status;
+	char *endptr;
 
-	/* First make sure they're all digits */
-	if (isdigit(buff[0]) && isdigit(buff[1]) &&
-	    isdigit(buff[2])) {
-		/* Truncate the string and convert */
-		buff[3] = '\0';
-		return atoi(buff);
-	}
+	status = strtoul(buff, &endptr, 10);
+	if (endptr - buff != 3 ||
+	    (*endptr && *endptr != ' '))
+		return -1;
 
-	return -1;
+	return status;
 }
 
 /*
@@ -610,26 +616,22 @@ smtp_engine_thread(thread_t *thread)
 			if (smtp_get_status(thread) != 220) {
 				smtp_final(thread, 1, "Bad greeting banner from server %s"
 						     , FMT_SMTP_RS(smtp_host));
-
-				return 0;
+			} else {
+				/*
+				 * Schedule to send the HELO, smtp_put_line will
+				 * defer directly to smtp_final on error.
+				 */
+				smtp_checker->state = SMTP_SENT_HELO;
+				snprintf(smtp_checker->buff, SMTP_BUFF_MAX, "HELO %s\r\n",
+					 smtp_checker->helo_name);
+				smtp_put_line(thread, smtp_engine_thread);
 			}
-
-			/*
-			 * Schedule to send the HELO, smtp_put_line will
-			 * defer directly to smtp_final on error.
-			 */
-			smtp_checker->state = SMTP_SENT_HELO;
-			snprintf(smtp_checker->buff, SMTP_BUFF_MAX, "HELO %s\r\n",
-				 smtp_checker->helo_name);
-			smtp_put_line(thread, smtp_engine_thread);
-			return 0;
 			break;
 
 		/* Third step, schedule to read the HELO response */
 		case SMTP_SENT_HELO:
 			smtp_checker->state = SMTP_RECV_HELO;
 			smtp_get_line(thread, smtp_engine_thread);
-			return 0;
 			break;
 
 		/* Fourth step, analyze HELO return, send QUIT */
@@ -638,32 +640,30 @@ smtp_engine_thread(thread_t *thread)
 			if (smtp_get_status(thread) != 250) {
 				smtp_final(thread, 1, "Bad HELO response from server %s"
 						     , FMT_SMTP_RS(smtp_host));
-
-				return 0;
+			} else {
+				smtp_checker->state = SMTP_SENT_QUIT;
+				snprintf(smtp_checker->buff, SMTP_BUFF_MAX, "QUIT\r\n");
+				smtp_put_line(thread, smtp_engine_thread);
 			}
-
-			smtp_checker->state = SMTP_SENT_QUIT;
-			snprintf(smtp_checker->buff, SMTP_BUFF_MAX, "QUIT\r\n");
-			smtp_put_line(thread, smtp_engine_thread);
-			return 0;
 			break;
 
 		/* Fifth step, schedule to receive QUIT confirmation */
 		case SMTP_SENT_QUIT:
 			smtp_checker->state = SMTP_RECV_QUIT;
 			smtp_get_line(thread, smtp_engine_thread);
-			return 0;
 			break;
 
 		/* Sixth step, wrap up success to smtp_final */
 		case SMTP_RECV_QUIT:
 			smtp_final(thread, 0, NULL);
-			return 0;
+			break;
+
+		default:
+			/* We shouldn't be here */
+			smtp_final(thread, 1, "Unknown smtp engine state encountered");
 			break;
 	}
 
-	/* We shouldn't be here */
-	smtp_final(thread, 1, "Unknown smtp engine state encountered");
 	return 0;
 }
 
@@ -684,13 +684,11 @@ smtp_check_thread(thread_t *thread)
 		case connect_error:
 			smtp_final(thread, 1, "Error connecting to server %s"
 					     , FMT_SMTP_RS(smtp_host));
-			return 0;
 			break;
 
 		case connect_timeout:
 			smtp_final(thread, 1, "Connection timeout to server %s"
 					     , FMT_SMTP_RS(smtp_host));
-			return 0;
 			break;
 
 		case connect_success:
@@ -700,13 +698,15 @@ smtp_check_thread(thread_t *thread)
 			/* Enter the engine at SMTP_START */
 			smtp_checker->state = SMTP_START;
 			smtp_engine_thread(thread);
-			return 0;
+			break;
+
+		default:
+			/* we shouldn't be here */
+			smtp_final(thread, 1, "Unknown connection error to server %s"
+					     , FMT_SMTP_RS(smtp_host));
 			break;
 	}
 
-	/* we shouldn't be here */
-	smtp_final(thread, 1, "Unknown connection error to server %s"
-			     , FMT_SMTP_RS(smtp_host));
 	return 0;
 }
 
@@ -829,14 +829,14 @@ smtp_connect_thread(thread_t *thread)
 	return 0;
 }
 
-#ifdef _TIMER_DEBUG_
+
+#ifdef THREAD_DUMP
 void
-print_check_smtp_addresses(void)
+register_check_smtp_addresses(void)
 {
-	log_message(LOG_INFO, "Address of dump_smtp_check() is 0x%p", dump_smtp_check);
-	log_message(LOG_INFO, "Address of smtp_check_thread() is 0x%p", smtp_check_thread);
-	log_message(LOG_INFO, "Address of smtp_connect_thread() is 0x%p", smtp_connect_thread);
-	log_message(LOG_INFO, "Address of smtp_get_line_cb() is 0x%p", smtp_get_line_cb);
-	log_message(LOG_INFO, "Address of smtp_put_line_cb() is 0x%p", smtp_put_line_cb);
+	register_thread_address("smtp_check_thread", smtp_check_thread);
+	register_thread_address("smtp_connect_thread", smtp_connect_thread);
+	register_thread_address("smtp_get_line_cb", smtp_get_line_cb);
+	register_thread_address("smtp_put_line_cb", smtp_put_line_cb);
 }
 #endif

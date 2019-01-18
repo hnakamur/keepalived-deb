@@ -25,6 +25,7 @@
 
 /* globales includes */
 #include <sys/types.h>
+#include <stdbool.h>
 
 /* local includes */
 #include "global_data.h"
@@ -120,7 +121,14 @@ typedef void vrrp_t;
 typedef void vrrp_sgroup_t;
 #endif
 
+#ifdef _SMTP_ALERT_DEBUG_
+extern bool do_smtp_alert_debug;
+#endif
+
 /* Prototypes defs */
 extern void smtp_alert(smtp_msg_t, void *data, const char *, const char *);
+#ifdef THREAD_DUMP
+extern void register_smtp_addresses(void);
+#endif
 
 #endif

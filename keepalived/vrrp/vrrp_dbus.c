@@ -70,6 +70,9 @@
 #include "main.h"
 #include "logger.h"
 #include "utils.h"
+#ifdef THREAD_DUMP
+#include "scheduler.h"
+#endif
 
 typedef enum dbus_action {
 	DBUS_ACTION_NONE,
@@ -283,6 +286,7 @@ get_interface_ids(const gchar *object_path, gchar *interface, uint8_t *vrid, uin
 {
 	int path_length = DBUS_VRRP_INSTANCE_PATH_DEFAULT_LENGTH;
 	gchar **dirs;
+	char *endptr;
 
 #if HAVE_DECL_CLONE_NEWNET
 	if(global_data->network_namespace)
@@ -295,7 +299,9 @@ get_interface_ids(const gchar *object_path, gchar *interface, uint8_t *vrid, uin
 	 * the third to last, second to last and last levels */
 	dirs = g_strsplit(object_path, "/", path_length);
 	strcpy(interface, dirs[path_length-3]);
-	*vrid = (uint8_t)atoi(dirs[path_length-2]);
+	*vrid = (uint8_t)strtoul(dirs[path_length-2], &endptr, 10);
+	if (*endptr)
+		log_message(LOG_INFO, "Dbus unexpected characters '%s' at end of number '%s'", endptr, dirs[path_length-2]);
 	*family = !g_strcmp0(dirs[path_length-1], "IPv4") ? AF_INET : !g_strcmp0(dirs[path_length-1], "IPv6") ? AF_INET6 : AF_UNSPEC;
 
 	/* We are finished with all the object_path strings now */
@@ -588,7 +594,7 @@ read_file(gchar* filepath)
 	size_t length;
 	gchar *ret = NULL;
 
-	f = fopen(filepath, "rb");
+	f = fopen(filepath, "r");
 	if (f) {
 		fseek(f, 0, SEEK_END);
 		length = (size_t)ftell(f);
@@ -943,10 +949,10 @@ dbus_stop(void)
 	}
 }
 
-#ifdef _TIMER_DEBUG_
+#ifdef THREAD_DUMP
 void
-print_vrrp_dbus_addresses(void)
+register_vrrp_dbus_addresses(void)
 {
-	log_message(LOG_INFO, "Address of handle_dbus_msg() is 0x%p", handle_dbus_msg);
+	register_thread_address("handle_dbus_msg", handle_dbus_msg);
 }
 #endif

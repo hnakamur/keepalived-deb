@@ -32,6 +32,9 @@
 #include "check_api.h"
 #include "check_http.h"
 #include "logger.h"
+#ifdef THREAD_DUMP
+#include "scheduler.h"
+#endif
 
 /* SSL primitives */
 /* Free an SSL context */
@@ -78,9 +81,16 @@ build_ssl_ctx(void)
 	else
 		ssl = check_data->ssl;
 
-	/* Initialize SSL context for SSL v2/3 */
+	/* Initialize SSL context */
+#if HAVE_TLS_METHOD
+	ssl->meth = TLS_method();
+#else
 	ssl->meth = SSLv23_method();
-	ssl->ctx = SSL_CTX_new(ssl->meth);
+#endif
+	if (!(ssl->ctx = SSL_CTX_new(ssl->meth))) {
+		log_message(LOG_INFO, "SSL error: cannot create new SSL context");
+		return false;
+	}
 
 	/* return for autogen context */
 	if (!check_data->ssl) {
@@ -197,8 +207,17 @@ ssl_connect(thread_t * thread, int new_req)
 	/* First round, create SSL context */
 	if (new_req) {
 		int bio_fd;
-		req->ssl = SSL_new(check_data->ssl->ctx);
-		req->bio = BIO_new_socket(thread->u.fd, BIO_NOCLOSE);
+
+		if (!(req->ssl = SSL_new(check_data->ssl->ctx))) {
+			log_message(LOG_INFO, "Unable to establish ssl connection - SSL_new() failed");
+			return 0;
+		}
+
+		if (!(req->bio = BIO_new_socket(thread->u.fd, BIO_NOCLOSE))) {
+			log_message(LOG_INFO, "Unable to establish ssl connection - BIO_new_socket() failed");
+			return 0;
+		}
+
 		BIO_get_fd(req->bio, &bio_fd);
 		fcntl(bio_fd, F_SETFD, fcntl(bio_fd, F_GETFD) | FD_CLOEXEC);
 #if HAVE_SSL_SET0_RBIO
@@ -256,7 +275,7 @@ ssl_read_thread(thread_t * thread)
 	request_t *req = http_get_check->req;
 	url_t *url = list_element(http_get_check->url, http_get_check->url_it);
 	unsigned timeout = checker->co->connection_to;
-	unsigned char digest[16];
+	unsigned char digest[MD5_DIGEST_LENGTH];
 	int r = 0;
 
 	/* Handle read timeout */
@@ -274,7 +293,7 @@ ssl_read_thread(thread_t * thread)
 				thread->u.fd, timeout);
 	} else if (r > 0 && req->error == 0) {
 		/* Handle response stream */
-		http_process_response(req, (size_t)r, (url->digest != NULL));
+		http_process_response(req, (size_t)r, url);
 
 		/*
 		 * Register next ssl stream reader.
@@ -303,10 +322,10 @@ ssl_read_thread(thread_t * thread)
 	return 0;
 }
 
-#ifdef _TIMER_DEBUG_
+#ifdef THREAD_DUMP
 void
-print_check_ssl_addresses(void)
+register_check_ssl_addresses(void)
 {
-	log_message(LOG_INFO, "Address of ssl_read_thread() is 0x%p", ssl_read_thread);
+	register_thread_address("ssl_read_thread", ssl_read_thread);
 }
 #endif

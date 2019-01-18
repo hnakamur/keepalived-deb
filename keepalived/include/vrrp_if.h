@@ -37,6 +37,9 @@
 #define _LINUX_IF_H
 #endif
 #include <linux/netdevice.h>
+#ifdef _HAVE_VRRP_VMAC_
+#include <linux/if_link.h>
+#endif
 
 /* local includes */
 #include "scheduler.h"
@@ -87,21 +90,26 @@ typedef struct _interface {
 	size_t			hw_addr_len;		/* MAC addresss length */
 	int			lb_type;		/* Interface regs selection */
 #ifdef _HAVE_VRRP_VMAC_
-	bool			vmac;			/* Set if interface is a VMAC interface */
+	int			vmac_type;		/* Set if interface is a VMAC interface */
 	ifindex_t		base_ifindex;		/* Only used at startup if we find vmac i/f before base i/f */
 	struct _interface	*base_ifp;		/* Base interface (if interface is a VMAC interface),
 							   otherwise the physical interface */
+	bool			is_ours;		/* keepalived created the interface */
+	bool			seen_interface;		/* The interface has existed at some point since we started */
+	bool			changeable_type;	/* The interface type or underlying interface can be changed */
+#ifdef _HAVE_VRF_
+	ifindex_t		vrf_master_ifindex;	/* Only used at startup if we find i/f before master i/f */
+	struct _interface	*vrf_master_ifp;	/* VRF master interface - pointer to self if VRF master */
+#endif
+	int			reset_arp_config;	/* Count of how many vrrps have changed arp parameters on interface */
+	bool			arp_ignore;		/* Original value of arp_ignore to be restored */
+	bool			arp_filter;		/* Original value of arp_filter to be restored */
+	unsigned		rp_filter;		/* < UINT_MAX if we have changed the value */
 #endif
 	garp_delay_t		*garp_delay;		/* Delays for sending gratuitous ARP/NA */
 	bool			gna_router;		/* Router flag for NA messages */
-	int			reset_arp_config;	/* Count of how many vrrps have changed arp parameters on interface */
-	uint32_t		reset_arp_ignore_value;	/* Original value of arp_ignore to be restored */
-	uint32_t		reset_arp_filter_value;	/* Original value of arp_filter to be restored */
+	bool			promote_secondaries;	/* Original value of promote_secondaries to be restored */
 	uint32_t		reset_promote_secondaries; /* Count of how many vrrps have changed promote_secondaries on interface */
-#ifdef _HAVE_VRRP_VMAC_
-	unsigned		rp_filter;		/* < UINT_MAX if we have changed the value */
-#endif
-	bool			promote_secondaries_already_set; /* Set if promote_secondaries already set on interface */
 	list			tracking_vrrp;		/* List of tracking_vrrp_t for vrrp instances tracking this interface */
 } interface_t;
 
@@ -129,7 +137,7 @@ typedef struct _tracked_if {
 #define FLAGS_UP(X) (((X) & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING))
 #define IF_FLAGS_UP(X) (FLAGS_UP((X)->ifi_flags))
 #ifdef _HAVE_VRRP_VMAC_
-#define IF_ISUP(X) (IF_FLAGS_UP(X) && (!(X)->vmac || IF_FLAGS_UP((X)->base_ifp)))
+#define IF_ISUP(X) (IF_FLAGS_UP(X) && (!(X)->vmac_type || IF_FLAGS_UP((X)->base_ifp)))
 #else
 #define IF_ISUP(X) (IF_FLAGS_UP(X))
 #endif
@@ -146,7 +154,6 @@ list garp_delay;
 
 /* prototypes */
 extern interface_t *if_get_by_ifindex(ifindex_t);
-extern interface_t *base_if_get_by_ifp(interface_t *);
 extern interface_t *if_get_by_ifname(const char *, if_lookup_t);
 extern list get_if_list(void);
 extern void reset_interface_queue(void);
@@ -162,16 +169,23 @@ extern int if_leave_vrrp_group(sa_family_t, int, interface_t *);
 extern int if_setsockopt_bindtodevice(int *, interface_t *);
 extern int if_setsockopt_hdrincl(int *);
 extern int if_setsockopt_ipv6_checksum(int *);
+#if HAVE_DECL_IP_MULTICAST_ALL  /* Since Linux 2.6.31 */
 extern int if_setsockopt_mcast_all(sa_family_t, int *);
+#endif
 extern int if_setsockopt_mcast_loop(sa_family_t, int *);
 extern int if_setsockopt_mcast_hops(sa_family_t, int *);
 extern int if_setsockopt_mcast_if(sa_family_t, int *, interface_t *);
 extern int if_setsockopt_priority(int *, int);
 extern int if_setsockopt_rcvbuf(int *, int);
+extern int if_setsockopt_no_receive(int *);
 extern void interface_up(interface_t *);
 extern void interface_down(interface_t *);
 extern void cleanup_lost_interface(interface_t *);
 extern int recreate_vmac_thread(thread_t *);
+void update_mtu(interface_t *);
 extern void update_added_interface(interface_t *);
+#ifdef THREAD_DUMP
+extern void register_vrrp_if_addresses(void);
+#endif
 
 #endif

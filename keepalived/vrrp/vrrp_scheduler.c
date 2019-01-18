@@ -39,7 +39,6 @@
 #include "vrrp_sync.h"
 #include "vrrp_notify.h"
 #include "vrrp_data.h"
-#include "vrrp_index.h"
 #include "vrrp_arp.h"
 #include "vrrp_ndisc.h"
 #include "vrrp_if.h"
@@ -59,11 +58,18 @@
 #include "bfd_event.h"
 #include "bfd_daemon.h"
 #endif
+#ifdef THREAD_DUMP
+#include "scheduler.h"
+#endif
 
 /* global vars */
 timeval_t garp_next_time;
 thread_t *garp_thread;
 bool vrrp_initialised;
+
+#ifdef _TSM_DEBUG_
+bool do_tsm_debug;
+#endif
 
 /* local variables */
 #ifdef _WITH_BFD_
@@ -260,6 +266,9 @@ vrrp_init_state(list l)
 	}
 }
 
+/* Declare vrrp_timer_cmp() rbtree compare function */
+RB_TIMER_CMP(vrrp);
+
 /* Compute the new instance sands */
 void
 vrrp_init_instance_sands(vrrp_t * vrrp)
@@ -282,6 +291,8 @@ vrrp_init_instance_sands(vrrp_t * vrrp)
 	}
 	else if (vrrp->state == VRRP_STATE_FAULT || vrrp->state == VRRP_STATE_INIT)
 		vrrp->sands.tv_sec = TIMER_DISABLED;
+
+	rb_move_cached(&vrrp->sockets->rb_sands, vrrp, rb_sands, vrrp_timer_cmp);
 }
 
 static void
@@ -290,9 +301,9 @@ vrrp_init_sands(list l)
 	vrrp_t *vrrp;
 	element e;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-
+	LIST_FOREACH(l, vrrp, e) {
+		vrrp->sands.tv_sec = TIMER_DISABLED;
+		rb_insert_sort_cached(&vrrp->sockets->rb_sands, vrrp, rb_sands, vrrp_timer_cmp);
 		vrrp_init_instance_sands(vrrp);
 		vrrp->reload_master = false;
 	}
@@ -304,8 +315,7 @@ vrrp_init_script(list l)
 	vrrp_script_t *vscript;
 	element e;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vscript = ELEMENT_DATA(e);
+	LIST_FOREACH(l, vscript, e) {
 		if (vscript->init_state == SCRIPT_INIT_STATE_INIT)
 			vscript->result = vscript->rise - 1; /* one success is enough */
 		else if (vscript->init_state == SCRIPT_INIT_STATE_FAILED)
@@ -313,145 +323,28 @@ vrrp_init_script(list l)
 
 		thread_add_event(master, vrrp_script_thread, vscript, (int)vscript->interval);
 	}
-
-	if (LIST_SIZE(l))
-		set_child_finder(DEFAULT_CHILD_FINDER, NULL, NULL, NULL, NULL, LIST_SIZE(l));
-
 }
 
 /* Timer functions */
-static timeval_t
-vrrp_compute_timer(const int fd)
+static timeval_t *
+vrrp_compute_timer(const sock_t *sock)
 {
 	vrrp_t *vrrp;
-	element e;
-	list l = &vrrp_data->vrrp_index_fd[FD_INDEX_HASH(fd)];
-	timeval_t timer;
+	static timeval_t timer = { .tv_sec = TIMER_DISABLED };
 
-	/*
-	 * If list size's is 1 then no collisions. So
-	 * Test and return the singleton.
-	 */
-	if (LIST_SIZE(l) == 1) {
-		vrrp = ELEMENT_DATA(LIST_HEAD(l));
-		return vrrp->sands;
-	}
+	/* The sock won't exist if there isn't a vrrp instance on it,
+	 * so rb_first will always exist. */
+	vrrp = rb_entry(rb_first_cached(&sock->rb_sands), vrrp_t, rb_sands);
+	if (vrrp)
+		return &vrrp->sands;
 
-	/* Multiple instances on the same interface */
-	timerclear(&timer);
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-		if (vrrp->sockets->fd_in != fd)
-			continue;
-		if (!timerisset(&timer) ||
-		    timercmp(&vrrp->sands, &timer, <))
-			timer = vrrp->sands;
-	}
-
-	return timer;
-}
-
-static unsigned long
-vrrp_timer_fd(const int fd)
-{
-	timeval_t timer;
-
-	timer = vrrp_compute_timer(fd);
-// TODO - if the result of the following test is -ve, then a thread has already expired
-// and so shouldn't we run straight away? Or else ignore timers in past and take the next
-// one in the future?
-	if (timer.tv_sec == TIMER_DISABLED)
-		return ULONG_MAX;
-	if (timercmp(&timer, &time_now, <))
-		return TIMER_MAX_SEC;
-
-	timersub(&timer, &time_now, &timer);
-	return timer_long(timer);
+	return &timer;
 }
 
 void
 vrrp_thread_requeue_read(vrrp_t *vrrp)
 {
-	thread_requeue_read(master, vrrp->sockets->fd_in, vrrp_timer_fd(vrrp->sockets->fd_in));
-}
-
-void
-vrrp_thread_requeue_read_relative(vrrp_t *vrrp, uint32_t timer)
-{
-	vrrp->sands = timer_sub_long(vrrp->sands, timer);
-	if (timercmp(&vrrp->sands, &time_now, <))
-		vrrp->sands = time_now;
-
-	vrrp_thread_requeue_read(vrrp);
-}
-
-#ifdef _INCLUDE_UNUSED_CODE_
-// TODO //static int
-static vrrp_t *
-vrrp_timer_timeout(const int fd)
-{
-	vrrp_t *vrrp;
-	element e;
-	list l = &vrrp_data->vrrp_index_fd[FD_INDEX_HASH(fd)];
-	timeval_t timer;
-	vrrp_t *best_vrrp = NULL;
-
-	/* Multiple instances on the same interface */
-	timerclear(&timer);
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-		if (vrrp->fd_in == fd &&
-		    (!timerisset(&timer) ||
-		     timercmp(&vrrp->sands, &timer, <))) {
-			timer = vrrp->sands;
-			best_vrrp = vrrp;
-		}
-	}
-
-	return best_vrrp;
-}
-#endif
-
-/* We shouldn't receive anything on the send socket since IP_MULTICAST_ALL is cleared,
- * and no multicast groups are subscribed to on the socket. However, Debian Jessie
- * with a 3.16.0 kernel, CentOS 7 with a 3.10.0 kernel, and Fedora 16 with a
- * 3.6.11 kernel all exhibit the problem of multicast packets being queued on the
- * send socket. Whether this is a kernel problem that has been subsequently resolved,
- * or a system default configuration problem isn't yet known.
- *
- * The workaround to the problem is to read on the send sockets, and to discard any
- * received data.
- *
- * If anyone can provide more information about this issue it would be very helpful.
- */
-static int
-vrrp_write_fd_read_thread(thread_t *thread)
-{
-	sock_t *sock;
-	struct sockaddr_storage src_addr;
-	socklen_t src_addr_len = sizeof(src_addr);
-	ssize_t len;
-	static bool problem_reported = false;
-
-	sock = THREAD_ARG(thread);
-
-	if (thread->type == THREAD_READ_TIMEOUT || sock->fd_out == -1) {
-		/* This shouldn't happen */
-		log_message(LOG_INFO, "VRRP send socket %d, thread_type %d", sock->fd_out, thread->type);
-	} else {
-		len = recvfrom(sock->fd_out, vrrp_buffer, vrrp_buffer_len, MSG_DONTWAIT, (struct sockaddr *)&src_addr, &src_addr_len);
-		if (len == -1)
-			log_message(LOG_INFO, "Read on vrrp send socket %d failed - errno %d (%m)", sock->fd_out, errno);
-		else if (!problem_reported) {
-			log_message(LOG_INFO, "Kernel/system configuration issue causing multicast packets to be received but IP_MULTICAST_ALL unset");
-			problem_reported = true;
-		}
-	}
-
-	if (sock->fd_out != -1)
-		thread_add_read(thread->master, vrrp_write_fd_read_thread, sock, sock->fd_out, TIMER_NEVER);
-
-	return 0;
+	thread_requeue_read(master, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets));
 }
 
 /* Thread functions */
@@ -460,11 +353,10 @@ vrrp_register_workers(list l)
 {
 	sock_t *sock;
 	timeval_t timer;
-	unsigned long vrrp_timer = 0;
 	element e;
 
 	/* Init compute timer */
-	memset(&timer, 0, sizeof (struct timeval));
+	memset(&timer, 0, sizeof(timer));
 
 	/* Init the VRRP instances state */
 	vrrp_init_state(vrrp_data->vrrp);
@@ -473,46 +365,37 @@ vrrp_register_workers(list l)
 	vrrp_init_sands(vrrp_data->vrrp);
 
 	/* Init VRRP tracking scripts */
-	if (!LIST_ISEMPTY(vrrp_data->vrrp_script)) {
+	if (!LIST_ISEMPTY(vrrp_data->vrrp_script))
 		vrrp_init_script(vrrp_data->vrrp_script);
-	}
-
-	add_signal_read_thread();
 
 #ifdef _WITH_BFD_
 	if (!LIST_ISEMPTY(vrrp_data->vrrp)) {
+// TODO - should we only do this if we have track_bfd? Probably not
 		/* Init BFD tracking thread */
 		bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-					     bfd_vrrp_event_pipe[0], TIMER_HZ);
+					     bfd_vrrp_event_pipe[0], TIMER_NEVER);
 	}
 #endif
 
 	/* Register VRRP workers threads */
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		sock = ELEMENT_DATA(e);
-		/* jump to asynchronous handling */
-		vrrp_timer = vrrp_timer_fd(sock->fd_in);
-
+	LIST_FOREACH(l, sock, e) {
 		/* Register a timer thread if interface exists */
 		if (sock->fd_in != -1)
-			sock->thread = thread_add_read(master, vrrp_read_dispatcher_thread,
-						       sock, sock->fd_in, vrrp_timer);
-		if (sock->fd_out != -1 && !(global_data->vrrp_rx_bufs_policy & RX_BUFS_NO_SEND_RX))
-			thread_add_read(master, vrrp_write_fd_read_thread,
-						       sock, sock->fd_out, TIMER_NEVER);
+			sock->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
+						       sock, sock->fd_in, vrrp_compute_timer(sock));
 	}
 }
 
 void
 vrrp_thread_add_read(vrrp_t *vrrp)
 {
-	vrrp->sockets->thread = thread_add_read(master, vrrp_read_dispatcher_thread,
-						vrrp->sockets, vrrp->sockets->fd_in, vrrp_timer_fd(vrrp->sockets->fd_in));
+	vrrp->sockets->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
+						vrrp->sockets, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets));
 }
 
 /* VRRP dispatcher functions */
 static sock_t *
-already_exist_sock(list l, sa_family_t family, int proto, ifindex_t ifindex, bool unicast)
+already_exist_sock(list l, sa_family_t family, int proto, interface_t *ifp, bool unicast)
 {
 	sock_t *sock;
 	element e;
@@ -520,7 +403,7 @@ already_exist_sock(list l, sa_family_t family, int proto, ifindex_t ifindex, boo
 	LIST_FOREACH(l, sock, e) {
 		if ((sock->family == family)	&&
 		    (sock->proto == proto)	&&
-		    (sock->ifindex == ifindex)	&&
+		    (sock->ifp == ifp)		&&
 		    (sock->unicast == unicast))
 			return sock;
 	}
@@ -529,19 +412,27 @@ already_exist_sock(list l, sa_family_t family, int proto, ifindex_t ifindex, boo
 }
 
 static sock_t *
-alloc_sock(sa_family_t family, list l, int proto, ifindex_t ifindex, bool unicast)
+alloc_sock(sa_family_t family, list l, int proto, interface_t *ifp, bool unicast)
 {
 	sock_t *new;
 
 	new = (sock_t *)MALLOC(sizeof (sock_t));
 	new->family = family;
 	new->proto = proto;
-	new->ifindex = ifindex;
+	new->ifp = ifp;
 	new->unicast = unicast;
+	new->rb_vrid = RB_ROOT;
+	new->rb_sands = RB_ROOT_CACHED;
 
 	list_add(l, new);
 
 	return new;
+}
+
+static inline int
+vrrp_vrid_cmp(const vrrp_t *v1, const vrrp_t *v2)
+{
+	return v1->vrid - v2->vrid;
 }
 
 static void
@@ -549,17 +440,17 @@ vrrp_create_sockpool(list l)
 {
 	vrrp_t *vrrp;
 	element e;
-	ifindex_t ifindex;
+	interface_t *ifp;
 	int proto;
 	bool unicast;
 	sock_t *sock;
 
 	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
-		ifindex =
+		ifp =
 #ifdef _HAVE_VRRP_VMAC_
-			  (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? IF_BASE_INDEX(vrrp->ifp) :
+			  (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? vrrp->ifp->base_ifp :
 #endif
-										    IF_INDEX(vrrp->ifp);
+										    vrrp->ifp;
 		unicast = !LIST_ISEMPTY(vrrp->unicast_peer);
 #if defined _WITH_VRRP_AUTH_
 		if (vrrp->auth_type == VRRP_AUTH_AH)
@@ -569,8 +460,11 @@ vrrp_create_sockpool(list l)
 			proto = IPPROTO_VRRP;
 
 		/* add the vrrp element if not exist */
-		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifindex, unicast)))
-			sock = alloc_sock(vrrp->family, l, proto, ifindex, unicast);
+		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifp, unicast)))
+			sock = alloc_sock(vrrp->family, l, proto, ifp, unicast);
+
+		/* Add the vrrp_t indexed by vrid to the socket */
+		rb_insert_sort(&sock->rb_vrid, vrrp, rb_vrid, vrrp_vrid_cmp);
 
 		if (vrrp->kernel_rx_buf_size)
 			sock->rx_buf_size += vrrp->kernel_rx_buf_size;
@@ -588,21 +482,19 @@ vrrp_open_sockpool(list l)
 {
 	sock_t *sock;
 	element e;
-	interface_t *ifp;
 
 	LIST_FOREACH(l, sock, e) {
-		if (!sock->ifindex) {
+		if (!sock->ifp->ifindex) {
 			sock->fd_in = sock->fd_out = -1;
 			continue;
 		}
-		ifp = if_get_by_ifindex(sock->ifindex);
 		sock->fd_in = open_vrrp_read_socket(sock->family, sock->proto,
-					       ifp, sock->unicast, sock->rx_buf_size);
+					       sock->ifp, sock->unicast, sock->rx_buf_size);
 		if (sock->fd_in == -1)
 			sock->fd_out = -1;
 		else
 			sock->fd_out = open_vrrp_send_socket(sock->family, sock->proto,
-							     ifp, sock->unicast, sock->rx_buf_size);
+							     sock->ifp, sock->unicast);
 	}
 }
 
@@ -611,41 +503,11 @@ vrrp_set_fds(list l)
 {
 	sock_t *sock;
 	vrrp_t *vrrp;
-	list p = vrrp_data->vrrp;
-	element e_sock;
-	element e_vrrp;
-	int proto;
-	ifindex_t ifindex;
-	bool unicast;
+	element e;
 
-	for (e_sock = LIST_HEAD(l); e_sock; ELEMENT_NEXT(e_sock)) {
-		sock = ELEMENT_DATA(e_sock);
-		for (e_vrrp = LIST_HEAD(p); e_vrrp; ELEMENT_NEXT(e_vrrp)) {
-			vrrp = ELEMENT_DATA(e_vrrp);
-			ifindex =
-#ifdef _HAVE_VRRP_VMAC_
-				  (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? IF_BASE_INDEX(vrrp->ifp) :
-#endif
-											    IF_INDEX(vrrp->ifp);
-			unicast = !LIST_ISEMPTY(vrrp->unicast_peer);
-#if defined _WITH_VRRP_AUTH_
-			if (vrrp->auth_type == VRRP_AUTH_AH)
-				proto = IPPROTO_AH;
-			else
-#endif
-				proto = IPPROTO_VRRP;
-
-			if ((sock->ifindex == ifindex)	&&
-			    (sock->family == vrrp->family) &&
-			    (sock->proto == proto)	&&
-			    (sock->unicast == unicast)) {
-				vrrp->sockets = sock;
-
-				/* append to hash index */
-				alloc_vrrp_fd_bucket(vrrp);
-				alloc_vrrp_bucket(vrrp);
-			}
-		}
+	LIST_FOREACH(l, sock, e) {
+		rb_for_each_entry(vrrp, &sock->rb_vrid, rb_vrid)
+			vrrp->sockets = sock;
 	}
 }
 
@@ -694,21 +556,8 @@ vrrp_dispatcher_release(vrrp_data_t *data)
 	free_list(&data->vrrp_socket_pool);
 #ifdef _WITH_BFD_
 	thread_cancel(bfd_thread);
+	bfd_thread = NULL;
 #endif
-}
-
-static void
-vrrp_backup(vrrp_t * vrrp, char *buffer, ssize_t len)
-{
-	vrrp_state_backup(vrrp, buffer, len);
-}
-
-/* This is called if receive a packet when master */
-static void
-vrrp_leave_master(vrrp_t * vrrp, char *buffer, ssize_t len)
-{
-	if (vrrp_state_master_rx(vrrp, buffer, len))
-		vrrp_state_leave_master(vrrp, false);
 }
 
 static void
@@ -825,7 +674,7 @@ vrrp_handle_bfd_event(bfd_event_t * evt)
 	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
 		time_now = timer_now();
 		timersub(&time_now, &evt->sent_time, &timer_tmp);
-		delivery_time = timer_tol(timer_tmp);
+		delivery_time = timer_long(timer_tmp);
 		log_message(LOG_INFO, "Received BFD event: instance %s is in"
 			    " state %s (delivered in %i usec)",
 			    evt->iname, BFD_STATE_STR(evt->state), delivery_time);
@@ -846,6 +695,17 @@ vrrp_handle_bfd_event(bfd_event_t * evt)
 
 			log_message(LOG_INFO, "VRRP_Instance(%s) Tracked BFD"
 				    " instance %s is %s", vrrp->iname, evt->iname, vbfd->bfd_up ? "UP" : "DOWN");
+
+			if (tbfd->weight) {
+				if (vbfd->bfd_up)
+					vrrp->total_priority += abs(tbfd->weight);
+				else
+					vrrp->total_priority -= abs(tbfd->weight);
+				vrrp_set_effective_priority(vrrp);
+
+				continue;
+			}
+
 			if (vbfd->bfd_up)
 				try_up_instance(vrrp, false);
 			else
@@ -862,7 +722,7 @@ vrrp_bfd_thread(thread_t * thread)
 	bfd_event_t evt;
 
 	bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-				     thread->u.fd, TIMER_HZ * 60);
+				     thread->u.fd, TIMER_NEVER);
 
 	if (thread->type != THREAD_READY_FD)
 		return 0;
@@ -876,23 +736,17 @@ vrrp_bfd_thread(thread_t * thread)
 
 /* Handle dispatcher read timeout */
 static int
-vrrp_dispatcher_read_timeout(int fd)
+vrrp_dispatcher_read_timeout(sock_t *sock)
 {
 	vrrp_t *vrrp;
 	int prev_state;
-	element e;
-	list l = &vrrp_data->vrrp_index_fd[FD_INDEX_HASH(fd)];
 
 	set_time_now();
 
-	/* Multiple instances on the same interface */
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-		if (vrrp->sockets->fd_in != fd)
-			continue;
-
-		if (timercmp(&vrrp->sands, &time_now, >))
-			continue;
+	rb_for_each_entry_cached(vrrp, &sock->rb_sands, rb_sands) {
+		if (vrrp->sands.tv_sec == TIMER_DISABLED ||
+		    timercmp(&vrrp->sands, &time_now, >))
+			break;
 
 		prev_state = vrrp->state;
 
@@ -906,7 +760,7 @@ vrrp_dispatcher_read_timeout(int fd)
 
 		/* handle instance synchronization */
 #ifdef _TSM_DEBUG_
-		if (__test_bit(LOG_DETAIL_BIT, &debug))
+		if (do_tsm_debug)
 			log_message(LOG_INFO, "Send [%s] TSM transition : [%d,%d] Wantstate = [%d]",
 				vrrp->iname, prev_state, vrrp->state, vrrp->wantstate);
 #endif
@@ -915,7 +769,7 @@ vrrp_dispatcher_read_timeout(int fd)
 		vrrp_init_instance_sands(vrrp);
 	}
 
-	return fd;
+	return sock->fd_in;
 }
 
 /* Handle dispatcher read packet */
@@ -929,6 +783,7 @@ vrrp_dispatcher_read(sock_t * sock)
 	unsigned proto = 0;
 	struct sockaddr_storage src_addr;
 	socklen_t src_addr_len = sizeof(src_addr);
+	vrrp_t vrrp_lookup;
 
 	/* Clean the read buffer */
 	memset(vrrp_buffer, 0, vrrp_buffer_len);
@@ -938,8 +793,8 @@ vrrp_dispatcher_read(sock_t * sock)
 		       (struct sockaddr *) &src_addr, &src_addr_len);
 	hd = vrrp_get_header(sock->family, vrrp_buffer, &proto);
 
-	/* Searching for matching instance */
-	vrrp = vrrp_index_lookup(hd->vrid, sock->fd_in);
+	vrrp_lookup.vrid = hd->vrid;
+	vrrp = rb_search(&sock->rb_vrid, &vrrp_lookup, rb_vrid, vrrp_vrid_cmp);
 
 	/* If no instance found => ignore the advert */
 	if (!vrrp)
@@ -957,15 +812,16 @@ vrrp_dispatcher_read(sock_t * sock)
 	prev_state = vrrp->state;
 
 	if (vrrp->state == VRRP_STATE_BACK)
-		vrrp_backup(vrrp, vrrp_buffer, len);
-	else if (vrrp->state == VRRP_STATE_MAST)
-		vrrp_leave_master(vrrp, vrrp_buffer, len);
-	else
+		vrrp_state_backup(vrrp, vrrp_buffer, len);
+	else if (vrrp->state == VRRP_STATE_MAST) {
+		if (vrrp_state_master_rx(vrrp, vrrp_buffer, len))
+			vrrp_state_leave_master(vrrp, false);
+	} else
 		log_message(LOG_INFO, "(%s) In dispatcher_read with state %d", vrrp->iname, vrrp->state);
 
 	/* handle instance synchronization */
 #ifdef _TSM_DEBUG_
-	if (__test_bit(LOG_DETAIL_BIT, &debug))
+	if (do_tsm_debug)
 		log_message(LOG_INFO, "Read [%s] TSM transition : [%d,%d] Wantstate = [%d]",
 			vrrp->iname, prev_state, vrrp->state, vrrp->wantstate);
 #endif
@@ -982,7 +838,6 @@ vrrp_dispatcher_read(sock_t * sock)
 static int
 vrrp_read_dispatcher_thread(thread_t * thread)
 {
-	unsigned long vrrp_timer;
 	sock_t *sock;
 	int fd;
 
@@ -991,15 +846,14 @@ vrrp_read_dispatcher_thread(thread_t * thread)
 
 	/* Dispatcher state handler */
 	if (thread->type == THREAD_READ_TIMEOUT || sock->fd_in == -1)
-		fd = vrrp_dispatcher_read_timeout(sock->fd_in);
+		fd = vrrp_dispatcher_read_timeout(sock);
 	else
 		fd = vrrp_dispatcher_read(sock);
 
 	/* register next dispatcher thread */
-	vrrp_timer = vrrp_timer_fd(fd);
 	if (fd != -1)
-		sock->thread = thread_add_read(thread->master, vrrp_read_dispatcher_thread,
-					       sock, fd, vrrp_timer);
+		sock->thread = thread_add_read_sands(thread->master, vrrp_read_dispatcher_thread,
+					       sock, fd, vrrp_compute_timer(sock));
 
 	return 0;
 }
@@ -1066,8 +920,18 @@ vrrp_script_child_thread(thread_t * thread)
 		if (timeout) {
 			/* If kill returns an error, we can't kill the process since either the process has terminated,
 			 * or we don't have permission. If we can't kill it, there is no point trying again. */
-			if (!kill(-pid, sig_num))
-				timeout = 1000;
+			if (kill(-pid, sig_num)) {
+				if (errno == ESRCH) {
+					/* The process does not exist; presumably it
+					 * has just terminated. We should get
+					 * notification of it's termination, so allow
+					 * that to handle it. */
+					timeout = 1;
+				} else {
+					log_message(LOG_INFO, "kill -%d of process %s(%d) with new state %d failed with errno %d", sig_num, vscript->script.args[0], pid, vscript->state, errno);
+					timeout = 1000;
+				}
+			}
 		} else if (vscript->state != SCRIPT_STATE_IDLE) {
 			log_message(LOG_INFO, "Child thread pid %d timeout with unknown script state %d", pid, vscript->state);
 			timeout = 10;	/* We need some timeout */
@@ -1251,77 +1115,6 @@ vrrp_arp_thread(thread_t *thread)
 }
 
 #ifdef _WITH_DUMP_THREADS_
-static char *
-get_func_name_from_addr(void *func)
-{
-/*
-func
- handle_dbus_msg
- http_read_thread
- http_response_thread
- if_linkbeat_refresh_thread
- kernel_netlink
- print_vrrp_data
- print_vrrp_stats
- reload_vrrp_thread
- SMTP_FSM[status].send
- smtp_read_thread
- smtp_send_thread
- ssl_read_thread
- tcp_connect_thread
-*/
-	if (func == vrrp_arp_thread) return "vrrp_arp_thread";
-	if (func == vrrp_dispatcher_init) return "vrrp_dispatcher_init";
-	if (func == vrrp_gratuitous_arp_thread) return "vrrp_gratuitous_arp_thread";
-	if (func == vrrp_lower_prio_gratuitous_arp_thread) return "vrrp_lower_prio_gratuitous_arp_thread";
-	if (func == vrrp_read_dispatcher_thread) return "vrrp_read_dispatcher_thread";
-	if (func == vrrp_script_thread) return "vrrp_script_thread";
-
-	return NULL;
-}
-
-static void
-dump_thread_list(FILE *fp, thread_list_t *tlist, const char *type)
-{
-	thread_t *thread;
-	char time_buf[26];
-	char *func_name;
-
-	fprintf(fp, "\n  %s thread list dump\n", type);
-	for (thread = tlist->head; thread; thread = thread->next) {
-		fprintf(fp, "\n    type = %d (%s)\n", thread->type,
-				thread->type == THREAD_READ ? "THREAD_READ" :
-				thread->type == THREAD_WRITE ? "THREAD_WRITE" :
-				thread->type == THREAD_TIMER ? "THREAD_TIMER" :
-				thread->type == THREAD_EVENT ? "THREAD_EVENT" :
-				thread->type == THREAD_CHILD ? "THREAD_CHILD" :
-				thread->type == THREAD_READY ? "THREAD_READY" :
-				thread->type == THREAD_UNUSED ? "THREAD_UNUSED" :
-				thread->type == THREAD_WRITE_TIMEOUT ? "THREAD_WRITE_TIMEOUT" :
-				thread->type == THREAD_READ_TIMEOUT ? "THREAD_READ_TIMEOUT" :
-				thread->type == THREAD_CHILD_TIMEOUT ? "THREAD_CHILD_TIMEOUT" :
-				thread->type == THREAD_TERMINATE ? "THREAD_TERMINATE" :
-				thread->type == THREAD_READY_FD ? "THREAD_READY_FD" :
-				"unknown");
-
-		fprintf(fp, "    id = %lu\n", thread->id);
-		fprintf(fp, "    union = %d\n", thread->u.val);
-		ctime_r(&thread->sands.tv_sec, time_buf);
-		fprintf(fp, "    sands = %.19s.%6.6lu\n", time_buf, thread->sands.tv_usec);
-		if ((func_name = get_func_name_from_addr(thread->func)))
-			fprintf(fp, "    func = %s()\n", func_name);
-		else
-			fprintf(fp, "    func = %p\n", thread->func);
-	}
-}
-
-static void
-dump_fd_set(FILE *fp, fd_set *fd, const char *type)
-{
-	fprintf(fp, "\n  %s fd_set dump\n", type);
-	fprintf(fp, "    0x%lx\n", __FDS_BITS(fd)[0]);
-}
-
 void
 dump_threads(void)
 {
@@ -1329,50 +1122,56 @@ dump_threads(void)
 	char time_buf[26];
 	element e;
 	vrrp_t *vrrp;
+	char *file_name;
 
-	fp = fopen("/tmp/thread_dump", "a");
+	file_name = make_file_name("/tmp/thread_dump.dat",
+					"vrrp",
+#if HAVE_DECL_CLONE_NEWNET
+					global_data->network_namespace,
+#else
+					NULL,
+#endif
+					global_data->instance_name);
+	fp = fopen_safe(file_name, "a");
+	FREE(file_name);
 
 	set_time_now();
 	ctime_r(&time_now.tv_sec, time_buf);
 
 	fprintf(fp, "\n%.19s.%6.6ld: Thread dump\n", time_buf, time_now.tv_usec);
 
-	dump_thread_list(fp, &master->read, "read");
-	dump_thread_list(fp, &master->write, "write");
-	dump_thread_list(fp, &master->timer, "timer");
-	dump_thread_list(fp, &master->child, "child");
-	dump_thread_list(fp, &master->event, "event");
-	dump_thread_list(fp, &master->ready, "ready");
-	dump_thread_list(fp, &master->unuse, "unuse");
-	dump_fd_set(fp, &master->readfd, "read");
-	dump_fd_set(fp, &master->writefd, "write");
+	dump_thread_data(master, fp);
+
 	fprintf(fp, "alloc = %lu\n", master->alloc);
 
 	fprintf(fp, "\n");
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
 		ctime_r(&vrrp->sands.tv_sec, time_buf);
 		fprintf(fp, "VRRP instance %s, sands %.19s.%6.6lu, status %s\n", vrrp->iname, time_buf, vrrp->sands.tv_usec,
 				vrrp->state == VRRP_STATE_INIT ? "INIT" :
 				vrrp->state == VRRP_STATE_BACK ? "BACKUP" :
 				vrrp->state == VRRP_STATE_MAST ? "MASTER" :
 				vrrp->state == VRRP_STATE_FAULT ? "FAULT" :
+				vrrp->state == VRRP_STATE_STOP ? "STOP" :
 				vrrp->state == VRRP_DISPATCHER ? "DISPATCHER" : "unknown");
 	}
 	fclose(fp);
 }
 #endif
 
-#ifdef _TIMER_DEBUG_
+#ifdef THREAD_DUMP
 void
-print_vrrp_scheduler_addresses(void)
+register_vrrp_scheduler_addresses(void)
 {
-	log_message(LOG_INFO, "Address of vrrp_arp_thread() is 0x%p", vrrp_arp_thread);
-	log_message(LOG_INFO, "Address of vrrp_dispatcher_init() is 0x%p", vrrp_dispatcher_init);
-	log_message(LOG_INFO, "Address of vrrp_gratuitous_arp_thread() is 0x%p", vrrp_gratuitous_arp_thread);
-	log_message(LOG_INFO, "Address of vrrp_lower_prio_gratuitous_arp_thread() is 0x%p", vrrp_lower_prio_gratuitous_arp_thread);
-	log_message(LOG_INFO, "Address of vrrp_script_child_thread() is 0x%p", vrrp_script_child_thread);
-	log_message(LOG_INFO, "Address of vrrp_script_thread() is 0x%p", vrrp_script_thread);
-	log_message(LOG_INFO, "Address of vrrp_read_dispatcher_thread() is 0x%p", vrrp_read_dispatcher_thread);
+	register_thread_address("vrrp_arp_thread", vrrp_arp_thread);
+	register_thread_address("vrrp_dispatcher_init", vrrp_dispatcher_init);
+	register_thread_address("vrrp_gratuitous_arp_thread", vrrp_gratuitous_arp_thread);
+	register_thread_address("vrrp_lower_prio_gratuitous_arp_thread", vrrp_lower_prio_gratuitous_arp_thread);
+	register_thread_address("vrrp_script_child_thread", vrrp_script_child_thread);
+	register_thread_address("vrrp_script_thread", vrrp_script_thread);
+	register_thread_address("vrrp_read_dispatcher_thread", vrrp_read_dispatcher_thread);
+#ifdef _WITH_BFD_
+	register_thread_address("vrrp_bfd_thread", vrrp_bfd_thread);
+#endif
 }
 #endif
