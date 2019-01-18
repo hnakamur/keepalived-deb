@@ -26,11 +26,16 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <string.h>
+#include <stdbool.h>
 
 typedef struct timeval timeval_t;
 
 /* Global vars */
 extern timeval_t time_now;
+
+#ifdef _TIMER_CHECK_
+bool do_timer_check;
+#endif
 
 /* Some defines */
 #define TIMER_HZ		1000000U
@@ -40,20 +45,75 @@ extern timeval_t time_now;
 #define TIMER_NEVER		ULONG_MAX	/* Used with time intervals in TIMER_HZ units */
 #define TIMER_DISABLED		LONG_MIN	/* Value in timeval_t tv_sec */
 
-/* Some useful macros */
-#define timer_long(T) (unsigned long)(((T).tv_sec * TIMER_HZ + (T).tv_usec))
+#define	NSEC_PER_SEC		1000000000U	/* nanoseconds per second. Avoids typos by having a definition */
+
+#ifdef _TIMER_CHECK_
+#define timer_now()	timer_now_r((__FILE__), (char *)(__FUNCTION__), (__LINE__))
+#define set_time_now()	set_time_now_r((__FILE__), (char *)(__FUNCTION__), (__LINE__))
+#endif
+
+#define RB_TIMER_CMP(obj)					\
+static inline int						\
+obj##_timer_cmp(obj##_t *r1, obj##_t *r2)			\
+{								\
+	if (r1->sands.tv_sec == TIMER_DISABLED) {		\
+		if (r2->sands.tv_sec == TIMER_DISABLED)		\
+			return 0;				\
+		return 1;					\
+	}							\
+								\
+	if (r2->sands.tv_sec == TIMER_DISABLED)			\
+		return -1;					\
+								\
+	if (r1->sands.tv_sec != r2->sands.tv_sec)		\
+		return r1->sands.tv_sec - r2->sands.tv_sec;	\
+								\
+	return r1->sands.tv_usec - r2->sands.tv_usec;		\
+}
+
+/* timer sub from current time */
+static inline timeval_t
+timer_sub_now(timeval_t a)
+{
+	timersub(&a, &time_now, &a);
+
+	return a;
+}
+
+/* timer add to current time */
+static inline timeval_t
+timer_add_now(timeval_t a)
+{
+	timeradd(&time_now, &a, &a);
+
+	return a;
+}
+
+/* Return time as unsigned long */
+static inline unsigned long
+timer_long(timeval_t a)
+{
+	return (unsigned long)a.tv_sec * TIMER_HZ + (unsigned long)a.tv_usec;
+}
+
+#ifdef _INCLUDE_UNUSED_CODE_
+/* print timer value */
+static inline void
+timer_dump(timeval_t a)
+{
+	printf("=> %lu (usecs)\n", timer_tol(a));
+}
+#endif
 
 /* prototypes */
+#ifdef _TIMER_CHECK_
+extern timeval_t timer_now_r(const char *, const char *, int);
+extern timeval_t set_time_now_r(const char *, const char *, int);
+#else
 extern timeval_t timer_now(void);
 extern timeval_t set_time_now(void);
-extern timeval_t timer_add_secs(timeval_t, time_t);
+#endif
 extern timeval_t timer_add_long(timeval_t, unsigned long);
 extern timeval_t timer_sub_long(timeval_t, unsigned long);
-extern timeval_t timer_sub_now(timeval_t);
-extern timeval_t timer_add_now(timeval_t);
-extern unsigned long timer_tol(timeval_t);
-#ifdef _INCLUDE_UNUSED_CODE_
-extern void timer_dump(timeval_t);
-#endif
 
 #endif

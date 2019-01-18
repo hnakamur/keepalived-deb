@@ -27,6 +27,8 @@
 #include <sys/stat.h>
 #include <sys/prctl.h>
 #include <fcntl.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "bfd.h"
 #include "bfd_daemon.h"
@@ -47,6 +49,9 @@
 #include "scheduler.h"
 #include "process.h"
 #include "utils.h"
+#ifdef _WITH_CN_PROC_
+#include "track_process.h"
+#endif
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
@@ -55,13 +60,18 @@ int bfd_checker_event_pipe[2] = { -1, -1};
 /* Local variables */
 static char *bfd_syslog_ident;
 
+#ifndef _DEBUG_
 static int reload_bfd_thread(thread_t *);
+#endif
 
 /* Daemon stop sequence */
 static void
 stop_bfd(int status)
 {
-	signal_handler_destroy();
+	struct rusage usage;
+
+	if (__test_bit(CONFIG_TEST_BIT, &debug))
+		return;
 
 	/* Stop daemon */
 	pidfile_rm(bfd_pidfile);
@@ -78,10 +88,17 @@ stop_bfd(int status)
 	 * Reached when terminate signal catched.
 	 * finally return to parent process.
 	 */
-	log_message(LOG_INFO, "Stopped");
+	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
+		getrusage(RUSAGE_SELF, &usage);
+		log_message(LOG_INFO, "Stopped - used %ld.%6.6ld user time, %ld.%6.6ld system time", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	}
+	else
+		log_message(LOG_INFO, "Stopped");
 
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		close_log_file();
+#endif
 	closelog();
 
 #ifndef _MEM_CHECK_LOG_
@@ -120,7 +137,7 @@ open_bfd_pipes(void)
 
 /* Daemon init sequence */
 static void
-start_bfd(void)
+start_bfd(__attribute__((unused)) data_t *old_global_data)
 {
 	srand(time(NULL));
 
@@ -138,14 +155,23 @@ start_bfd(void)
 	 * leave the call here but commented out so we know where we want it
 	 * it if is needed.
 	if (reload)
-		init_global_data();
+		init_global_data(global_data, old_global_data);
 	*/
 
 	/* If we are just testing the configuration, then we terminate now */
-	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
-		stop_bfd(KEEPALIVED_EXIT_CONFIG_TEST);
+	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
-	}
+	bfd_complete_init();
+
+	/* Post initializations */
+#ifdef _MEM_CHECK_
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+#endif
+
+	if (__test_bit(DUMP_CONF_BIT, &debug))
+		dump_bfd_data(NULL, bfd_data);
+
+	thread_add_event(master, bfd_dispatcher_init, bfd_data, 0);
 
 	/* Set the process priority and non swappable if configured */
 // TODO - measure max stack usage
@@ -157,15 +183,15 @@ start_bfd(void)
 #endif
 #endif
 			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
-
-	bfd_complete_init();
-
-	if (__test_bit(DUMP_CONF_BIT, &debug))
-		dump_bfd_data(NULL, bfd_data);
-
-	thread_add_event(master, bfd_dispatcher_init, bfd_data, 0);
 }
 
+void
+bfd_validate_config(void)
+{
+	start_bfd(NULL);
+}
+
+#ifndef _DEBUG_
 /* Reload handler */
 static void
 sigreload_bfd(__attribute__ ((unused)) void *v,
@@ -187,7 +213,6 @@ sigend_bfd(__attribute__ ((unused)) void *v,
 static void
 bfd_signal_init(void)
 {
-	signal_handler_child_init();
 	signal_set(SIGHUP, sigreload_bfd, NULL);
 	signal_set(SIGINT, sigend_bfd, NULL);
 	signal_set(SIGTERM, sigend_bfd, NULL);
@@ -203,11 +228,11 @@ reload_bfd_thread(__attribute__((unused)) thread_t * thread)
 
 	log_message(LOG_INFO, "Reloading");
 
+	/* Use standard scheduling while reloading */
+	reset_process_priorities();
+
 	/* set the reloading flag */
 	SET_RELOAD;
-
-	/* Signal handling */
-//	signal_handler_destroy();
 
 	/* Destroy master thread */
 	bfd_dispatcher_release(bfd_data);
@@ -221,7 +246,7 @@ reload_bfd_thread(__attribute__((unused)) thread_t * thread)
 
 	/* Reload the conf */
 	signal_set(SIGCHLD, thread_child_handler, master);
-	start_bfd();
+	start_bfd(old_global_data);
 
 	free_bfd_data(old_bfd_data);
 	free_global_data(old_global_data);
@@ -229,42 +254,47 @@ reload_bfd_thread(__attribute__((unused)) thread_t * thread)
 	UNSET_RELOAD;
 
 	set_time_now();
-	log_message(LOG_INFO, "Reload finished in %li usec", -timer_tol(timer_sub_now(timer)));
+	log_message(LOG_INFO, "Reload finished in %li usec", -timer_long(timer_sub_now(timer)));
 
 	return 0;
 }
 
-#ifndef _DEBUG_
 /* BFD Child respawning thread */
 static int
 bfd_respawn_thread(thread_t * thread)
 {
-	pid_t pid;
-
-	/* Fetch thread args */
-	pid = THREAD_CHILD_PID(thread);
-
-	/* Restart respawning thread */
-	if (thread->type == THREAD_CHILD_TIMEOUT) {
-		thread_add_child(master, bfd_respawn_thread, NULL,
-				 pid, RESPAWN_TIMER);
-		return 0;
-	}
-
 	/* We catch a SIGCHLD, handle it */
-	if (__test_bit(CONFIG_TEST_BIT, &debug))
-		raise(SIGTERM);
-	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning",
-			    pid);
+	bfd_child = 0;
+
+	if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
+		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
 		start_bfd_child();
 	} else {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Exiting",
-			    pid);
+		log_message(LOG_ALERT, "BFD child process(%d) died: Exiting", thread->u.c.pid);
 		raise(SIGTERM);
 	}
 	return 0;
 }
+#endif
+
+#ifndef _DEBUG_
+#ifdef THREAD_DUMP
+static void
+register_bfd_thread_addresses(void)
+{
+	register_scheduler_addresses();
+	register_signal_thread_addresses();
+
+	register_bfd_scheduler_addresses();
+
+	register_thread_address("bfd_dispatcher_init", bfd_dispatcher_init);
+	register_thread_address("reload_bfd_thread", reload_bfd_thread);
+
+	register_signal_handler_address("sigreload_bfd", sigreload_bfd);
+	register_signal_handler_address("sigend_bfd", sigend_bfd);
+	register_signal_handler_address("thread_child_handler", thread_child_handler);
+}
+#endif
 #endif
 
 int
@@ -276,8 +306,10 @@ start_bfd_child(void)
 	char *syslog_ident;
 
 	/* Initialize child process */
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		flush_log_file();
+#endif
 
 	pid = fork();
 
@@ -291,24 +323,25 @@ start_bfd_child(void)
 
 		/* Start respawning thread */
 		thread_add_child(master, bfd_respawn_thread, NULL,
-				 pid, RESPAWN_TIMER);
+				 pid, TIMER_NEVER);
 		return 0;
 	}
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-	/* Clear any child finder functions set in parent */
-	set_child_finder_name(NULL);
-	destroy_child_finder();
-
 	prog_type = PROG_TYPE_BFD;
 
-	/* Close the read end of the event notification pipes */
+	/* Close the read end of the event notification pipes, and the track_process fd */
 #ifdef _WITH_VRRP_
 	close(bfd_vrrp_event_pipe[0]);
+#ifdef _WITH_CN_PROC_
+	close_track_processes();
+#endif
 #endif
 #ifdef _WITH_LVS_
 	close(bfd_checker_event_pipe[0]);
 #endif
+
+	initialise_debug_options();
 
 	if ((global_data->instance_name
 #if HAVE_DECL_CLONE_NEWNET
@@ -325,6 +358,7 @@ start_bfd_child(void)
 		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
 				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
 
+#ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"bfd",
@@ -334,14 +368,16 @@ start_bfd_child(void)
 				NULL,
 #endif
 				global_data->instance_name);
-
-	signal_handler_destroy();
+#endif
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_BFD, "BFD child process");
 #endif
 
 	free_parent_mallocs_startup(true);
+
+	/* Clear any child finder functions set in parent */
+	set_child_finder_name(NULL);
 
 	/* Child process part, write pidfile */
 	if (!pidfile_write(bfd_pidfile, getpid())) {
@@ -360,9 +396,6 @@ start_bfd_child(void)
 	if (ret < 0) {
 		log_message(LOG_INFO, "BFD child process: error chdir");
 	}
-
-	/* Set mask */
-	umask(0);
 #endif
 
 	/* If last process died during a reload, we can get there and we
@@ -376,14 +409,22 @@ start_bfd_child(void)
 #endif
 
 	/* Start BFD daemon */
-	start_bfd();
+	start_bfd(NULL);
 
 #ifdef _DEBUG_
 	return 0;
 #else
 
+#ifdef THREAD_DUMP
+	register_bfd_thread_addresses();
+#endif
+
 	/* Launch the scheduling I/O multiplexer */
-	launch_scheduler();
+	launch_thread_scheduler(master);
+
+#ifdef THREAD_DUMP
+	deregister_thread_addresses();
+#endif
 
 	/* Finish BFD daemon process */
 	stop_bfd(EXIT_SUCCESS);
@@ -392,3 +433,13 @@ start_bfd_child(void)
 	exit(EXIT_SUCCESS);
 #endif
 }
+
+#ifdef THREAD_DUMP
+void
+register_bfd_parent_addresses(void)
+{
+#ifndef _DEBUG_
+	register_thread_address("bfd_respawn_thread", bfd_respawn_thread);
+#endif
+}
+#endif

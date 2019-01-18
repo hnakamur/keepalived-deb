@@ -47,11 +47,14 @@ do {						\
       (*(VRRP_TSM[S][(V)->state].handler)) (V);	\
 } while (0)
 
+#ifdef _TSM_DEBUG_
+extern bool do_tsm_debug;
+#endif
+
 /* extern prototypes */
 extern void vrrp_init_instance_sands(vrrp_t *);
 extern void vrrp_thread_requeue_read(vrrp_t *);
 extern void vrrp_thread_add_read(vrrp_t *);
-extern void vrrp_thread_requeue_read_relative(vrrp_t *, uint32_t);
 extern int vrrp_dispatcher_init(thread_t *);
 extern void vrrp_dispatcher_release(vrrp_data_t *);
 extern int vrrp_gratuitous_arp_thread(thread_t *);
@@ -60,6 +63,9 @@ extern int vrrp_arp_thread(thread_t *);
 extern void try_up_instance(vrrp_t *, bool);
 #ifdef _WITH_DUMP_THREADS_
 extern void dump_threads(void);
+#endif
+#ifdef THREAD_DUMP
+extern void register_vrrp_scheduler_addresses(void);
 #endif
 
 #endif

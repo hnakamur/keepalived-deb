@@ -1,8 +1,31 @@
 Whatever you want !
 
-The following are still outstanding from the ideas for what was the beta
-development:
+Real servers
+Add quorum_weight, defaults to weight. May want to set different between quorum and IPVS weight
 
+Rationalise use of timer_now()/gettimeofday()/set_time_now()
+
+
+virtual route:
+1. How do we handle
+     virtual_routes {
+            192.168.210.0/24 via 10.1.0.1
+     }
+     if there is no route to 10.1.0.1? If we go to fault state if it cannot
+     be installed when attempt to transition to master, how do we know to transiton
+     out of fault state.
+
+
+IPVS
+1. Can we have an IPv4 fwmark and specify tunnel to IPv6, and vice versa etc.
+   What does ipvsadm do?
+2. Sort out IP_VS_SO vs LVS_CMD...
+3. Make sure log/email messages contain relevant info re VS -> RS. See FMT_CHK
+
+The following are still outstanding from the ideas for what became v2.0.0:
+
+	* Sort out termination in vrrp and checker - stop_vrrp/check, and phase2
+	    are inconsistent between vrrp and checker. What about bfd?
 	* A route with multiple nexthops will only be deleted if all interfaces
 	    are down. Each nexthop needs to record the interface, and only remove
 	    once all down
@@ -34,9 +57,7 @@ development:
 	* Allow dynamic definitions, e.g. $_VI_NAME
 	    Also $*_INSTANCE net_namspace $_INSTANCE
 	    so $* means only do if $_INSTANCE not blank. */
-	* ng-scheduler - would libev help, or use select with epoll to get
-	    micro-second timer
-
+	* ng-scheduler
 
 
 Other issues awaiting resolution:
@@ -120,12 +141,12 @@ net.core.rmem_max = 37748736
    physical interface is downed, lots of netlink messages are
    received, and we get an ENOBUFS. However, after that we then
    see a repeat of some of the earlier messages, so it looks like
-   a circular buffer corruption. Running ip -ts monitor link addr route	
+   a circular buffer corruption. Running ip -ts monitor link addr route
    we see precisely the same problem at exactly the same message,
    although which message it is varies each time.
 
 3. net-snmp. Display-hint only works on indices.
-   See issue #866. 
+   See issue #866.
    # snmpwalk -v2c -c public localhost KEEPALIVED-MIB::virtualServerAddress
    KEEPALIVED-MIB::virtualServerAddress.1 = STRING: "
 0,"

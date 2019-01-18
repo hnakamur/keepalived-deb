@@ -98,6 +98,8 @@ POST_UNINSTALL = :
 @WITH_NAMESPACES_TRUE@am__append_4 = namespaces.c
 @LIBNL_DYNAMIC_TRUE@am__append_5 = libnl_link.o
 @LIBNL_DYNAMIC_TRUE@am__append_6 = libnl_link.c
+@CN_PROC_TRUE@am__append_7 = track_process.o
+@CN_PROC_TRUE@am__append_8 = track_process.c
 subdir = keepalived/core
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/configure.ac
@@ -115,12 +117,13 @@ am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 libcore_a_AR = $(AR) $(ARFLAGS)
 libcore_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
-	$(am__append_5)
+	$(am__append_5) $(am__append_7)
 am_libcore_a_OBJECTS = main.$(OBJEXT) daemon.$(OBJEXT) \
 	pidfile.$(OBJEXT) layer4.$(OBJEXT) smtp.$(OBJEXT) \
 	global_data.$(OBJEXT) global_parser.$(OBJEXT) \
-	process.$(OBJEXT) keepalived_netlink.$(OBJEXT)
-am__EXTRA_libcore_a_SOURCES_DIST = snmp.c namespaces.c libnl_link.c
+	keepalived_netlink.$(OBJEXT)
+am__EXTRA_libcore_a_SOURCES_DIST = snmp.c namespaces.c libnl_link.c \
+	track_process.c
 libcore_a_OBJECTS = $(am_libcore_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -194,6 +197,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -203,6 +207,7 @@ EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 GENHASH_LIBS = @GENHASH_LIBS@
 GREP = @GREP@
+HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 HAVE_SPHINX_BUILD = @HAVE_SPHINX_BUILD@
 INSTALL = @INSTALL@
@@ -298,12 +303,12 @@ AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
 noinst_LIBRARIES = libcore.a
 libcore_a_SOURCES = main.c daemon.c pidfile.c layer4.c smtp.c \
-			  global_data.c global_parser.c process.c \
-			  keepalived_netlink.c
+			  global_data.c global_parser.c keepalived_netlink.c
 
-libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5)
+libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
+	$(am__append_7)
 EXTRA_libcore_a_SOURCES = $(am__append_2) $(am__append_4) \
-	$(am__append_6)
+	$(am__append_6) $(am__append_8)
 all: all-am
 
 .SUFFIXES:
@@ -361,9 +366,9 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/main.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/namespaces.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pidfile.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/process.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/snmp.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/track_process.Po@am__quote@
 
 .c.o:
 @am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<

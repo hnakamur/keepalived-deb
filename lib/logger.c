@@ -37,10 +37,12 @@
 /* Boolean flag - send messages to console as well as syslog */
 static bool log_console = false;
 
+#ifdef ENABLE_LOG_TO_FILE
 /* File to write log messages to */
 char *log_file_name;
 static FILE *log_file;
 bool always_flush_log_file;
+#endif
 
 void
 enable_console_log(void)
@@ -48,6 +50,7 @@ enable_console_log(void)
 	log_console = true;
 }
 
+#ifdef ENABLE_LOG_TO_FILE
 void
 set_flush_log_file(void)
 {
@@ -66,9 +69,6 @@ close_log_file(void)
 void
 open_log_file(const char *name, const char *prog, const char *namespace, const char *instance)
 {
-	const char *extn_start;
-	const char *dir_end;
-	size_t len;
 	char *file_name;
 
 	if (log_file) {
@@ -79,37 +79,14 @@ open_log_file(const char *name, const char *prog, const char *namespace, const c
 	if (!name)
 		return;
 
-	len = strlen(name);
-	if (prog)
-		len += strlen(prog) + 1;
-	if (namespace)
-		len += strlen(namespace) + 1;
-	if (instance)
-		len += strlen(instance);
+	file_name = make_file_name(name, prog, namespace, instance);
 
-	file_name = MALLOC(len + 1);
-	dir_end = strrchr(name, '/');
-	extn_start = strrchr(dir_end ? dir_end : name, '.');
-	strncpy(file_name, name, extn_start ? (size_t)(extn_start - name) : len);
-
-	if (prog) {
-		strcat(file_name, "_");
-		strcat(file_name, prog);
+	log_file = fopen_safe(file_name, "a");
+	if (log_file) {
+		int n = fileno(log_file);
+		fcntl(n, F_SETFD, FD_CLOEXEC | fcntl(n, F_GETFD));
+		fcntl(n, F_SETFL, O_NONBLOCK | fcntl(n, F_GETFL));
 	}
-	if (namespace) {
-		strcat(file_name, "_");
-		strcat(file_name, namespace);
-	}
-	if (instance) {
-		strcat(file_name, "_");
-		strcat(file_name, instance);
-	}
-	if (extn_start)
-		strcat(file_name, extn_start);
-
-	log_file = fopen(file_name, "a");
-	fcntl(fileno(log_file), F_SETFD, FD_CLOEXEC | fcntl(fileno(log_file), F_GETFD));
-	fcntl(fileno(log_file), F_SETFL, O_NONBLOCK | fcntl(fileno(log_file), F_GETFL));
 
 	FREE(file_name);
 }
@@ -122,13 +99,40 @@ flush_log_file(void)
 }
 
 void
+update_log_file_perms(mode_t umask_bits)
+{
+        if (log_file)
+                fchmod(fileno(log_file), (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) & ~umask_bits);
+}
+#endif
+
+void
 vlog_message(const int facility, const char* format, va_list args)
 {
+#if !HAVE_VSYSLOG
 	char buf[MAX_LOG_MSG+1];
 
 	vsnprintf(buf, sizeof(buf), format, args);
+#endif
 
-	if (log_file || (__test_bit(DONT_FORK_BIT, &debug) && log_console)) {
+	/* Don't write syslog if testing configuration */
+	if (__test_bit(CONFIG_TEST_BIT, &debug))
+		return;
+
+	if (
+#ifdef ENABLE_LOG_TO_FILE
+	    log_file ||
+#endif
+			(__test_bit(DONT_FORK_BIT, &debug) && log_console)) {
+#if HAVE_VSYSLOG
+		va_list args1;
+		char buf[2 * MAX_LOG_MSG + 1];
+
+		va_copy(args1, args);
+		vsnprintf(buf, sizeof(buf), format, args1);
+		va_end(args1);
+#endif
+
 		/* timestamp setup */
 		time_t t = time(NULL);
 		struct tm tm;
@@ -138,15 +142,21 @@ vlog_message(const int facility, const char* format, va_list args)
 
 		if (log_console && __test_bit(DONT_FORK_BIT, &debug))
 			fprintf(stderr, "%s: %s\n", timestamp, buf);
+#ifdef ENABLE_LOG_TO_FILE
 		if (log_file) {
 			fprintf(log_file, "%s: %s\n", timestamp, buf);
 			if (always_flush_log_file)
 				fflush(log_file);
 		}
+#endif
 	}
 
 	if (!__test_bit(NO_SYSLOG_BIT, &debug))
+#if HAVE_VSYSLOG
+		vsyslog(facility, format, args);
+#else
 		syslog(facility, "%s", buf);
+#endif
 }
 
 void

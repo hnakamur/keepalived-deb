@@ -35,7 +35,17 @@ static int
 snmp_keepalived_log(__attribute__((unused)) int major, __attribute__((unused)) int minor, void *serverarg, __attribute__((unused)) void *clientarg)
 {
 	struct snmp_log_message *slm = (struct snmp_log_message*)serverarg;
-	log_message(slm->priority, "%s", slm->msg);
+	int slm_len = strlen(slm->msg);
+
+	if (slm_len && slm->msg[slm_len-1] == '\n')
+		slm_len--;
+	log_message(slm->priority, "%.*s", slm_len, slm->msg);
+
+	/* If we get an AgentX subagent connected message when we think
+	 * we are connected, we need to re-register the fds for epoll */
+	if (master->snmp_fdsetsize && slm->priority == 6)
+		snmp_epoll_reset(master);
+
 	return 0;
 }
 
@@ -321,6 +331,9 @@ snmp_unregister_mib(oid *myoid, size_t len)
 void
 snmp_agent_init(const char *snmp_socket, bool base_mib)
 {
+	if (snmp_running)
+		return;
+
 	log_message(LOG_INFO, "Starting SNMP subagent");
 	netsnmp_enable_subagent();
 	snmp_disable_log();
@@ -355,6 +368,9 @@ snmp_agent_init(const char *snmp_socket, bool base_mib)
 	netsnmp_ds_set_int(NETSNMP_DS_APPLICATION_ID,
 			   NETSNMP_DS_AGENT_AGENTX_PING_INTERVAL, 120);
 
+	/* Tell library not to raise SIGALRM */
+	netsnmp_ds_set_boolean(NETSNMP_DS_LIBRARY_ID, NETSNMP_DS_LIB_ALARM_DONT_USE_SIG, 1);
+
 	init_agent(global_name);
 	if (base_mib)
 		snmp_register_mib(global_oid, OID_LENGTH(global_oid), global_name,
@@ -363,15 +379,27 @@ snmp_agent_init(const char *snmp_socket, bool base_mib)
 				  sizeof(global_vars)/sizeof(struct variable8));
 	init_snmp(global_name);
 
+	master->snmp_timer_thread = thread_add_timer(master, snmp_timeout_thread, 0, TIMER_NEVER);
+
 	snmp_running = true;
 }
 
 void
 snmp_agent_close(bool base_mib)
 {
+	if (!snmp_running)
+		return;
+
 	if (base_mib)
 		snmp_unregister_mib(global_oid, OID_LENGTH(global_oid));
 	snmp_shutdown(global_name);
 
 	snmp_running = false;
 }
+
+#ifdef THREAD_DUMP
+void
+register_snmp_addresses(void)
+{
+}
+#endif

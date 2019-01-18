@@ -103,18 +103,21 @@ typedef struct _real_server {
 
 /* Virtual Server group definition */
 typedef struct _virtual_server_group_entry {
+	bool 				is_fwmark;
 	union {
 		struct {
 			struct sockaddr_storage	addr;
 			uint32_t	range;
+			unsigned	tcp_alive;
+			unsigned	udp_alive;
+			unsigned	sctp_alive;
 		};
-		uint32_t		vfwmark;
+		struct {
+			uint32_t	vfwmark;
+			unsigned	fwm4_alive;
+			unsigned	fwm6_alive;
+		};
 	};
-	unsigned			tcp_alive;
-	unsigned			udp_alive;
-	unsigned			sctp_alive;
-	unsigned			fwm4_alive;
-	unsigned			fwm6_alive;
 	bool				reloaded;
 } virtual_server_group_entry_t;
 
@@ -197,7 +200,7 @@ typedef struct _check_data {
 #define VS_SCRIPT_ISEQ(XS,YS) \
 	(!(XS) == !(YS) && \
 	 (!(XS) || \
-	  (!strcmp((XS)->cmd_str, (YS)->cmd_str) && \
+	  (!notify_script_compare((XS), (YS)) && \
 	   (XS)->uid == (YS)->uid && \
 	   (XS)->gid == (YS)->gid)))
 
@@ -224,6 +227,13 @@ typedef struct _check_data {
 			 (X)->forwarding_method       == (Y)->forwarding_method		&& \
 			 !(X)->virtualhost	      == !(Y)->virtualhost		&& \
 			 (!(X)->virtualhost || !strcmp((X)->virtualhost, (Y)->virtualhost)))
+
+#ifndef IP_VS_SVC_F_SCHED_MH_PORT
+#define IP_VS_SVC_F_SCHED_MH_PORT IP_VS_SVC_F_SCHED_SH_PORT
+#endif
+#ifndef IP_VS_SVC_F_SCHED_MH_FALLBACK
+#define IP_VS_SVC_F_SCHED_MH_FALLBACK IP_VS_SVC_F_SCHED_SH_FALLBACK
+#endif
 
 /* Global vars exported */
 extern check_data_t *check_data;

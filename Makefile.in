@@ -251,6 +251,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -260,6 +261,7 @@ EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 GENHASH_LIBS = @GENHASH_LIBS@
 GREP = @GREP@
+HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 HAVE_SPHINX_BUILD = @HAVE_SPHINX_BUILD@
 INSTALL = @INSTALL@
@@ -353,7 +355,7 @@ SUBDIRS = lib keepalived doc $(am__append_1) bin_install
 EXTRA_DIST = AUTHOR CONTRIBUTORS snap README.md
 doc_DATA = README
 MOSTLYCLEANFILES = README
-DISTCHECK_CONFIGURE_FLAGS = \
+AM_DISTCHECK_CONFIGURE_FLAGS = \
         --with-systemdsystemunitdir=$$dc_install_base/$(systemdsystemunitdir)
 
 all: all-recursive
@@ -883,11 +885,11 @@ clean-local-snap:
 
 tarball: dist
 
-rpm:
-@RPM_BIP_TRUE@	rpmbuild -ba --build-in-place keepalived.spec
-@RPM_BIP_FALSE@	@$(MAKE) dist
-@RPM_BIP_FALSE@	@cp -p keepalived-$(VERSION).tar.gz `rpm --eval "%{_sourcedir}"`
-@RPM_BIP_FALSE@	rpmbuild -ba keepalived.spec
+@RPM_TRUE@rpm:
+@RPM_TRUE@			@$(MAKE) dist
+@RPM_TRUE@@RPM_BIP_TRUE@	rpmbuild -ba --build-in-place keepalived.spec
+@RPM_TRUE@@RPM_BIP_FALSE@	@cp -p keepalived-$(VERSION).tar.gz `rpm --eval "%{_sourcedir}"`
+@RPM_TRUE@@RPM_BIP_FALSE@	rpmbuild -ba keepalived.spec
 
 debug:
 	@$(MAKE) DEBUG_LDFLAGS=-ggdb

@@ -38,6 +38,10 @@
 #include <linux/netfilter/ipset/ip_set.h>
 #endif
 
+#ifdef _WITH_NFTABLES_
+#include <linux/netfilter/nf_tables.h>
+#endif
+
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 #include <sys/resource.h>
 #endif
@@ -64,8 +68,7 @@
 #ifdef _WITH_VRRP_
 #define RX_BUFS_POLICY_MTU		0x01
 #define RX_BUFS_POLICY_ADVERT		0x02
-#define RX_BUFS_NO_SEND_RX		0x04
-#define RX_BUFS_SIZE			0x08
+#define RX_BUFS_SIZE			0x04
 #endif
 
 /* email link list */
@@ -79,6 +82,7 @@ typedef struct _data {
 	char				*network_namespace;	/* network namespace name */
 	bool				namespace_with_ipsets;	/* override for namespaces with ipsets on Linux < 3.13 */
 #endif
+	char				*local_name;
 	char				*instance_name;		/* keepalived instance name */
 	bool				linkbeat_use_polling;
 	char				*router_id;
@@ -90,8 +94,10 @@ typedef struct _data {
 	int				smtp_alert;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
+	bool				allow_if_changes;
 	bool				no_email_faults;
 	int				smtp_alert_vrrp;
+	char				*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
 #endif
 #ifdef _WITH_LVS_
@@ -99,6 +105,7 @@ typedef struct _data {
 	int				lvs_tcpfin_timeout;
 	int				lvs_udp_timeout;
 	int				smtp_alert_checker;
+	bool				checker_log_all_failures;
 #ifdef _WITH_VRRP_
 	struct lvs_syncd_config		lvs_syncd;
 #endif
@@ -117,7 +124,8 @@ typedef struct _data {
 	unsigned			vrrp_gna_interval;
 	bool				vrrp_lower_prio_no_advert;
 	bool				vrrp_higher_prio_send_advert;
-	int				vrrp_version;	/* VRRP version (2 or 3) */
+	int				vrrp_version;		/* VRRP version (2 or 3) */
+#ifdef _WITH_IPTABLES_
 	char				vrrp_iptables_inchain[XT_EXTENSION_MAXNAMELEN];
 	char				vrrp_iptables_outchain[XT_EXTENSION_MAXNAMELEN];
 #ifdef _HAVE_LIBIPSET_
@@ -125,6 +133,13 @@ typedef struct _data {
 	char				vrrp_ipset_address[IPSET_MAXNAMELEN];
 	char				vrrp_ipset_address6[IPSET_MAXNAMELEN];
 	char				vrrp_ipset_address_iface6[IPSET_MAXNAMELEN];
+#endif
+#endif
+#ifdef _WITH_NFTABLES_
+	char*				vrrp_nf_table_name;
+	int				vrrp_nf_chain_priority;
+	bool				vrrp_nf_counters;
+	bool				vrrp_nf_ifindex;
 #endif
 	bool				vrrp_check_unicast_src;
 	bool				vrrp_skip_check_adv_addr;
@@ -195,6 +210,10 @@ typedef struct _data {
 	bool				vrrp_netlink_cmd_rcv_bufs_force;
 	unsigned			vrrp_netlink_monitor_rcv_bufs;
 	bool				vrrp_netlink_monitor_rcv_bufs_force;
+#ifdef _WITH_CN_PROC_
+	unsigned			process_monitor_rcv_bufs;
+	bool				process_monitor_rcv_bufs_force;
+#endif
 #endif
 #ifdef _WITH_LVS_
 	unsigned			lvs_netlink_cmd_rcv_bufs;
@@ -220,7 +239,7 @@ extern data_t *old_global_data;	/* Old global configuration data - used during r
 /* Prototypes */
 extern void alloc_email(char *);
 extern data_t *alloc_global_data(void);
-extern void init_global_data(data_t *);
+extern void init_global_data(data_t *, data_t *);
 extern void free_global_data(data_t *);
 extern void dump_global_data(FILE *, data_t *);
 

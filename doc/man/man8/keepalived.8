@@ -1,4 +1,4 @@
-.TH KEEPALIVED "8" "April 2016"
+.TH KEEPALIVED "8" "July 2018"
 
 .na
 .nh
@@ -11,6 +11,8 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-f\fP|\fB\-\-use\-file\fP=FILE]
 [\fB\-P\fP|\fB\-\-vrrp\fP]
 [\fB\-C\fP|\fB\-\-check\fP]
+[\fB\-B\fP|\fB\-\-no_bfd\fP]
+[\fB\-\-all\fP]
 [\fB\-l\fP|\fB\-\-log\-console\fP]
 [\fB\-D\fP|\fB\-\-log\-detail\fP]
 [\fB\-S\fP|\fB\-\-log\-facility\fP={0-7}]
@@ -27,13 +29,18 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-r\fP|\fB\-\-vrrp_pid\fP=FILE]
 [\fB\-c\fP|\fB\-\-checkers_pid\fP=FILE]
 [\fB\-a\fP|\fB\-\-address-monitoring\fP]
+[\fB\-b\fP|\fB\-\-bfd_pid\fP=FILE]
 [\fB\-s\fP|\fB\-\-namespace\fP=NAME]
 [\fB\-i\fP|\fB\-\-config-id\fP id]
 [\fB\-x\fP|\fB\-\-snmp\fP]
 [\fB\-A\fP|\fB\-\-snmp-agent-socket\fP=FILE]
+[\fB\-u\fP|\fB\-\-umask\fP=NUMBER]
 [\fB\-m\fP|\fB\-\-core\-dump\fP]
 [\fB\-M\fP|\fB\-\-core\-dump\-pattern\fP[=PATTERN]]
 [\fB\-\-signum\fP=SIGFUNC]
+[\fB\-t\fP|\fB\-\-config\-test\fP[=FILE]]
+[\fB\-\-perf\fP[={all|run|end}]]
+[\fB\-\-debug\fP[=debug-options]]
 [\fB\-v\fP|\fB\-\-version\fP]
 [\fB\-h\fP|\fB\-\-help\fP]
 
@@ -60,6 +67,12 @@ not use the IPVS load balancer.
 \fB -C, --check\fP
 Only run the healthcheck subsystem. This is useful for configurations
 that use the IPVS load balancer with a single director with no failover.
+.TP
+\fB -B, --no_bfd\fP
+Don't run the BFD subsystem.
+.TP
+\fB --all\fP
+Run all subsystems, even if they have no configuration.
 .TP
 \fB -l, --log-console\fP
 Log messages to the local console. The default behavior is to log
@@ -126,6 +139,11 @@ a network namespace is being used.
 \fB -a, --address-monitoring\fP
 Log all address additions/deletions reported by netlink.
 .TP
+\fB -b, --bfd_pid\fP=FILE
+Use the specified pidfile for the BFD child process. The default pidfile
+for the BFD child process is "/var/run/keepalived_bfd.pid" unless
+a network namespace is being used.
+.TP
 \fB -s, --namespace\fP=NAME
 Run keepalived in network namespace NAME. See
 .B NAMESPACES
@@ -140,6 +158,9 @@ Enable the SNMP subsystem.
 .TP
 \fB -A, --snmp-agent-socket\fP=FILE
 Use the specified socket for connection to SNMP master agent.
+.TP
+\fB -u, --umask\fP=NUMBER
+The umask specified in the usual numeric way - see man umask(2)
 .TP
 \fB -m, --core-dump\fP
 Override the RLIMIT_CORE hard and soft limits to enable keepalived to
@@ -166,12 +187,88 @@ For example, to stop keepalived running, execute:
 kill -s $(keepalived --signum=STOP) $(cat /var/run/keepalived.pid)
 .fi
 .TP
+\fB -t, --config-test\fP[=FILE]
+Keepalived will check the configuration file and exit with non-zero exit
+status if there are errors in the configuration, otherwise it exits with
+exit status 0 (see \fBExit status\fP below for details).
+
+Rather that writing to syslog, it will write diagnostic messages to stderr
+unless file is specified, in which case it will write to the file.
+.TP
+\fB --perf\fP[={all|run|end}]
+Record perf data for vrrp process. Data will be written to /perf_vrrp.data.
+The data recorded is for use with the perf tool.
+.TP
+\fB --debug\fP[=debug-options]]
+Enables debug options if they have been compiled into keepalived.
+\fIdebug-options\fP is made up of a sequence of strings of the form Ulll.
+.br
+The upper case letter specifies the debug option, and the lower case letters
+specify for which processes the option is to be enabled.
+.br
+If a debug option is not followed by any lower case letters, the debug option
+is enabled for all processes.
+.PP
+.RS
+The characters to identify the processes are:
+.TS
+tab(@);
+c l
+c l.
+Chr@Process
+_
+p@Parent process
+b@BFD process
+c@Checker process
+v@VRRP process
+.TE
+.PP
+The characters used to identify the debug options are:
+.TS
+tab(@);
+c l.
+Chr@Debug option
+_
+D@Epoll thread dump
+E@Epoll debug
+F@VRRP fd debug
+N@Netlink timers
+X@Regex timers
+M@Email alert debug
+T@Timer debug
+S@TSM debug
+R@Regex debug
+.TE
+.PP
+\fBExample:\fP --debug=DvEcvNR
+.RE
+.TP
 \fB -v, --version\fP
 Display the version and exit.
 .TP
 \fB -h, --help\fP
 Display this help message and exit.
-
+.SS "Exit status:"
+.TP
+0
+if OK
+.TP
+1
+if unable to malloc memory
+.TP
+2
+if cannot initialise subsystems
+.TP
+3
+if running with --config-test and configuration cannot be run
+.TP
+4
+if running with --config-test and there are configuration errors but keepalived
+will run after modifying the configuration
+.TP
+5
+if running with --config-test and script security hasn't been enabled but scripts
+are configured.
 .SH NAMESPACES
 .B keepalived
 can be run in a network namespace (see
@@ -235,7 +332,7 @@ Write statistics info to
 .LP
 .TP
 .B SIGFUNC=JSON
-Write configuration data is JSON format to
+Write configuration data in JSON format to
 .B /tmp/keepalived.json
 .LP
 

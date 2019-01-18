@@ -3,9 +3,9 @@
  *              <www.linuxvirtualserver.org>. It monitor & manipulate
  *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        Process management
+ * Part:        vrrp_nftables.c include file.
  *
- * Author:      Alexandre Cassen, <acassen@linux-vs.org>
+ * Author:      Quentin Armitage, <quentin@armitage.org.uk>
  *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,28 +17,24 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2018 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _PROCESS_H
-#define _PROCESS_H
+#ifndef _VRRP_NFTABLES_H
+#define _VRRP_NFTABLES_H
 
-#include <sys/types.h>
+#include "config.h"
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-#define	RT_RLIMIT_DEFAULT	1000
-#endif
+#include "list.h"
+#include "vrrp.h"
+#include "vrrp_ipaddress.h"
 
-extern void set_process_dont_swap(size_t);
-extern void set_process_priority(int);
-extern void set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-			           int,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-			           int,
-#endif
-#endif
-				   int, int);
+#define	DEFAULT_NFTABLES_TABLE	"keepalived"
 
+extern void nft_add_addresses(vrrp_t *);
+extern void nft_remove_addresses(vrrp_t *);
+extern void nft_remove_addresses_iplist(list);
+extern void nft_cleanup(void);
+extern void nft_end(void);
 
 #endif

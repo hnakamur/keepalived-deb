@@ -11,6 +11,15 @@
 /* Define to 1 if need to call g_type_init() */
 #undef DBUS_NEED_G_TYPE_INIT
 
+/* The default configuration file */
+#undef DEFAULT_CONFIG_FILE
+
+/* Define if appending to log files is allowed */
+#undef ENABLE_LOG_FILE_APPEND
+
+/* Define if enabling logging to files */
+#undef ENABLE_LOG_TO_FILE
+
 /* Defined here if not found in <net/ethernet.h>. */
 #undef ETHERTYPE_IPV6
 
@@ -87,6 +96,10 @@
    you don't. */
 #undef HAVE_DECL_IFLA_MACVLAN_MODE
 
+/* Define to 1 if you have the declaration of `IFLA_VRF_MAX', and to 0 if you
+   don't. */
+#undef HAVE_DECL_IFLA_VRF_MAX
+
 /* Define to 1 if you have the declaration of `IPV4_DEVCONF_ACCEPT_LOCAL', and
    to 0 if you don't. */
 #undef HAVE_DECL_IPV4_DEVCONF_ACCEPT_LOCAL
@@ -134,6 +147,10 @@
 /* Define to 1 if you have the declaration of `IPVS_SVC_ATTR_STATS64', and to
    0 if you don't. */
 #undef HAVE_DECL_IPVS_SVC_ATTR_STATS64
+
+/* Define to 1 if you have the declaration of `IP_MULTICAST_ALL', and to 0 if
+   you don't. */
+#undef HAVE_DECL_IP_MULTICAST_ALL
 
 /* Define to 1 if you have the declaration of `IP_VS_SVC_F_ONEPACKET', and to
    0 if you don't. */
@@ -187,6 +204,10 @@
    don't. */
 #undef HAVE_DECL_RTA_PREF
 
+/* Define to 1 if you have the declaration of `RTA_TTL_PROPAGATE', and to 0 if
+   you don't. */
+#undef HAVE_DECL_RTA_TTL_PROPAGATE
+
 /* Define to 1 if you have the declaration of `RTA_VIA', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTA_VIA
@@ -218,6 +239,9 @@
 /* Define to 1 if you have the `dup2' function. */
 #undef HAVE_DUP2
 
+/* Define to 1 if you have the `epoll_create1' function. */
+#undef HAVE_EPOLL_CREATE1
+
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
 
@@ -238,9 +262,6 @@
 
 /* Define to 1 if ipset supports iface type */
 #undef HAVE_IPSET_ATTR_IFACE
-
-/* Define to 1 if you have the <json.h> header file. */
-#undef HAVE_JSON_H
 
 /* Define to 1 if you have the `crypto' library (-lcrypto). */
 #undef HAVE_LIBCRYPTO
@@ -266,9 +287,6 @@
 /* Define to 1 if you have the <libiptc/libxtc.h> header file. */
 #undef HAVE_LIBIPTC_LIBXTC_H
 
-/* Define to 1 if you have the <libnfnetlink/libnfnetlink.h> header file. */
-#undef HAVE_LIBNFNETLINK_LIBNFNETLINK_H
-
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
 
@@ -277,6 +295,9 @@
 
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
+
+/* Define to 1 if you have the <linux/cn_proc.h> header file. */
+#undef HAVE_LINUX_CN_PROC_H
 
 /* Define to 1 if you have the <linux/ethtool.h> header file. */
 #undef HAVE_LINUX_ETHTOOL_H
@@ -307,6 +328,9 @@
 
 /* Define to 1 if you have the <linux/ip_vs.h> header file. */
 #undef HAVE_LINUX_IP_VS_H
+
+/* Define to 1 if you have the <linux/netfilter/nf_tables.h> header file. */
+#undef HAVE_LINUX_NETFILTER_NF_TABLES_H
 
 /* Define to 1 if you have the <linux/netfilter/xt_set.h> header file. */
 #undef HAVE_LINUX_NETFILTER_XT_SET_H
@@ -351,12 +375,6 @@
 /* Define to 1 if you have the <netlink/netlink.h> header file. */
 #undef HAVE_NETLINK_NETLINK_H
 
-/* Define to 1 if you have the <netlink/route/link.h> header file. */
-#undef HAVE_NETLINK_ROUTE_LINK_H
-
-/* Define to 1 if you have the <netlink/route/link/inet.h> header file. */
-#undef HAVE_NETLINK_ROUTE_LINK_INET_H
-
 /* Define to 1 if you have the `netsnmp_enable_subagent' function. */
 #undef HAVE_NETSNMP_ENABLE_SUBAGENT
 
@@ -369,6 +387,9 @@
 
 /* Define to 1 if you have the <net-snmp/agent/util_funcs.h> header file. */
 #undef HAVE_NET_SNMP_AGENT_UTIL_FUNCS_H
+
+/* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined */
+#undef HAVE_NFTNL_EXPR_LOOKUP_FLAGS
 
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
@@ -476,6 +497,9 @@
 /* Define to 1 if you have the <sys/types.h> header file. */
 #undef HAVE_SYS_TYPES_H
 
+/* Define to 1 if you have the `TLS_method' function. */
+#undef HAVE_TLS_METHOD
+
 /* Define to 1 if you have the `uname' function. */
 #undef HAVE_UNAME
 
@@ -487,6 +511,9 @@
 
 /* Define to 1 if you have the <vfork.h> header file. */
 #undef HAVE_VFORK_H
+
+/* Define to 1 if you have the `vsyslog' function. */
+#undef HAVE_VSYSLOG
 
 /* Define to 1 if `fork' works. */
 #undef HAVE_WORKING_FORK
@@ -518,6 +545,9 @@
 /* Define the ipset library name */
 #undef IPSET_LIB_NAME
 
+/* Defined to value in <linux/in.h> if not in <netinet/in.h> */
+#undef IP_MULTICAST_ALL
+
 /* configure options specified */
 #undef KEEPALIVED_CONFIGURE_OPTIONS
 
@@ -527,6 +557,9 @@
 /* Define to add guard _UAPI_IP_SET_H before including
    <libipset/linux_ip_set.h> */
 #undef LIBIPSET_H_ADD_UAPI_IP_SET_H_GUARD
+
+/* Define to 1 if libipset library version prior to v7 */
+#undef LIBIPSET_PRE_V7_COMPAT
 
 /* Define to 1 if libipvs can use netlink */
 #undef LIBIPVS_USE_NL
@@ -542,9 +575,6 @@
 
 /* Define the nl-3 library name */
 #undef NL3_LIB_NAME
-
-/* Define the nl-route-3.0 library name */
-#undef NL3_ROUTE_LIB_NAME
 
 /* Define the nl library name */
 #undef NL_LIB_NAME
@@ -570,6 +600,12 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* Define printf format specifier for rlim_t */
+#undef PRI_rlim_t
+
+/* Define to 1 if <linux/rtnetlink.h> needs <sys/socket.h> */
+#undef RTNETLINK_H_NEEDS_SYS_SOCKET_H
+
 /* Dummy definition if not defined in system headers */
 #undef SCHED_RESET_ON_FORK
 
@@ -578,6 +614,9 @@
 
 /* The system options from which the package is built */
 #undef SYSTEM_OPTIONS
+
+/* Define to 1 to build with thread dumping support */
+#undef THREAD_DUMP
 
 /* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
    */
@@ -595,11 +634,20 @@
 /* Define to 1 to build with debugging support */
 #undef _DEBUG_
 
+/* Define to 1 to enable asserts */
+#undef _ENABLE_ASSERT_
+
+/* Define to 1 to build with epoll_wait() debugging support */
+#undef _EPOLL_DEBUG_
+
+/* Define to 1 to build with epoll thread dumping support */
+#undef _EPOLL_THREAD_DUMP_
+
+/* Consider ${with_fixed_if_type} interfaces to be unchangeable */
+#undef _FIXED_IF_TYPE_
+
 /* Define to 1 if have FIB routing support */
 #undef _HAVE_FIB_ROUTING_
-
-/* Define to 1 if <net/if.h> and <netlink/route/link.h> namespace collision */
-#undef _HAVE_IF_H_LINK_H_COLLISION_
 
 /* Define to 1 if have IPv4 netlink device configuration */
 #undef _HAVE_IPV4_DEVCONF_
@@ -642,6 +690,9 @@
 /* Define to 1 if have SSL_set_tlsext_host_name() */
 #undef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 
+/* Define to 1 if have kernel VRF support */
+#undef _HAVE_VRF_
+
 /* Define to 1 if have MAC VLAN support */
 #undef _HAVE_VRRP_VMAC_
 
@@ -666,8 +717,8 @@
 /* Define to 1 to build with netlink command timers support */
 #undef _NETLINK_TIMERS_
 
-/* Define to 1 to build with select debugging support */
-#undef _SELECT_DEBUG_
+/* Define to 1 to build with regex debugging support */
+#undef _REGEX_DEBUG_
 
 /* Define to 1 to build with smtp-alert debugging support */
 #undef _SMTP_ALERT_DEBUG_
@@ -676,8 +727,11 @@
    instances */
 #undef _SNMP_REPLY_V3_FOR_V2_
 
-/* Define to 1 to build with timer debugging support */
-#undef _TIMER_DEBUG_
+/* Define to 1 if want stricter configuration checking */
+#undef _STRICT_CONFIG_
+
+/* Define to 1 to build with set time logging */
+#undef _TIMER_CHECK_
 
 /* Define to 1 to build with TSM debugging support */
 #undef _TSM_DEBUG_
@@ -697,8 +751,17 @@
    #define below would cause a syntax error. */
 #undef _UINT8_T
 
+/* Define to 1 if using iptables command enabled */
+#undef _USE_IPTABLES_CMD_
+
+/* Define to 1 to build with vrrp fd debugging support */
+#undef _VRRP_FD_DEBUG_
+
 /* Define to 1 if have BFD support */
 #undef _WITH_BFD_
+
+/* Define to 1 if have linux/cn_proc.h */
+#undef _WITH_CN_PROC_
 
 /* Define to 1 to have DBUS support */
 #undef _WITH_DBUS_
@@ -709,7 +772,13 @@
 /* Define to 1 to build with thread dumping support */
 #undef _WITH_DUMP_THREADS_
 
-/* Define to 1 to build with json output support */
+/* Define to 1 if using iptables or nftables */
+#undef _WITH_FIREWALL_
+
+/* Define to 1 if want iptables support */
+#undef _WITH_IPTABLES_
+
+/* Define to 1 to build with JSON output support */
 #undef _WITH_JSON_
 
 /* Define to 1 if have IPVS support */
@@ -718,8 +787,20 @@
 /* Define to 1 if have IPVS 64 bit stats */
 #undef _WITH_LVS_64BIT_STATS_
 
+/* Define to 1 if want nftables support */
+#undef _WITH_NFTABLES_
+
+/* Define to 1 to build with perf support */
+#undef _WITH_PERF_
+
 /* Define to 1 if using pthreads */
 #undef _WITH_PTHREADS_
+
+/* Define to 1 to build with HTTP_GET regex checking */
+#undef _WITH_REGEX_CHECK_
+
+/* Define to 1 to include regex timers */
+#undef _WITH_REGEX_TIMERS_
 
 /* Define to 1 to have SHA1 support */
 #undef _WITH_SHA1_
@@ -760,6 +841,9 @@
 
 /* Define to 1 if want ARRP authentication support */
 #undef _WITH_VRRP_AUTH_
+
+/* Define __always_inline if libc does not define it */
+#undef __always_inline
 
 /* Define to empty if `const' does not conform to ANSI C. */
 #undef const

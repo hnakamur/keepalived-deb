@@ -30,14 +30,13 @@
 #include <stddef.h>
 #ifdef _MEM_CHECK_
 #include <sys/types.h>
+#include <sys/stat.h>
 #else
 #include <stdlib.h>
 #endif
 
 /* Local defines */
 #ifdef _MEM_CHECK_
-
-#define MAX_ALLOC_LIST 2048*4*4
 
 #define MALLOC(n)    ( keepalived_malloc((n), \
 		      (__FILE__), (char *)(__FUNCTION__), (__LINE__)) )
@@ -51,16 +50,18 @@ extern size_t mem_allocated;
 
 /* Memory debug prototypes defs */
 extern void memcheck_log(const char *, const char *, const char *, const char *, int);
-extern void *keepalived_malloc(size_t, char *, char *, int)
+extern void *keepalived_malloc(size_t, const char *, const char *, int)
 		__attribute__((alloc_size(1))) __attribute__((malloc));
-extern int keepalived_free(void *, char *, char *, int);
-extern void *keepalived_realloc(void *, size_t, char *, char *, int)
+extern void keepalived_free(void *, const char *, const char *, int);
+extern void *keepalived_realloc(void *, size_t, const char *, const char *, int)
 		__attribute__((alloc_size(2)));
 
+extern void keepalived_alloc_dump(void);
 extern void mem_log_init(const char *, const char *);
 extern void skip_mem_dump(void);
 extern void enable_mem_log_termination(void);
 
+extern void update_mem_check_log_perms(mode_t);
 #else
 
 extern void *zalloc(unsigned long size);
