@@ -1,6 +1,8 @@
 keepalived (1:2.0.11-1ubuntu1ppa1~ubuntu18.04.1) bionic; urgency=medium
 
   * New upstream version 2.0.11
+  * Add libsystemd-dev to Build-Depends
+  * Use Linux kernel headers from linux-headers-generic package
 
  -- Hiroaki Nakamura <hnakamur@gmail.com>  Fri, 18 Jan 2019 09:10:26 +0900
 
