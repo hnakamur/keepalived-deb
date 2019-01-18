@@ -17,6 +17,7 @@ Build-Depends: autoconf,
                iptables-dev,
                linux-libc-dev,
                libsystemd-dev,
+               linux-headers-generic,
                dh-autoreconf,
                pkg-config
 Standards-Version: 3.9.6
