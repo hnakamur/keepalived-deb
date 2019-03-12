@@ -62,6 +62,9 @@
 #include "scheduler.h"
 #endif
 
+/* For load testing recvmsg() */
+/* #define DEBUG_RECVMSG */
+
 /* global vars */
 timeval_t garp_next_time;
 thread_t *garp_thread;
@@ -780,56 +783,159 @@ vrrp_dispatcher_read(sock_t * sock)
 	vrrphdr_t *hd;
 	ssize_t len = 0;
 	int prev_state = 0;
-	unsigned proto = 0;
-	struct sockaddr_storage src_addr;
-	socklen_t src_addr_len = sizeof(src_addr);
+	struct sockaddr_storage src_addr = { .ss_family = AF_UNSPEC };
 	vrrp_t vrrp_lookup;
-
-	/* Clean the read buffer */
-	memset(vrrp_buffer, 0, vrrp_buffer_len);
-
-	/* read & affect received buffer */
-	len = recvfrom(sock->fd_in, vrrp_buffer, vrrp_buffer_len, 0,
-		       (struct sockaddr *) &src_addr, &src_addr_len);
-	hd = vrrp_get_header(sock->family, vrrp_buffer, &proto);
-
-	vrrp_lookup.vrid = hd->vrid;
-	vrrp = rb_search(&sock->rb_vrid, &vrrp_lookup, rb_vrid, vrrp_vrid_cmp);
-
-	/* If no instance found => ignore the advert */
-	if (!vrrp)
-		return sock->fd_in;
-
-	if (vrrp->state == VRRP_STATE_FAULT ||
-	    vrrp->state == VRRP_STATE_INIT) {
-		/* We just ignore a message received when we are in fault state or
-		 * not yet fully initialised */
-		return sock->fd_in;
-	}
-
-	vrrp->pkt_saddr = src_addr;
-
-	prev_state = vrrp->state;
-
-	if (vrrp->state == VRRP_STATE_BACK)
-		vrrp_state_backup(vrrp, vrrp_buffer, len);
-	else if (vrrp->state == VRRP_STATE_MAST) {
-		if (vrrp_state_master_rx(vrrp, vrrp_buffer, len))
-			vrrp_state_leave_master(vrrp, false);
-	} else
-		log_message(LOG_INFO, "(%s) In dispatcher_read with state %d", vrrp->iname, vrrp->state);
-
-	/* handle instance synchronization */
-#ifdef _TSM_DEBUG_
-	if (do_tsm_debug)
-		log_message(LOG_INFO, "Read [%s] TSM transition : [%d,%d] Wantstate = [%d]",
-			vrrp->iname, prev_state, vrrp->state, vrrp->wantstate);
+	char control_buf[64];
+	struct iovec iovec = { .iov_base = vrrp_buffer, .iov_len = vrrp_buffer_len };
+	struct msghdr msghdr = { .msg_name = &src_addr, .msg_namelen = sizeof(src_addr),
+				 .msg_iov = &iovec, .msg_iovlen = 1,
+				 .msg_control = control_buf, .msg_controllen = sizeof(control_buf) };
+	struct cmsghdr *cmsg;
+	bool expected_cmsg;
+	unsigned eintr_count;
+	unsigned long rx_vrid_map[BIT_WORD(256 + BIT_PER_LONG - 1)] = { 0 };
+	bool terminate_receiving = false;
+#ifdef DEBUG_RECVMSG
+	unsigned recv_data_count = 0;
 #endif
-	VRRP_TSM_HANDLE(prev_state, vrrp);
 
-	/* If we have sent an advert, reset the timer */
-	if (vrrp->state != VRRP_STATE_MAST || !vrrp->lower_prio_no_advert)
-		vrrp_init_instance_sands(vrrp);
+	/* Strategy here is to handle incoming adverts pending into socket recvq
+	 * but stop if receive 2nd advert for a VRID on socket (this applies to
+	 * both configured and unconfigured VRIDs).
+	 * Seems a good tradeoff while simulating */
+	while (!terminate_receiving) {
+		/* read & affect received buffer */
+		eintr_count = 0;
+		while ((len = recvmsg(sock->fd_in, &msghdr, MSG_TRUNC | MSG_CTRUNC)) == -1 &&
+		       check_EINTR(errno) && eintr_count++ < 10);
+		if (len < 0) {
+#ifdef DEBUG_RECVMSG
+			if (check_EINTR(errno))
+				log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before terminating loop"
+						    , sock->fd_in, eintr_count);
+#endif
+
+			if (!check_EAGAIN(errno))
+				log_message(LOG_INFO, "recvmsg(%d) returned %d (%m)"
+						    , sock->fd_in, errno);
+#ifdef DEBUG_RECVMSG
+			else if (recv_data_count == 0)
+				log_message(LOG_INFO, "recvmsg(%d) returned EAGAIN without any data being received"
+						    , sock->fd_in);
+
+			if (recv_data_count != 1)
+				log_message(LOG_INFO, "recvmsg(%d) loop received %u packets"
+						    , sock->fd_in, recv_data_count);
+#endif
+			break;
+		}
+
+#ifdef DEBUG_RECVMSG
+		if (eintr_count)
+			log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before returning %ld"
+					    , sock->fd_in, eintr_count, len);
+#endif
+
+		/* Don't attempt to process data if no data received */
+		if (len == 0) {
+			log_message(LOG_INFO, "recvmsg(%d) returned data length 0", sock->fd_in);
+			continue;
+		}
+
+#ifdef DEBUG_RECVMSG
+		recv_data_count++;
+#endif
+
+		if (msghdr.msg_flags & MSG_TRUNC) {
+			log_message(LOG_INFO, "recvmsg(%d) message truncated from %zd to %zd bytes"
+					    , sock->fd_in, len, vrrp_buffer_len);
+			continue;
+		}
+
+		if (msghdr.msg_flags & MSG_CTRUNC) {
+			log_message(LOG_INFO, "recvmsg(%d), control message truncated from %zd to %zd bytes"
+					    , sock->fd_in, sizeof(control_buf), msghdr.msg_controllen);
+			msghdr.msg_controllen = 0;
+		}
+
+		/* Check the received data includes at least the IP, possibly
+		 * the AH header and the VRRP header */
+		if (!(hd = vrrp_get_header(sock->family, vrrp_buffer, len)))
+			break;
+
+		/* Defense strategy here is to handle no more than one advert
+		 * per VRID in order to flush socket rcvq...
+		 * This is a best effort mitigation */
+		if (__test_and_set_bit(hd->vrid, rx_vrid_map))
+			terminate_receiving = true;
+
+		vrrp_lookup.vrid = hd->vrid;
+		vrrp = rb_search(&sock->rb_vrid, &vrrp_lookup, rb_vrid, vrrp_vrid_cmp);
+
+		/* No instance found => ignore the advert */
+		if (!vrrp)
+			continue;
+
+		if (vrrp->state == VRRP_STATE_FAULT || vrrp->state == VRRP_STATE_INIT) {
+			/* We just ignore a message received when we are in fault state or
+			 * not yet fully initialised */
+			continue;
+		}
+
+		/* Save non packet data */
+		vrrp->pkt_saddr = src_addr;
+		vrrp->hop_limit = -1;           /* Default to not received */
+		vrrp->multicast_pkt = false;
+		for (cmsg = CMSG_FIRSTHDR(&msghdr); cmsg; cmsg = CMSG_NXTHDR(&msghdr, cmsg)) {
+			if (cmsg->cmsg_level == IPPROTO_IPV6) {
+				expected_cmsg = true;
+
+#ifdef IPV6_RECVHOPLIMIT
+				if (cmsg->cmsg_type == IPV6_HOPLIMIT &&
+				    cmsg->cmsg_len - sizeof(struct cmsghdr) == sizeof(unsigned int))
+					vrrp->hop_limit = *(unsigned int *)CMSG_DATA(cmsg);
+				else
+#endif
+#ifdef IPV6_RECVPKTINFO
+				if (cmsg->cmsg_type == IPV6_PKTINFO &&
+				    cmsg->cmsg_len - sizeof(struct cmsghdr) == sizeof(struct in6_pktinfo))
+					vrrp->multicast_pkt = IN6_IS_ADDR_MULTICAST(&((struct in6_pktinfo *)CMSG_DATA(cmsg))->ipi6_addr);
+				else
+#endif
+					expected_cmsg = false;
+			} else
+				expected_cmsg = false;
+
+			if (!expected_cmsg)
+				log_message(LOG_INFO, "fd %d, unexpected control msg len %zd, level %d, type %d"
+						    , sock->fd_in, cmsg->cmsg_len
+						    , cmsg->cmsg_level, cmsg->cmsg_type);
+		}
+
+		prev_state = vrrp->state;
+
+		if (vrrp->state == VRRP_STATE_BACK)
+			vrrp_state_backup(vrrp, hd, vrrp_buffer, len);
+		else if (vrrp->state == VRRP_STATE_MAST) {
+			if (vrrp_state_master_rx(vrrp, hd, vrrp_buffer, len))
+				vrrp_state_leave_master(vrrp, false);
+		} else
+			log_message(LOG_INFO, "(%s) In dispatcher_read with state %d"
+					    , vrrp->iname, vrrp->state);
+
+
+		/* handle instance synchronization */
+#ifdef _TSM_DEBUG_
+		if (do_tsm_debug)
+			log_message(LOG_INFO, "Read [%s] TSM transition : [%d,%d] Wantstate = [%d]"
+					    , vrrp->iname, prev_state, vrrp->state, vrrp->wantstate);
+#endif
+		VRRP_TSM_HANDLE(prev_state, vrrp);
+
+		/* If we have sent an advert, reset the timer */
+		if (vrrp->state != VRRP_STATE_MAST || !vrrp->lower_prio_no_advert)
+			vrrp_init_instance_sands(vrrp);
+	}
 
 	return sock->fd_in;
 }
@@ -853,7 +959,7 @@ vrrp_read_dispatcher_thread(thread_t * thread)
 	/* register next dispatcher thread */
 	if (fd != -1)
 		sock->thread = thread_add_read_sands(thread->master, vrrp_read_dispatcher_thread,
-					       sock, fd, vrrp_compute_timer(sock));
+						     sock, fd, vrrp_compute_timer(sock));
 
 	return 0;
 }
@@ -1022,95 +1128,94 @@ vrrp_script_child_thread(thread_t * thread)
 }
 
 /* Delayed ARP/NA thread */
+static int
+vrrp_arpna_send(vrrp_t *vrrp, list l, timeval_t *n)
+{
+	ip_address_t *ipaddress;
+	interface_t *ifp;
+	element e;
+
+	if (LIST_ISEMPTY(l))
+		return -1;
+
+	LIST_FOREACH(l, ipaddress, e) {
+		if (!ipaddress->garp_gna_pending)
+			continue;
+
+		if (!ipaddress->set) {
+			ipaddress->garp_gna_pending = false;
+			continue;
+		}
+
+		ifp = IF_BASE_IFP(ipaddress->ifp);
+
+		/* This should never happen */
+		if (!ifp->garp_delay) {
+			ipaddress->garp_gna_pending = false;
+			continue;
+		}
+
+		/* IPv4 handling */
+		if (!IP_IS6(ipaddress)) {
+			if (timercmp(&time_now, &ifp->garp_delay->garp_next_time, >=)) {
+				send_gratuitous_arp_immediate(ifp, ipaddress);
+				ipaddress->garp_gna_pending = false;
+			} else {
+				vrrp->garp_pending = true;
+				if (timercmp(&ifp->garp_delay->garp_next_time, n, <))
+					*n = ifp->garp_delay->garp_next_time;
+			}
+			continue;
+		}
+
+		/* IPv6 handling */
+		if (timercmp(&time_now, &ifp->garp_delay->gna_next_time, >=)) {
+			ndisc_send_unsolicited_na_immediate(ifp, ipaddress);
+			ipaddress->garp_gna_pending = false;
+		} else {
+			vrrp->gna_pending = true;
+			if (timercmp(&ifp->garp_delay->gna_next_time, n, <))
+				*n = ifp->garp_delay->gna_next_time;
+		}
+	}
+
+	return 0;
+}
+
 int
 vrrp_arp_thread(thread_t *thread)
 {
-	element e, a;
-	list l;
-	ip_address_t *ipaddress;
+	vrrp_t *vrrp;
+	element e;
 	timeval_t next_time = {
 		.tv_sec = INT_MAX	/* We're never going to delay this long - I hope! */
 	};
-	interface_t *ifp;
-	vrrp_t *vrrp;
-	enum {
-		VIP,
-		EVIP
-	} i;
 
 	set_time_now();
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
 		if (!vrrp->garp_pending && !vrrp->gna_pending)
 			continue;
 
 		vrrp->garp_pending = false;
 		vrrp->gna_pending = false;
 
-		if (vrrp->state != VRRP_STATE_MAST ||
-		    !vrrp->vipset)
+		if (vrrp->state != VRRP_STATE_MAST || !vrrp->vipset)
 			continue;
 
-		for (i = VIP; i <= EVIP; i++) {
-			l = (i == VIP) ? vrrp->vip : vrrp->evip;
-
-			if (!LIST_ISEMPTY(l)) {
-				for (a = LIST_HEAD(l); a; ELEMENT_NEXT(a)) {
-					ipaddress = ELEMENT_DATA(a);
-					if (!ipaddress->garp_gna_pending)
-						continue;
-					if (!ipaddress->set) {
-						ipaddress->garp_gna_pending = false;
-						continue;
-					}
-
-					ifp = IF_BASE_IFP(ipaddress->ifp);
-
-					/* This should never happen */
-					if (!ifp->garp_delay) {
-						ipaddress->garp_gna_pending = false;
-						continue;
-					}
-
-					if (!IP_IS6(ipaddress)) {
-						if (timercmp(&time_now, &ifp->garp_delay->garp_next_time, >=)) {
-							send_gratuitous_arp_immediate(ifp, ipaddress);
-							ipaddress->garp_gna_pending = false;
-						}
-						else {
-							vrrp->garp_pending = true;
-							if (timercmp(&ifp->garp_delay->garp_next_time, &next_time, <))
-								next_time = ifp->garp_delay->garp_next_time;
-						}
-					}
-					else {
-						if (timercmp(&time_now, &ifp->garp_delay->gna_next_time, >=)) {
-							ndisc_send_unsolicited_na_immediate(ifp, ipaddress);
-							ipaddress->garp_gna_pending = false;
-						}
-						else {
-							vrrp->gna_pending = true;
-							if (timercmp(&ifp->garp_delay->gna_next_time, &next_time, <))
-								next_time = ifp->garp_delay->gna_next_time;
-						}
-					}
-				}
-			}
-		}
+		vrrp_arpna_send(vrrp, vrrp->vip, &next_time);
+		vrrp_arpna_send(vrrp, vrrp->evip, &next_time);
 	}
 
 	if (next_time.tv_sec != INT_MAX) {
 		/* Register next timer tracker */
 		garp_next_time = next_time;
-
 		garp_thread = thread_add_timer(thread->master, vrrp_arp_thread, NULL,
-						 timer_long(timer_sub_now(next_time)));
+					       timer_long(timer_sub_now(next_time)));
+		return 0;
 	}
-	else
-		garp_thread = NULL;
 
+	garp_thread = NULL;
 	return 0;
 }
 

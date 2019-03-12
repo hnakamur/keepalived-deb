@@ -62,6 +62,7 @@
 
 /* data handlers */
 /* Global def handlers */
+#ifdef _WITH_LINKBEAT_
 static void
 use_polling_handler(vector_t *strvec)
 {
@@ -70,6 +71,7 @@ use_polling_handler(vector_t *strvec)
 
 	global_data->linkbeat_use_polling = true;
 }
+#endif
 static void
 routerid_handler(vector_t *strvec)
 {
@@ -648,6 +650,33 @@ vrrp_gna_interval_handler(vector_t *strvec)
 
 	if (global_data->vrrp_gna_interval >= 1 * TIMER_HZ)
 		log_message(LOG_INFO, "The vrrp_gna_interval is very large - %s seconds", FMT_STR_VSLOT(strvec, 1));
+}
+static void
+vrrp_min_garp_handler(vector_t *strvec)
+{
+	int res = false;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid value for vrrp_min_garp specified");
+			return;
+		}
+
+		if (!res)
+			return;
+	}
+
+	/* Set to only send 1 gratuitous ARP/NA message with no repeat, but don't
+	 * overwrite any parameters already set. */
+	if (global_data->vrrp_garp_rep == VRRP_GARP_REP)
+		global_data->vrrp_garp_rep = 1;
+	if (global_data->vrrp_garp_refresh.tv_sec == VRRP_GARP_REFRESH)
+		global_data->vrrp_garp_refresh.tv_sec = 0;
+	if (global_data->vrrp_garp_refresh_rep == VRRP_GARP_REFRESH_REP)
+		global_data->vrrp_garp_refresh_rep = 0;
+	if (global_data->vrrp_garp_delay == VRRP_GARP_DELAY)
+		global_data->vrrp_garp_delay = 0;
 }
 static void
 vrrp_lower_prio_no_advert_handler(vector_t *strvec)
@@ -1531,7 +1560,9 @@ void
 init_global_keywords(bool global_active)
 {
 	/* global definitions mapping */
+#ifdef _WITH_LINKBEAT_
 	install_keyword_root("linkbeat_use_polling", use_polling_handler, global_active);
+#endif
 #if HAVE_DECL_CLONE_NEWNET
 	install_keyword_root("net_namespace", &net_namespace_handler, global_active);
 	install_keyword_root("namespace_with_ipsets", &namespace_ipsets_handler, global_active);
@@ -1577,6 +1608,7 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
 	install_keyword("vrrp_garp_interval", &vrrp_garp_interval_handler);
 	install_keyword("vrrp_gna_interval", &vrrp_gna_interval_handler);
+	install_keyword("vrrp_min_garp", &vrrp_min_garp_handler);
 	install_keyword("vrrp_lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("vrrp_higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
 	install_keyword("vrrp_version", &vrrp_version_handler);

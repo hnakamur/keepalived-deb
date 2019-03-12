@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.0.11], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.0.13], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -182,6 +182,8 @@ AC_ARG_ENABLE(checksum_compat,
   [AS_HELP_STRING([--disable-checksum-compat], [compile without v1.3.6 and earlier VRRPv3 unicast checksum compatibility])])
 AC_ARG_ENABLE(routes,
   [AS_HELP_STRING([--disable-routes], [compile without ip rules/routes])])
+AC_ARG_ENABLE(linkbeat,
+  [AS_HELP_STRING([--disable-linkbeat], [build without linkbeat support])])
 AC_ARG_ENABLE(gnu-std-paths,
   [AS_HELP_STRING([--enable-gnu-std-paths], [use GNU standard paths for pid files etc])])
 AC_ARG_ENABLE(dynamic-linking,
@@ -206,6 +208,8 @@ AC_ARG_ENABLE(nftables,
   [], [NFTABLES_SILENT=Yes])
 AC_ARG_ENABLE(libnl,
   [AS_HELP_STRING([--disable-libnl], [compile without libnl])])
+AC_ARG_ENABLE(track-process,
+  [AS_HELP_STRING([--disable-track-process], [build without track-process functionality])])
 AC_ARG_ENABLE(strict-config-checks,
   [AS_HELP_STRING([--enable-strict-config-checks], [build with strict configuration checking])])
 AC_ARG_ENABLE(hardening,
@@ -242,6 +246,8 @@ AC_ARG_ENABLE(tsm-debug,
   [  --enable-tsm-debug      compile with TSM debugging support])
 AC_ARG_ENABLE(vrrp-fd-debug,
   [  --enable-vrrp-fd-debug  compile with vrrp fd debugging support])
+AC_ARG_ENABLE(eintr-debug,
+  [AS_HELP_STRING([--enable-eintr-debug],[compile with EINTR debugging support, set to check/nocheck to check/not check for EINTR])])
 AC_ARG_ENABLE(asserts,
   [AS_HELP_STRING([--enable-asserts], [compile with assert() enabled])])
 AC_ARG_WITH(fixed-if-type,
@@ -343,9 +349,11 @@ AS_IF([test .$enable_vrrp = .no],
     AS_IF([test .$enable_vrrp_auth = .no], [AC_MSG_ERROR([disable-vrrp-auth requires vrrp])])
     AS_IF([test .$enable_checksum_compat = .no], [AC_MSG_ERROR([disable-checksum-compat requires vrrp])])
     AS_IF([test .$enable_routes = .no], [AC_MSG_ERROR([disable-routes requires vrrp])])
+    AS_IF([test .$enable_linkbeat = .no], [AC_MSG_ERROR([disable-linkbeat requires vrrp])])
     AS_IF([test .$enable_bfd = .yes], [AC_MSG_ERROR([enable-bfd requires vrrp])])
     AS_IF([test .$enable_iptables != .no], [AC_MSG_ERROR([enable-iptables requires vrrp])])
     AS_IF([test .$enable_nftables != .no], [AC_MSG_ERROR([enable-nftables requires vrrp])])
+    AS_IF([test .$enable_track_process = .yes], [AC_MSG_ERROR([enable-track-process requires vrrp])])
   ])
 AS_IF([test .$enable_iptables = .no],
   [
@@ -561,6 +569,57 @@ AC_SUBST(KA_LDFLAGS)
 AC_SUBST(KA_LIBS)
 # AC_SUBST(KA_LIBTOOLFLAGS)
 
+# Check if unaligned memory access is supported (for ARM not supported prior to ARMv6 processors)
+AC_MSG_CHECKING([for unaligned memory access])
+AC_RUN_IFELSE(
+  [
+    AC_LANG_PROGRAM(
+      [[
+        #include <limits.h>
+        #include <endian.h>
+
+        #if __BYTE_ORDER == __BIG_ENDIAN
+        #if ULONG_MAX == 0xffffffffffffffffUL
+        #define CHK_VAL       0x1234567890abcdefUL
+        #elif ULONG_MAX == 0xffffffffUL
+        #define CHK_VAL       0x12345678UL
+        #else
+        #define CHK_VAL       0x1234UL
+        #endif
+        #elif __BYTE_ORDER == __LITTLE_ENDIAN
+        #if ULONG_MAX == 0xffffffffffffffffUL
+        #define CHK_VAL       0xefcdab9078563412UL
+        #elif ULONG_MAX == 0xffffffffUL
+        #define CHK_VAL       0x78563412UL
+        #else
+        #define CHK_VAL       0x3412UL
+        #endif
+        #else
+        #error Neither big nor little endian - unsupported
+        #endif
+      ]],
+      [[
+        unsigned long arr[2] = { 0, 0 };
+        unsigned char *p = (unsigned char *)arr + 1;
+        unsigned i;
+
+        *(unsigned long *)p = CHK_VAL;
+
+        return !!(arr[0] == CHK_VAL || p[0] != 0x12 || p[1] != 0x34 || p[2] != 0x56);
+      ]]
+    )
+  ],
+  [AC_MSG_RESULT([yes])],
+  [
+    AC_MSG_RESULT([no])
+    AC_DEFINE([_NO_UNALIGNED_ACCESS_], [ 1 ], [Define to 1 if unaligned memory access not supported])
+  ],
+  [
+    AC_MSG_RESULT([unknown])
+    AC_MSG_WARN([Cannot determine if unaligned access supported. Assuming yes.])
+  ]
+ )
+
 # Checks for libraries.
 dnl clock_gettime() required -lt before glibc 2.17
 AC_MSG_CHECKING([for clock_gettime() requires -lrt])
@@ -694,6 +753,7 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
   main(int argc, char **argv)
   {
     int val = test_func(3);
+    return val;
   }
   ]])],
   [],
@@ -708,29 +768,12 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
     main(int argc, char **argv)
     {
       int val = test_func(3);
+      return val;
     }
     ]])],
     [AC_DEFINE([__always_inline], [__inline __attribute__ ((__always_inline__))], [Define  __always_inline if libc does not define it])],
     [AC_DEFINE([__always_inline], [inline], [Define __always_inline if libc does not define it])]
   )])
-CFLAGS="$SAV_CFLAGS"
-
-dnl - Check type of rlim_t for printf()
-SAV_CFLAGS="$CFLAGS"
-CFLAGS="$CFLAGS -Wformat -Werror"
-AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
-  #include <stdio.h>
-  #include <sys/resource.h>
-  int
-  main(int argc, char **argv)
-  {
-    rlim_t val = 23U;
-    printf("%llu", val);
-  }
-  ]])],
-  [AC_DEFINE([PRI_rlim_t], ["llu"], [Define printf format specifier for rlim_t])],
-  [AC_DEFINE([PRI_rlim_t], ["lu"], [Define printf format specifier for rlim_t])],
-  )
 CFLAGS="$SAV_CFLAGS"
 
 dnl - Do we want to override dynamic/static linking?
@@ -886,6 +929,16 @@ if test .$enable_vrrp != .no; then
   AC_CHECK_HEADERS([linux/rtnetlink.h], [], [AC_MSG_ERROR([Unusable linux/rtnetlink.h])], [$RTNETLINK_EXTRA_INCLUDE])
   CPPFLAGS="$SAV_CPPFLAGS"
 fi
+
+dnl ----[ Check for IPv6 Advanced API (RFC3542) - since Linux 2.6.14 ]----
+IPV6_ADVANCED_API=No
+AC_CHECK_DECLS([
+  IPV6_RECVHOPLIMIT,
+  IPV6_RECVPKTINFO],
+  [IPV6_ADVANCED_API=Yes],
+  [],
+  [[#include <netinet/ip6.h>]])
+AS_IF([test $IPV6_ADVANCED_API = Yes], [add_system_opt([IPV6_ADVANCED_API])])
 
 dnl ----[ Checks for libraries ]----
 NETLINK_VER=0
@@ -1093,7 +1146,7 @@ AS_IF([test .$enable_iptables != .no],
           break
         ])
       CPPFLAGS="$SAV_CPPFLAGS"
-    
+
       if test $USE_LIBIPTC = Yes; then
         add_pkg_config([--static libiptc], [IPTC])
         LIBS="$IPTC_LIBS"
@@ -1140,7 +1193,7 @@ AS_IF([test .$enable_iptables != .no],
           get_lib_name([xtables], [xtables_insmod])
           AC_DEFINE_UNQUOTED([XTABLES_LIB_NAME], [ "$LIB_NAME" ], [Define the xtables library name])
         fi
-    
+
         dnl ----[Check for ipset libraries]----
         SAV_CPPFLAGS="$CPPFLAGS"
         CPPFLAGS="$CPPFLAGS $kernelinc"
@@ -1153,7 +1206,7 @@ AS_IF([test .$enable_iptables != .no],
           fi
           SAV_LIBS=$LIBS
           LIBS="$IPTC_LIBS $IPSET_LIBS"
-    
+
           AC_CHECK_LIB(ipset, ipset_session_init,
     	[
     	  USE_LIBIPSET=Yes
@@ -1162,11 +1215,11 @@ AS_IF([test .$enable_iptables != .no],
     	      USE_LIBIPSET=No
     	      break
     	    ])
-    
+
     	  if test $USE_LIBIPSET = Yes; then
     	    AC_CHECK_LIB(xtables, xtables_insmod, [], [USE_LIBIPSET=No])
     	  fi
-    
+
     	  if test $USE_LIBIPSET = Yes; then
     	    dnl -- Need to use <libipset/linux_ip_set.h> for <linux/netfilter/xt_set.h> prior to Linux 3.4
     	    EXTRA_INCLUDE=
@@ -1183,7 +1236,7 @@ AS_IF([test .$enable_iptables != .no],
     	      ]
     	    )
     	  fi
-    
+
     	  if test $USE_LIBIPSET = Yes; then
     	    AC_DEFINE([_HAVE_LIBIPSET_], [ 1 ], [Define to 1 if have ipset library])
     	    $PKG_CONFIG --exists libipset
@@ -1205,7 +1258,7 @@ AS_IF([test .$enable_iptables != .no],
     	    else
     	      add_config_opt([LIBIPSET])
     	    fi
-    
+
     	    dnl -- xt_set_info_match first introduced in Linux 2.6.39 (initial implementation of ipsets)
     	    dnl -- xt_set_info_match_v1 declared since Linux 3.1
     	    AC_CHECK_MEMBER([struct xt_set_info_match_v1.match_set.index], [AC_DEFINE([HAVE_XT_SET_INFO_MATCH_V1], [ 1 ], [Define to 1 if have struct xt_set_info_match_v1])], [],
@@ -1225,14 +1278,14 @@ AS_IF([test .$enable_iptables != .no],
     		$EXTRA_INCLUDE
     		#include <linux/netfilter/xt_set.h>
     	      ])
-    
+
     	    dnl - ipset type iface introduced in Linux 3.1
     	    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
     	      #include <linux/netfilter/ipset/ip_set.h>
     	      int main(void) { int var = IPSET_ATTR_IFACE; }
     	      ]])],
     	      [AC_DEFINE([HAVE_IPSET_ATTR_IFACE], [ 1 ], [Define to 1 if ipset supports iface type])])
-    
+
     	    dnl - The include guard for <linux/netfilter/ipset/ip_set.h> has the leading _UAPI remove when
     	    dnl - the source code is processed to produce the actual header files.
     	    dnl - Unfortunately libipset provides a copy of the kernel headers, as <libipset/linux_ip_set*.h>,
@@ -1259,13 +1312,13 @@ AS_IF([test .$enable_iptables != .no],
     		 [AC_DEFINE([LIBIPSET_H_ADD_IP_SET_H_GUARD], [1], [Define to add guard _IP_SET_H before including <libipset/linux_ip_set.h>])])
     	      ])
     	  fi
-    
+
     	  if test $USE_LIBIPSET = Yes; then
     	    AC_MSG_CHECKING([for libipset version 7 or later])
     	    AC_COMPILE_IFELSE([AC_LANG_SOURCE(
     	      [[
     	        #include <libipset/session.h>
-    
+
     		void test_func(void)
     		{
     		  ipset_session_init(NULL, NULL);
@@ -1283,12 +1336,12 @@ AS_IF([test .$enable_iptables != .no],
     	])
           LIBS="$SAV_LIBS"
         fi
-    
+
         dnl -- XT_EXTENSION_MAXNAMELEN not defined until Linux 2.6.35
         AC_CHECK_DECL([XT_EXTENSION_MAXNAMELEN], [],
           [AC_DEFINE([XT_EXTENSION_MAXNAMELEN], [ (XT_FUNCTION_MAXNAMELEN - 1) ], [Define if <linux/netfilter/x_tables.h> doesnt define it])],
           [#include <linux/netfilter/x_tables.h>])
-    
+
         CPPFLAGS="$SAV_CPPFLAGS"
       fi
     fi
@@ -1310,41 +1363,43 @@ if test .${enable_nftables} != .no; then
   CPPFLAGS="$CPPFLAGS $kernelinc"
   AC_CHECK_HEADERS([linux/netfilter/nf_tables.h], [],
    [
+     AS_IF([test .${enable_nftables} = .yes], [AC_MSG_ERROR([nftables header files missing])])
      USE_NFTABLES=No
-     AC_MSG_ERROR([nftables header files missing])
    ])
   CPPFLAGS="$SAV_CPPFLAGS"
 
-  $PKG_CONFIG --exists libnftnl
-  if test $? -ne 0; then
-    USE_NFTABLES=No
-    AC_MSG_WARN([libnftnl missing])
-  fi
-  $PKG_CONFIG --exists libmnl
-  if test $? -ne 0; then
-    USE_NFTABLES=No
-    AC_MSG_WARN([libmnl missing])
-  fi
+  if test $USE_NFTABLES = Yes; then
+    $PKG_CONFIG --exists libnftnl
+    if test $? -ne 0; then
+      USE_NFTABLES=No
+      AC_MSG_WARN([libnftnl missing])
+    fi
+    $PKG_CONFIG --exists libmnl
+    if test $? -ne 0; then
+      USE_NFTABLES=No
+      AC_MSG_WARN([libmnl missing])
+    fi
 
-  if test $USE_NFTABLES != No; then
-    add_pkg_config([libnftnl])
-    add_pkg_config([libmnl])
-    AC_DEFINE([_WITH_NFTABLES_], [ 1 ], [Define to 1 if want nftables support])
-    add_config_opt([NFTABLES])
-    AC_MSG_CHECKING([whether NFTNL_EXPR_LOOKUP_FLAGS is defined])
-    AC_LINK_IFELSE([AC_LANG_SOURCE([[
-        #include <libnftnl/expr.h>
-        int main(void)
-        {
+    if test $USE_NFTABLES = Yes; then
+      add_pkg_config([libnftnl])
+      add_pkg_config([libmnl])
+      AC_DEFINE([_WITH_NFTABLES_], [ 1 ], [Define to 1 if want nftables support])
+      add_config_opt([NFTABLES])
+      AC_MSG_CHECKING([whether NFTNL_EXPR_LOOKUP_FLAGS is defined])
+      AC_LINK_IFELSE([AC_LANG_SOURCE([[
+          #include <libnftnl/expr.h>
+          int main(void)
+          {
 	int i = NFTNL_EXPR_LOOKUP_FLAGS;
 	return 0;
-        }
-      ]])], [
-        AC_MSG_RESULT(yes)
-        AC_DEFINE([HAVE_NFTNL_EXPR_LOOKUP_FLAGS], [ 1 ], [Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined])
-      ],[
-        AC_MSG_RESULT(no)
-      ])
+          }
+        ]])], [
+          AC_MSG_RESULT(yes)
+          AC_DEFINE([HAVE_NFTNL_EXPR_LOOKUP_FLAGS], [ 1 ], [Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined])
+        ],[
+          AC_MSG_RESULT(no)
+        ])
+    fi
   fi
 fi
 AM_CONDITIONAL([NFTABLES], [test $USE_NFTABLES = Yes])
@@ -1575,12 +1630,18 @@ if test "$enable_vrrp" != no; then
   fi
 
   dnl -- Check for process events connector - Linux v2.6.15
-  AC_CHECK_HEADERS([linux/cn_proc.h],
+  AS_IF([test .$enable_track_process != .no],
     [
-       add_system_opt([CN_PROC])
-       HAVE_CN_PROC=Yes
-       AC_DEFINE([_WITH_CN_PROC_], [ 1 ], [Define to 1 if have linux/cn_proc.h])
-    ])
+      add_system_opt([CN_PROC])
+      HAVE_CN_PROC=Yes
+      AC_DEFINE([_WITH_CN_PROC_], [ 1 ], [Define to 1 if have linux/cn_proc.h and track-process not disabled])
+      dnl -- PROC_EVENT_SID since Linux v2.6.32
+      dnl -- PROC_EVENT_PTRACE since Linux v3.1
+      dnl -- PROC_EVENT_COMM since Linux v3.2
+      dnl -- PROC_EVENT_COREDUMP since Linux v3.10
+      AC_CHECK_DECLS([PROC_EVENT_SID, PROC_EVENT_PTRACE, PROC_EVENT_COMM, PROC_EVENT_COREDUMP], [], [], [[#include <linux/cn_proc.h>]])
+    ],
+    [add_config_opt([DISABLE_TRACK_PROCESS])])
 fi
 AM_CONDITIONAL([WITH_VRRP], [test $VRRP_SUPPORT = Yes])
 AM_CONDITIONAL([VRRP_AUTH], [test $VRRP_AUTH_SUPPORT = Yes])
@@ -1648,6 +1709,17 @@ if test .$enable_vrrp != .no -a .$enable_routes != .no; then
   CPPFLAGS="$SAV_CPPFLAGS"
 fi
 AM_CONDITIONAL([FIB_ROUTING], [test $FIB_ROUTING_SUPPORT = Yes])
+
+dnl ----[ Check if linkbeat wanted ]----
+AS_IF([test .$enable_linkbeat = .no],
+  [
+    LINKBEAT_SUPPORT=No
+    add_config_opt([NO_LINKBEAT])
+  ],
+  [
+    LINKBEAT_SUPPORT=Yes
+    AC_DEFINE([_WITH_LINKBEAT_], [ 1 ], [Define to 1 if have linkbeat support])
+  ])
 
 dnl ----[ Checks for kernel IFLA_INET6_ADDR_GEN_MODE support ]----
 SAV_CPPFLAGS="$CPPFLAGS"
@@ -1941,7 +2013,7 @@ dnl ----[ check for realtime scheduling support ]----
 SAV_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS -D_GNU_SOURCE"
 dnl -- from Linux ?.?.?
-AC_CHECK_DECLS([SCHED_RR], 
+AC_CHECK_DECLS([SCHED_RR],
   [
     SCHED_RT_SUPPORT=Yes
     AC_DEFINE([_HAVE_SCHED_RT_], [ 1 ], [Define to 1 if have SCHED_RR])
@@ -1970,6 +2042,27 @@ else
   PID_DIR=/var
 fi
 AC_SUBST([PID_DIR])
+
+dnl - Check type of rlim_t for printf() - this check needs to be late on
+dnl - since _FILE_OFFSET_BITS (set when using netsnmp) alters sizeof(rlim_t)
+SAV_CFLAGS="$CFLAGS"
+CFLAGS="$CFLAGS $KA_CFLAGS -Wformat -Werror"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+  #include <stdio.h>
+  #include <sys/resource.h>
+  int
+  main(int argc, char **argv)
+  {
+    rlim_t val = 23U;
+    printf("%llu %d %p", val, argc, argv);
+
+    return 0;
+  }
+  ]])],
+  [AC_DEFINE([PRI_rlim_t], ["llu"], [Define printf format specifier for rlim_t])],
+  [AC_DEFINE([PRI_rlim_t], ["lu"], [Define printf format specifier for rlim_t])],
+  )
+CFLAGS="$SAV_CFLAGS"
 
 dnl ---[ check for sphinx-build executable ]----
 if test -z "$SPHINXBUILD"; then
@@ -2143,6 +2236,22 @@ if test ${ENABLE_LOG_FILE_APPEND} = Yes; then
   add_config_opt([LOG_FILE_APPEND])
 fi
 
+dnl ----[ Do we need to check for EINTR, or enable EINTR debugging code]----
+AS_IF([test .$enable_eintr_debug = .yes],
+  [
+    AC_DEFINE([DEBUG_EINTR], [ 1 ], [Define to test for and log errno == EINTR when no asynchronous signal handlers])
+    add_config_opt([EINTR_DEBUG])
+  ],
+  [
+    dnl --- While testing that EINTR checking is not necessary, default to still test ---
+    dnl --- When finished testing, change following to .$enable_eintr_debug = .check ---
+    AS_IF([test .$ac_cv_func_signalfd = .no -o \( .$enable_eintr_debug != .nocheck -a .$enable_eintr_debug != .no \)],
+      [
+        AC_DEFINE([CHECK_EINTR], [ 1 ], [Define if need to check for EINTR errno])
+        AS_IF([test .$ac_cv_func_signalfd != .no], [add_config_opt([EINTR_CHECK])])
+      ])
+  ])
+
 if test ${NEED_LIBDL} = Yes; then
   add_to_var([KA_LIBS], [-ldl])
 fi
@@ -2268,6 +2377,8 @@ if test ${VRRP_SUPPORT} = Yes; then
   echo "Use VRRP VMAC            : ${MACVLAN_SUPPORT}"
   echo "Use VRRP authentication  : ${VRRP_AUTH_SUPPORT}"
   echo "With ip rules/routes     : ${FIB_ROUTING_SUPPORT}"
+  echo "With track_process       : ${HAVE_CN_PROC}"
+  echo "With linkbeat            : ${LINKBEAT_SUPPORT}"
 fi
 echo "Use BFD Framework        : ${BFD_SUPPORT}"
 echo "SNMP vrrp support        : ${SNMP_VRRP_SUPPORT}"

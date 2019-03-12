@@ -19,7 +19,7 @@ endif
 
 SUBDIRS			+= bin_install
 
-EXTRA_DIST		= AUTHOR CONTRIBUTORS snap README.md
+EXTRA_DIST		= AUTHOR CONTRIBUTORS snap README.md build_setup
 
 doc_DATA		= README
 
@@ -63,8 +63,8 @@ tarball: dist
 
 @RPM_TRUE@rpm:
 @RPM_TRUE@			@$(MAKE) dist
+@RPM_TRUE@			@cp -p keepalived-$(VERSION).tar.gz `rpm --eval "%{_sourcedir}"`
 @RPM_TRUE@@RPM_BIP_TRUE@	rpmbuild -ba --build-in-place keepalived.spec
-@RPM_TRUE@@RPM_BIP_FALSE@	@cp -p keepalived-$(VERSION).tar.gz `rpm --eval "%{_sourcedir}"`
 @RPM_TRUE@@RPM_BIP_FALSE@	rpmbuild -ba keepalived.spec
 
 debug:

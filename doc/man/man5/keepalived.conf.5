@@ -33,6 +33,10 @@ Keepalived Core-Team.
 .SH PARAMETER SYNTAX
 \fB<BOOL>\fR
 is one of on|off|true|false|yes|no
+.br
+\fB<TIMER>\fR
+is a time value in seconds, including fractional seconds, e.g. 2.71828 or 3;
+resolution of timer is micro-seconds.
 .SH SCRIPTS
 There are three classes of scripts can be configured to be executed.
 
@@ -104,6 +108,7 @@ are:
 .SH GLOBAL CONFIGURATION
 contains subblocks of
 \fBGlobal definitions,
+Linkbeat interfaces,
 Static track groups,
 Static addresses,
 Static routes,\fR
@@ -139,8 +144,8 @@ and
 # Create pid files in /var/run/keepalived
 \fBuse_pid_dir\fR
 
-# Poll to detect media link failure otherwise attempt to use
-# ETHTOOL or MII interface
+# Poll to detect media link failure using ETHTOOL, MII or ioctl interface
+# otherwise uses netlink interface.
 \fBlinkbeat_use_polling\fR
 
 # Time for main process to allow for child processes to exit on termination
@@ -181,7 +186,7 @@ and
     # Sets default state for checker smtp_alerts
     \fBsmtp_alert_checker \fR<BOOL>
 
-    # Ssets logging all checker failes while checker up
+    # Sets logging all checker failes while checker up
     \fBchecker_log_all_failures \fR<BOOL>
 
     # Don't send smtp alerts for fault conditions
@@ -255,6 +260,14 @@ and
     # decimal, seconds (resolution usecs).
     # (default: 0)
     \fBvrrp_gna_interval \fR0.000001
+
+    # By default keepalived sends 5 gratuitions ARP/NA messages at a
+    # time, and after transitioning to MASTER sends a second block of
+    # 5 messages 5 seconds later.
+    # With modern switches this is unnecessary, so setting vrrp_min_garp
+    # causes only one ARP/NA message to be sent, with no repeat 5 seconds
+    # later.
+    \fBvrrp_min_garp \fR[<BOOL>]
 
     # If a lower priority advert is received, don't send another advert.
     # This causes adherence to the RFCs. Defaults to false, unless
@@ -533,6 +546,30 @@ and
     \fBumask \fR[NUMBER|BITS]
 }
 .fi
+.SH Linkbeat interfaces
+.PP
+The linkbeat_interfaces block allows specifying which interfaces should use polling
+via MII, Ethtool or ioctl status rather than rely on netlink status updates. This
+allows more granular control of global definition \fBlinkbeat_use_polling\fR.
+.PP
+This option is preferred over the deprecated use of \fBlinkbeat_use_polling\fR in
+a vrrp_instance block, since the latter only allows using linkbeat on the interface
+of the vrrp_instance itself, whereas \fRtrack_interface\fR and virtual_ipaddresses
+and virtual_iproutes may require monitoring other interfaces, which may need to use
+linkbeat polling.
+.PP
+The default polling type to use is MII, unless that isn't supported in which case
+ETHTOOL is used, and if that isn't supported then ioctl polling. The preferred type
+of polling to use can be specified with MII or ETHTOOL or IOCTL after the interface
+name, but if that type isn't supported, a supported type will be used.
+.PP
+The synfax for linkbeat_interfaces is:
+.nf
+    \fBlinkbeat_interfaces\fR {
+        eth2
+        enp2s0 ETHTOOL
+    }
+.fi
 .SH Static track groups
 .PP
 Static track groups are used to allow vrrp instances to track static addresses,
@@ -635,16 +672,25 @@ To force a route/rule to be IPv6, add the keyword "inet6".
 .nf
 The configuration block looks like:
 
-\fBvrrp_track_process\fR <STRING> {   # VRRP track file declaration
-    \fBprocess\fR <QUOTED_STRING>     # process to monitor
-    \fBweight\fR <-254..254>          # default weight (default is 1)
-    \fBquorum\fR NUM                  # minimum number of processes for success
-    \fBdelay\fR SECS                  # time to delay after process quorum lost before
-                                #   consider process failed (in fractions of second)
-    \fBfull_command\fR                # Normally process string is matched against the process name,
-                                #   as shown on the Name: line in /proc/PID/status.
-                                #   This option matches the full command line
-}
+    \fBvrrp_track_process\fR <STRING> {
+        # process to monitor
+        \fBprocess\fR <QUOTED_STRING>
+
+        # default weight (default is 1)
+        \fBweight\fR <-254..254>
+
+        # minimum number of processes for success
+        \fBquorum\fR NUM
+
+        # time to delay after process quorum lost before
+        #   consider process failed (in fractions of second)
+        \fBdelay\fR SECS
+
+        # Normally process string is matched against the process name,
+        #   as shown on the Name: line in /proc/PID/status.
+        #   This option matches the full command line
+        \fBfull_command\fR
+   }
 .fi
 .PP
 To avoid having to frequently run a track_script to monitor the existance
@@ -658,6 +704,12 @@ track_process will not (it is equivalent to pgrep "^ssh$").
 If full_command is used (equivalent to pgrep -f), /proc/PID/cmdline is used, but
 any updates to cmdline will not be detected (a process shouldn't normally change it,
 although it is possible with great care, for example systemd).
+.PP
+Prior to Linux v3.2 track_process will not support detection of changes to a process
+name, since the kernel did not notify changes of process name prior to 3.2. Most
+processes do not change their process name, but, for example, firefox forks processes
+that change their process name to "Web Content". The process name referred to here is
+the contents of /proc/PID/comm.
 .PP
 Quorum is the number of matching processes that must be run for an OK status.
 .PP
@@ -845,7 +897,7 @@ Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
 .nf
 The syntax for vrrp track file is :
 
-\fBvrrp_track_file \fR<STRING> {    # VRRP track file declaration
+\fBvrrp_track_file \fR<STRING> {
     # file to track (weight defaults to 1)
     \fBfile \fR<QUOTED_STRING>
 
@@ -1193,7 +1245,7 @@ The syntax for garp_group is :
     #   Use of this option is non-compliant and can cause problems; avoid
     #   using if possible, except when using unicast, where it can be helpful.
     \fBauthentication \fR{
-        # PASS||AH
+        # PASS|AH
         # PASS - Simple password (suggested)
         # AH - IPSEC (not recommended))
         \fBauth_type \fRPASS
@@ -1338,6 +1390,10 @@ The syntax for garp_group is :
     # Set socket receive buffer size (see global_defs
     # vrrp_rx_bufs_policy for explanation)
     \fBkernel_rx_buf_size\fR
+
+    # Set use of linkbeat for the interface of this VRRP instance. This option is
+    # deprecated - use linkbeat_interfaces block instead.
+    \fBlinkbeat_use_polling\fR
 }
 .fi
 .SH LVS CONFIGURATION
@@ -1374,7 +1430,7 @@ definitions. If you need to define a bunch of virtual server with exactly the sa
 real server topology then this feature will make your configuration much more readable
 and will optimize healthchecking task by only spawning one healthchecking where
 multiple virtual server declaration will spawn a dedicated healthchecker for every
-real server which will waste system ressources.
+real server which will waste system resources.
 .PP
 .nf
 The syntax for virtual_server_group is :
@@ -1414,9 +1470,6 @@ The syntax for virtual_server is :
 \fBvirtual_server \fR<IPADDR> <PORT>  |
 \fBvirtual_server fwmark \fR<INTEGER> |
 \fBvirtual_server group \fR<STRING> {
-    # delay timer for checker polling
-    \fBdelay_loop \fR<INTEGER>
-
     # LVS scheduler
     \fBlvs_sched \fRrr|wrr|lc|wlc|lblc|sh|mh|dh|fo|ovf|lblcr|sed|nq
 
@@ -1504,22 +1557,26 @@ The syntax for virtual_server is :
     # Sorry server LVS forwarding method
     \fBsorry_server_lvs_method \fRNAT|DR|TUN
 
+    # Optional connection timeout in seconds.
+    # The default is 5 seconds
+    \fBconnect_timeout \fR<TIMER>
+
     # Retry count to make additional checks if check
     # of an alive server fails. Default: 1 unless specified below
     \fBretry \fR<INTEGER>
 
-    # delay before retry
-    \fBdelay_before_retry \fR<INTEGER>
+    # delay before retry after failure
+    \fBdelay_before_retry \fR<TIMER>
 
     # Optional random delay to start the initial check
     # for maximum N seconds.
     # Useful to scatter multiple simultaneous
     # checks to the same RS. Enabled by default, with
     # the maximum at delay_loop. Specify 0 to disable
-    \fBwarmup \fR<INTEGER>
+    \fBwarmup \fR<TIMER>
 
     # delay timer for checker polling
-    \fBdelay_loop \fR<INTEGER>
+    \fBdelay_loop \fR<TIMER>
 
     # Set weight to 0 when healthchecker detects failure
     \fBinhibit_on_failure\fR
@@ -1554,10 +1611,11 @@ The syntax for virtual_server is :
         \fBvirtualhost \fR<STRING>
 
         \fBalpha \fR<BOOL>                    # see above
+        \fBconnect_timeout \fR<TIMER>         # see above
         \fBretry \fR<INTEGER>                 # see above
-        \fBdelay_before_retry \fR<INTEGER>    # see above
-        \fBwarmup \fR<INTEGER>                # see above
-        \fBdelay_loop \fR<INTEGER>            # see above
+        \fBdelay_before_retry \fR<TIMER>      # see above
+        \fBwarmup \fR<TIMER>                  # see above
+        \fBdelay_loop \fR<TIMER>              # see above
         \fBinhibit_on_failure \fR<BOOL>       # see above
         \fBlog_all_failures \fR<BOOL>         # log all failures when checker up
 
@@ -1589,19 +1647,16 @@ The syntax for virtual_server is :
             # originate the connection from
             \fBbind_port \fR<PORT>
 
-            # Optional connection timeout in seconds.
-            # The default is 5 seconds
-            \fBconnect_timeout \fR<INTEGER>
-
             # Optional fwmark to mark all outgoing
             # checker packets with
             \fBfwmark \fR<INTEGER>
 
             \fBalpha \fR<BOOL>                    # see above
+            \fBconnect_timeout \fR<TIMER>         # see above
             \fBretry \fR<INTEGER>                 # see above
-            \fBdelay_before_retry \fR<INTEGER>    # see above
-            \fBwarmup \fR<INTEGER>                # see above
-            \fBdelay_loop \fR<INTEGER>            # see above
+            \fBdelay_before_retry \fR<TIMER>      # see above
+            \fBwarmup \fR<TIMER>                  # see above
+            \fBdelay_loop \fR<TIMER>              # see above
             \fBinhibit_on_failure \fR<BOOL>       # see above
         }
 
