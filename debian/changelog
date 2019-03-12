@@ -1,3 +1,11 @@
+keepalived (1:2.0.13-1ubuntu1ppa1~18.04.1) bionic; urgency=medium
+
+  * Fix cofigure option, escape $ in Makefile
+  * Remove --with-kernel-dir option in configure
+  * New upstream version 2.0.13
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Tue, 12 Mar 2019 12:06:37 +0900
+
 keepalived (1:2.0.11-1ubuntu1ppa1~ubuntu18.04.1) bionic; urgency=medium
 
   * New upstream version 2.0.11
