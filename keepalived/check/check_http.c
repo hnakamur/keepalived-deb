@@ -1138,7 +1138,7 @@ http_handle_response(thread_t * thread, unsigned char digest[MD5_DIGEST_LENGTH]
 	/* Report a length mismatch the first time we get the specific difference */
 	if (req->content_len != SIZE_MAX && req->content_len != req->rx_bytes) {
 		if (url->len_mismatch != (ssize_t)req->content_len - (ssize_t)req->rx_bytes) {
-			log_message(LOG_INFO, "http_check for RS %s VS %s url %s%s: content_length (%lu) does not match received bytes (%lu)",
+			log_message(LOG_INFO, "http_check for RS %s VS %s url %s%s: content_length (%zu) does not match received bytes (%zu)",
 				    FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs), url->virtualhost ? url->virtualhost : "",
 				    url->path, req->content_len, req->rx_bytes);
 			url->len_mismatch = (ssize_t)req->content_len - (ssize_t)req->rx_bytes;
@@ -1274,7 +1274,7 @@ http_read_thread(thread_t * thread)
 		 MAX_BUFFER_LENGTH - req->len);
 
 	/* Test if data are ready */
-	if (r == -1 && (errno == EAGAIN || errno == EINTR)) {
+	if (r == -1 && (check_EAGAIN(errno) || check_EINTR(errno))) {
 		log_message(LOG_INFO, "Read error with server %s: %s"
 				    , FMT_HTTP_RS(checker)
 				    , strerror(errno));
@@ -1283,7 +1283,7 @@ http_read_thread(thread_t * thread)
 		return 0;
 	}
 
-	if (r == -1 || r == 0) {	/* -1:error , 0:EOF */
+	if (r <= 0) {	/* -1:error , 0:EOF */
 		/* All the HTTP stream has been parsed */
 		if (url->digest)
 			MD5_Final(digest, &req->context);

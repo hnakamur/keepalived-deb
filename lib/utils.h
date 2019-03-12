@@ -32,9 +32,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "vector.h"
-#ifdef _DEBUG_
+#if defined _DEBUG_ || defined DEBUG_EINTR
 #include "logger.h"
 #endif
 
@@ -54,6 +55,38 @@ typedef enum {
 	PERF_ALL,
 	PERF_END,
 } perf_t;
+#endif
+
+/* If signalfd() is used, we will have no signal handlers, and
+ * so we cannot get EINTR. If we cannot get EINTR, there is no
+ * point checking for it.
+ * If check_EINTR is defined as false, gcc will optimise out the
+ * test, and remove any surrounding while loop such as:
+ * while (recvmsg(...) == -1 && check_EINTR(errno)); */
+#if defined DEBUG_EINTR
+static inline bool
+check_EINTR(int xx)
+{
+	if ((xx) == EINTR) {
+		log_message(LOG_INFO, "%s:%s(%d) - EINTR returned", (__FILE__), (__FUNCTION__), (__LINE__));
+		return true;
+	}
+
+	return false;
+}
+#elif defined CHECK_EINTR
+#define check_EINTR(xx)	((xx) == EINTR)
+#else
+#define check_EINTR(xx)	(false)
+#endif
+
+/* Functions that can return EAGAIN also document that they can return
+ * EWOULDBLOCK, and that both should be checked. If they are the same
+ * value, that is unnecessary. */
+#if EAGAIN == EWOULDBLOCK
+#define check_EAGAIN(xx)	((xx) == EAGAIN)
+#else
+#define check_EAGAIN(xx)	((xx) == EAGAIN || (xx) == EWOULDBLOCK)
 #endif
 
 /* inline stuff */
@@ -99,14 +132,14 @@ static inline bool inaddr_equal(sa_family_t family, void *addr1, void *addr2)
 		struct in6_addr *a1 = (struct in6_addr *) addr1;
 		struct in6_addr *a2 = (struct in6_addr *) addr2;
 
-		if (__ip6_addr_equal(a1, a2))
-			return true;
-	} else if (family == AF_INET) {
+		return __ip6_addr_equal(a1, a2);
+	}
+
+	if (family == AF_INET) {
 		struct in_addr *a1 = (struct in_addr *) addr1;
 		struct in_addr *a2 = (struct in_addr *) addr2;
 
-		if (a1->s_addr == a2->s_addr)
-			return true;
+		return (a1->s_addr == a2->s_addr);
 	}
 
 	return false;
@@ -181,6 +214,7 @@ extern uint32_t inet_sockaddrip4(struct sockaddr_storage *);
 extern int inet_sockaddrip6(struct sockaddr_storage *, struct in6_addr *);
 extern int inet_inaddrcmp(int, const void *, const void *);
 extern int inet_sockaddrcmp(const struct sockaddr_storage *, const struct sockaddr_storage *);
+extern void format_mac_buf(char *, size_t, unsigned char *, size_t);
 extern char *get_local_name(void);
 extern bool string_equal(const char *, const char *);
 extern FILE *fopen_safe(const char *, const char *);

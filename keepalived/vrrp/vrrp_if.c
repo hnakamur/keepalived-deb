@@ -71,7 +71,10 @@
 
 /* Local vars */
 static list if_queue;
+#ifdef _WITH_LINKBEAT_
 static struct ifreq ifr;
+static int linkbeat_fd = -1;
+#endif
 
 static list old_garp_delay;
 
@@ -122,6 +125,9 @@ if_get_by_ifname(const char *ifname, if_lookup_t create)
 #ifdef _HAVE_VRRP_VMAC_
 	ifp->base_ifp = ifp;
 #endif
+	ifp->sin_addr_l = alloc_list(free_list_element_simple, NULL);
+	ifp->sin6_addr_l = alloc_list(free_list_element_simple, NULL);
+
 	if_add_queue(ifp);
 
 	if (create == IF_CREATE_IF_DYNAMIC)
@@ -181,12 +187,15 @@ reset_interface_queue(void)
 	garp_delay = NULL;
 
 	LIST_FOREACH(if_queue, ifp, e) {
+#ifdef _WITH_LINKBEAT_
 		ifp->linkbeat_use_polling = false;
+#endif
 		ifp->garp_delay = NULL;
 		free_list(&ifp->tracking_vrrp);
 	}
 }
 
+#ifdef _WITH_LINKBEAT_
 /* MII Transceiver Registers poller functions */
 static uint16_t
 if_mii_read(int fd, uint16_t phy_id, uint16_t reg_num)
@@ -204,7 +213,7 @@ if_mii_read(int fd, uint16_t phy_id, uint16_t reg_num)
 }
 
 #ifdef _INCLUDE_UNUSED_CODE_
-static void if_mii_dump(const uint16_t *mii_regs, size_t num_regs unsigned phy_id)
+static void if_mii_dump(const uint16_t *mii_regs, size_t num_regs, unsigned phy_id)
 {
 	int mii_reg;
 
@@ -239,113 +248,75 @@ if_mii_status(const int fd)
 
 // printf(" \nBasic Mode Status Register 0x%4.4x ... 0x%4.4x\n", bmsr, new_bmsr);
 
-	if (bmsr & BMSR_LSTATUS)
+	if (bmsr & BMSR_LSTATUS ||
+	    new_bmsr & BMSR_LSTATUS)
 		return LINK_UP;
-	else if (new_bmsr & BMSR_LSTATUS)
-		return LINK_UP;
-	else
-		return LINK_DOWN;
+
+	return LINK_DOWN;
 }
 
 static int
-if_mii_probe(const char *ifname)
+if_mii_probe(const int fd, const char *ifname)
 {
 	struct mii_ioctl_data *data = (struct mii_ioctl_data *)&ifr.ifr_data;
 	uint16_t phy_id;
-	int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-	int status;
-
-	if (fd < 0)
-		return -1;
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on mii_probe socket - %s (%d)", strerror(errno), errno);
-#endif
 
 	memset(&ifr, 0, sizeof (struct ifreq));
 	strcpy(ifr.ifr_name, ifname);
-	if (ioctl(fd, SIOCGMIIPHY, &ifr) < 0) {
-		close(fd);
+	if (ioctl(fd, SIOCGMIIPHY, &ifr) < 0)
 		return -1;
-	}
 
 	/* check if the driver reports BMSR using the MII interface, as we
 	 * will need this and we already know that some don't support it.
 	 */
 	phy_id = data->phy_id; /* save it in case it is overwritten */
 	data->reg_num = MII_BMSR;
-	if (ioctl(fd, SIOCGMIIREG, &ifr) < 0) {
-		close(fd);
+	if (ioctl(fd, SIOCGMIIREG, &ifr) < 0)
 		return -1;
-	}
 	data->phy_id = phy_id;
 
 	/* Dump the MII transceiver */
-	status = if_mii_status(fd);
-	close(fd);
-	return status;
+	return if_mii_status(fd);
 }
 
-static int
+static inline int
 if_ethtool_status(const int fd)
 {
 	struct ethtool_value edata;
 
 	edata.cmd = ETHTOOL_GLINK;
 	ifr.ifr_data = (caddr_t) & edata;
-	if (!ioctl(fd, SIOCETHTOOL, &ifr))
-		return (edata.data) ? 1 : 0;
-	return -1;
+	if (ioctl(fd, SIOCETHTOOL, &ifr))
+		return -1;
+
+	return (edata.data) ? LINK_UP : LINK_DOWN;
 }
 
 static int
-if_ethtool_probe(const char *ifname)
+if_ethtool_probe(const int fd, const char *ifname)
 {
-	int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	int status;
-
-	if (fd < 0)
-		return -1;
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on ethtool_probe socket - %s (%d)", strerror(errno), errno);
-#endif
 
 	memset(&ifr, 0, sizeof (struct ifreq));
 	strcpy(ifr.ifr_name, ifname);
 
 	status = if_ethtool_status(fd);
-	close(fd);
+
 	return status;
 }
 
 /* Returns false if interface is down */
 static bool
-if_ioctl_flags(interface_t *ifp)
+if_ioctl_flags(const int fd, interface_t *ifp)
 {
-	int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-
-	if (fd < 0)
-		return true;
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on ioctl_flags socket - %s (%d)", strerror(errno), errno);
-#endif
-
 	memset(&ifr, 0, sizeof (struct ifreq));
 	strcpy(ifr.ifr_name, ifp->ifname);
-	if (ioctl(fd, SIOCGIFFLAGS, &ifr) < 0) {
-		close(fd);
-		return true;
-	}
+	if (ioctl(fd, SIOCGIFFLAGS, &ifr) < 0)
+		return (errno != ENODEV) ? LINK_UP : LINK_DOWN;
 
-	close(fd);
-
-	return FLAGS_UP(ifr.ifr_flags);
+	return FLAGS_UP(ifr.ifr_flags) ? LINK_UP : LINK_DOWN;
 }
+#endif
 
 /* Interfaces lookup */
 static void
@@ -354,6 +325,9 @@ free_if(void *data)
 	interface_t *ifp = data;
 
 	free_list(&ifp->tracking_vrrp);
+	free_list(&ifp->sin_addr_l);
+	free_list(&ifp->sin6_addr_l);
+
 	FREE(data);
 }
 
@@ -444,35 +418,39 @@ dump_if(FILE *fp, void *data)
 {
 	interface_t *ifp = data;
 	char addr_str[INET6_ADDRSTRLEN];
-	char *mac_buf;
-	size_t mac_buf_len;
-	char *p;
-	size_t i;
+	char mac_buf[3 * sizeof ifp->hw_addr];
+	element e;
+	struct in_addr *addr_p;
+	struct in6_addr *addr6_p;
 
 	conf_write(fp, " Name = %s", ifp->ifname);
 	conf_write(fp, "   index = %u", ifp->ifindex);
 	conf_write(fp, "   IPv4 address = %s",
 			ifp->sin_addr.s_addr ? inet_ntop2(ifp->sin_addr.s_addr) : "(none)");
-	inet_ntop(AF_INET6, &ifp->sin6_addr, addr_str, sizeof(addr_str));
-	conf_write(fp, "   IPv6 address = %s", ifp->sin6_addr.s6_addr32[0] ? addr_str : "(none)");
+	if (!LIST_ISEMPTY(ifp->sin_addr_l)) {
+		conf_write(fp, "   Additional IPv4 addresses = %d", LIST_SIZE(ifp->sin_addr_l));
+		LIST_FOREACH(ifp->sin_addr_l, addr_p, e)
+			conf_write(fp, "     %s", inet_ntop2(addr_p->s_addr));
+	}
+	if (ifp->sin6_addr.s6_addr32[0]) {
+		inet_ntop(AF_INET6, &ifp->sin6_addr, addr_str, sizeof(addr_str));
+		conf_write(fp, "   IPv6 address = %s", addr_str);
+	} else
+		conf_write(fp, "   IPv6 address = (none)");
+	if (!LIST_ISEMPTY(ifp->sin6_addr_l)) {
+		conf_write(fp, "   Additional IPv6 addresses = %d", LIST_SIZE(ifp->sin6_addr_l));
+		LIST_FOREACH(ifp->sin6_addr_l, addr6_p, e) {
+			inet_ntop(AF_INET6, addr6_p, addr_str, sizeof(addr_str));
+			conf_write(fp, "     %s", addr_str);
+		}
+	}
 
 	if (ifp->hw_addr_len) {
-		mac_buf_len = 3 * ifp->hw_addr_len;
-		mac_buf = MALLOC(mac_buf_len);
-
-		for (i = 0, p = mac_buf; i < ifp->hw_addr_len; i++)
-			p += snprintf(p, mac_buf_len - (p - mac_buf), "%.2x%s",
-				      ifp->hw_addr[i], i < ifp->hw_addr_len -1 ? ":" : "");
-
+		format_mac_buf(mac_buf, sizeof mac_buf, ifp->hw_addr, ifp->hw_addr_len);
 		conf_write(fp, "   MAC = %s", mac_buf);
 
-		for (i = 0, p = mac_buf; i < ifp->hw_addr_len; i++)
-			p += snprintf(p, mac_buf_len - (p - mac_buf), "%.2x%s",
-				      ifp->hw_addr_bcast[i], i < ifp->hw_addr_len - 1 ? ":" : "");
-
+		format_mac_buf(mac_buf, sizeof mac_buf, ifp->hw_addr_bcast, ifp->hw_addr_len);
 		conf_write(fp, "   MAC broadcast = %s", mac_buf);
-
-		FREE(mac_buf);
 	}
 
 	conf_write(fp, "   State = %sUP, %sRUNNING%s%s%s%s%s%s", ifp->ifi_flags & IFF_UP ? "" : "not ", ifp->ifi_flags & IFF_RUNNING ? "" : "not ",
@@ -527,6 +505,7 @@ dump_if(FILE *fp, void *data)
 		break;
 	}
 
+#ifdef _WITH_LINKBEAT_
 	if (!ifp->linkbeat_use_polling)
 		conf_write(fp, "   NIC netlink status update");
 	else if (IF_MII_SUPPORTED(ifp))
@@ -535,6 +514,7 @@ dump_if(FILE *fp, void *data)
 		conf_write(fp, "   NIC support ETHTOOL GLINK interface");
 	else
 		conf_write(fp, "   NIC ioctl refresh polling");
+#endif
 #ifdef _HAVE_VRF_
 	if (ifp->vrf_master_ifp == ifp)
 		conf_write(fp, "   VRF master");
@@ -583,6 +563,56 @@ if_add_queue(interface_t * ifp)
 	list_add(if_queue, ifp);
 }
 
+#ifdef _WITH_LINKBEAT_
+static bool
+init_linkbeat_status(int fd, interface_t *ifp)
+{
+	int status;
+	bool if_up = false;
+	int configured_type = ifp->lb_type;
+
+	if ((!ifp->lb_type || ifp->lb_type == LB_MII)) {
+		if ((status = if_mii_probe(fd, ifp->ifname)) >= 0) {
+			ifp->lb_type = LB_MII;
+			if_up = !!status;
+		}
+		else
+			ifp->lb_type = 0;
+	}
+
+	if ((!ifp->lb_type || ifp->lb_type == LB_ETHTOOL)) {
+		if ((status = if_ethtool_probe(fd, ifp->ifname)) >= 0) {
+			ifp->lb_type = LB_ETHTOOL;
+			if_up = !!status;
+		} else {
+			/* If ETHTOOL was configured on i/f but doesn't work, try MII */
+			if (ifp->lb_type &&
+			    (status = if_mii_probe(fd, ifp->ifname)) >= 0) {
+				ifp->lb_type = LB_MII;
+				if_up = !!status;
+			}
+			else
+				ifp->lb_type = 0;
+		}
+	}
+
+	if ((!ifp->lb_type || ifp->lb_type == LB_IOCTL)) {
+		ifp->lb_type = LB_IOCTL;
+		if_up = true;
+	}
+
+	if (if_up)
+		if_up = if_ioctl_flags(fd, ifp);
+
+	if (configured_type && configured_type != ifp->lb_type)
+		log_message(LOG_INFO, "(%s): Configured linkbeat type %s not supported, using %s",
+				      ifp->ifname,
+				      configured_type == LB_MII ? "MII" : configured_type == LB_ETHTOOL ? "ETHTOOL" : "IOCTL",
+				      ifp->lb_type == LB_MII ? "MII" : ifp->lb_type == LB_ETHTOOL ? "ETHTOOL" : "IOCTL");
+
+	return if_up;
+}
+
 static int
 if_linkbeat_refresh_thread(thread_t * thread)
 {
@@ -591,17 +621,26 @@ if_linkbeat_refresh_thread(thread_t * thread)
 
 	was_up = IF_FLAGS_UP(ifp);
 
-	if (IF_MII_SUPPORTED(ifp))
-		if_up = if_mii_probe(ifp->ifname);
-	else if (IF_ETHTOOL_SUPPORTED(ifp))
-		if_up = if_ethtool_probe(ifp->ifname);
+	if (!ifp->ifindex) {
+		if_up = false;
+	} else {
+		if (!ifp->lb_type) {
+			/* If this is a new interface, we need to find linkbeat type */
+			if_up = init_linkbeat_status(linkbeat_fd, ifp);
+		} else {
+			if (IF_MII_SUPPORTED(ifp))
+				if_up = if_mii_probe(linkbeat_fd, ifp->ifname);
+			else if (IF_ETHTOOL_SUPPORTED(ifp))
+				if_up = if_ethtool_probe(linkbeat_fd, ifp->ifname);
 
-	/*
-	 * update ifp->flags to get the new IFF_RUNNING status.
-	 * Some buggy drivers need this...
-	 */
-	if (if_up)
-		if_up = if_ioctl_flags(ifp);
+			/*
+			 * update ifp->flags to get the new IFF_RUNNING status.
+			 * Some buggy drivers need this...
+			 */
+			if (if_up)
+				if_up = if_ioctl_flags(linkbeat_fd, ifp);
+		}
+	}
 
 	ifp->ifi_flags = if_up ? IFF_UP | IFF_RUNNING : 0;
 
@@ -613,6 +652,7 @@ if_linkbeat_refresh_thread(thread_t * thread)
 
 	/* Register next polling thread */
 	thread_add_timer(master, if_linkbeat_refresh_thread, ifp, POLLING_DELAY);
+
 	return 0;
 }
 
@@ -621,52 +661,67 @@ init_interface_linkbeat(void)
 {
 	interface_t *ifp;
 	element e;
-	int status;
 	bool linkbeat_in_use = false;
 	bool if_up;
 
-	for (e = LIST_HEAD(if_queue); e; ELEMENT_NEXT(e)) {
-		ifp = ELEMENT_DATA(e);
-
+	LIST_FOREACH(if_queue, ifp, e) {
 		if (!ifp->linkbeat_use_polling)
 			continue;
 
 		/* Don't poll an interface that we aren't using */
-		if (!ifp->tracking_vrrp)
+		if (!ifp->tracking_vrrp) {
+			log_message(LOG_INFO, "Turning off linkbeat for %s since not used for tracking", ifp->ifname);
+			ifp->linkbeat_use_polling = false;
+			ifp->lb_type = 0;
 			continue;
+		}
 
 #ifdef _HAVE_VRRP_VMAC_
 		/* netlink messages work for vmacs */
-		if (ifp->vmac_type)
+		if (ifp->vmac_type) {
+			log_message(LOG_INFO, "Turning off linkbeat for %s since netlink works for vmacs", ifp->ifname);
+			ifp->linkbeat_use_polling = false;
 			continue;
+		}
 #endif
 
-		linkbeat_in_use = true;
-		ifp->ifi_flags = IFF_UP | IFF_RUNNING;
-
-		ifp->lb_type = LB_IOCTL;
-		status = if_mii_probe(ifp->ifname);
-		if (status >= 0) {
-			ifp->lb_type = LB_MII;
-			if_up = !!status;
-		} else if ((status = if_ethtool_probe(ifp->ifname)) >= 0) {
-			ifp->lb_type = LB_ETHTOOL;
-			if_up = !!status;
+		if (linkbeat_fd == -1) {
+			if ((linkbeat_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0)) == -1) {
+				log_message(LOG_INFO, "open linkbeat init socket failed - errno %d - %m\n", errno);
+				return;
+			}
+#if !HAVE_DECL_SOCK_CLOEXEC
+			set_sock_flags(linkbeat_fd, F_SETFD, FD_CLOEXEC);
+#endif
 		}
-		else
-			if_up = true;
-		if (if_up)
-			if_up = if_ioctl_flags(ifp);
 
-		ifp->ifi_flags = if_up ? IFF_UP | IFF_RUNNING : 0;
+		linkbeat_in_use = true;
+		if (!ifp->ifindex) {
+			/* Interface doesn't exist yet */
+			ifp->ifi_flags = 0;
+		} else {
+			if_up = init_linkbeat_status(linkbeat_fd, ifp);
+
+			ifp->ifi_flags = if_up ? IFF_UP | IFF_RUNNING : 0;
+		}
 
 		/* Register new monitor thread */
 		thread_add_timer(master, if_linkbeat_refresh_thread, ifp, POLLING_DELAY);
 	}
 
 	if (linkbeat_in_use)
-		log_message(LOG_INFO, "Using MII-BMSR/ETHTOOL NIC polling thread...");
+		log_message(LOG_INFO, "Using MII-BMSR/ETHTOOL NIC polling thread(s)...");
 }
+
+void
+close_interface_linkbeat(void)
+{
+	if (linkbeat_fd != -1) {
+		close(linkbeat_fd);
+		linkbeat_fd = -1;
+	}
+}
+#endif
 
 /* Interface queue helpers*/
 void
@@ -732,7 +787,7 @@ if_join_vrrp_group(sa_family_t family, int *sd, interface_t *ifp)
 
 	if (ret < 0) {
 		log_message(LOG_INFO, "(%s) cant do IP%s_ADD_MEMBERSHIP errno=%s (%d)",
-			    ifp->ifname, (family == AF_INET) ? "" : "v6", strerror(errno), errno);
+			    ifp->ifname, (family == AF_INET) ? "" : "V6", strerror(errno), errno);
 		close(*sd);
 		*sd = -1;
 	}
@@ -1367,7 +1422,9 @@ update_added_interface(interface_t *ifp)
 void
 register_vrrp_if_addresses(void)
 {
+#ifdef _WITH_LINKBEAT_
 	register_thread_address("if_linkbeat_refresh_thread", if_linkbeat_refresh_thread);
+#endif
 #ifdef _HAVE_VRRP_VMAC_
 	register_thread_address("recreate_vmac_thread", recreate_vmac_thread);
 #endif

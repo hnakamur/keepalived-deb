@@ -5,11 +5,18 @@
 #define _CONFIG_H
   
 
+/* Define if need to check for EINTR errno */
+#undef CHECK_EINTR
+
 /* The configuration options from which the package is built */
 #undef CONFIGURATION_OPTIONS
 
 /* Define to 1 if need to call g_type_init() */
 #undef DBUS_NEED_G_TYPE_INIT
+
+/* Define to test for and log errno == EINTR when no asynchronous signal
+   handlers */
+#undef DEBUG_EINTR
 
 /* The default configuration file */
 #undef DEFAULT_CONFIG_FILE
@@ -116,6 +123,14 @@
    0 if you don't. */
 #undef HAVE_DECL_IPV4_DEVCONF_RP_FILTER
 
+/* Define to 1 if you have the declaration of `IPV6_RECVHOPLIMIT', and to 0 if
+   you don't. */
+#undef HAVE_DECL_IPV6_RECVHOPLIMIT
+
+/* Define to 1 if you have the declaration of `IPV6_RECVPKTINFO', and to 0 if
+   you don't. */
+#undef HAVE_DECL_IPV6_RECVPKTINFO
+
 /* Define to 1 if you have the declaration of `IPVS_DAEMON_ATTR_MCAST_GROUP',
    and to 0 if you don't. */
 #undef HAVE_DECL_IPVS_DAEMON_ATTR_MCAST_GROUP
@@ -171,6 +186,22 @@
 /* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
    */
 #undef HAVE_DECL_O_PATH
+
+/* Define to 1 if you have the declaration of `PROC_EVENT_COMM', and to 0 if
+   you don't. */
+#undef HAVE_DECL_PROC_EVENT_COMM
+
+/* Define to 1 if you have the declaration of `PROC_EVENT_COREDUMP', and to 0
+   if you don't. */
+#undef HAVE_DECL_PROC_EVENT_COREDUMP
+
+/* Define to 1 if you have the declaration of `PROC_EVENT_PTRACE', and to 0 if
+   you don't. */
+#undef HAVE_DECL_PROC_EVENT_PTRACE
+
+/* Define to 1 if you have the declaration of `PROC_EVENT_SID', and to 0 if
+   you don't. */
+#undef HAVE_DECL_PROC_EVENT_SID
 
 /* Define to 1 if you have the declaration of `RLIMIT_RTTIME', and to 0 if you
    don't. */
@@ -295,9 +326,6 @@
 
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
-
-/* Define to 1 if you have the <linux/cn_proc.h> header file. */
-#undef HAVE_LINUX_CN_PROC_H
 
 /* Define to 1 if you have the <linux/ethtool.h> header file. */
 #undef HAVE_LINUX_ETHTOOL_H
@@ -717,6 +745,9 @@
 /* Define to 1 to build with netlink command timers support */
 #undef _NETLINK_TIMERS_
 
+/* Define to 1 if unaligned memory access not supported */
+#undef _NO_UNALIGNED_ACCESS_
+
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
 
@@ -760,7 +791,7 @@
 /* Define to 1 if have BFD support */
 #undef _WITH_BFD_
 
-/* Define to 1 if have linux/cn_proc.h */
+/* Define to 1 if have linux/cn_proc.h and track-process not disabled */
 #undef _WITH_CN_PROC_
 
 /* Define to 1 to have DBUS support */
@@ -780,6 +811,9 @@
 
 /* Define to 1 to build with JSON output support */
 #undef _WITH_JSON_
+
+/* Define to 1 if have linkbeat support */
+#undef _WITH_LINKBEAT_
 
 /* Define to 1 if have IPVS support */
 #undef _WITH_LVS_
