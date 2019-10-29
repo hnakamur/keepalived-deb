@@ -28,6 +28,7 @@
 #include "global_data.h"
 #include "main.h"
 #include "utils.h"
+#include "warnings.h"
 
 #include <net-snmp/agent/agent_sysORTable.h>
 
@@ -72,7 +73,7 @@ snmp_header_list_table(struct variable *vp, oid *name, size_t *length,
 	void *scr;
 	oid target, current;
 
-	if (header_simple_table(vp, name, length, exact, var_len, write_method, -1))
+	if (header_simple_table(vp, name, length, exact, var_len, write_method, -1) != MATCH_SUCCEEDED)
 		return NULL;
 
 	if (LIST_ISEMPTY(dlist))
@@ -81,15 +82,17 @@ snmp_header_list_table(struct variable *vp, oid *name, size_t *length,
 	target = name[*length - 1];
 	current = 0;
 
-	for (e = LIST_HEAD(dlist); e; ELEMENT_NEXT(e)) {
-		scr = ELEMENT_DATA(e);
-		current++;
+	/* If there are insufficent entries in the list, just return no match */
+	if (LIST_SIZE(dlist) < target)
+		return NULL;
+
+	LIST_FOREACH(dlist, scr, e) {
+		if (++current < target)
+			/* No match found yet */
+			continue;
 		if (current == target)
 			/* Exact match */
 			return scr;
-		if (current < target)
-			/* No match found yet */
-			continue;
 		if (exact)
 			/* No exact match found */
 			return NULL;
@@ -97,7 +100,100 @@ snmp_header_list_table(struct variable *vp, oid *name, size_t *length,
 		name[*length - 1] = current;
 		return scr;
 	}
+
 	/* No match found at end */
+	return NULL;
+}
+
+/* This is the equivalent of snmp_header_list_table where each element of the first
+ * list has a list itself for which each element in turn needs to be returned. */
+element
+snmp_find_element(struct variable *vp, oid *name, size_t *length,
+	     int exact, size_t *var_len, WriteMethod **write_method,
+	     list list1, size_t list2_offset)
+{
+	oid *target, current[2];
+	int result;
+	size_t target_len;
+	element e, e1;
+	void *element_data;
+	__attribute__((unused)) void *dummy;
+	list list2;
+
+	*write_method = 0;
+	*var_len = sizeof(long);
+
+	if (LIST_ISEMPTY(list1))
+		return NULL;
+
+	if (exact && *length != (size_t)vp->namelen + 2)
+		return NULL;
+
+	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
+		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
+		*length = vp->namelen;
+	}
+
+	/* We search the best match: equal if exact, the lower OID in
+	   the set of the OID strictly superior to the target
+	   otherwise. */
+	target = &name[vp->namelen];   /* Our target match */
+	target_len = *length - vp->namelen;
+	current[0] = 0;
+
+	if (target_len && LIST_SIZE(list1) < target[0])
+		return NULL;
+
+	LIST_FOREACH(list1, element_data, e) {
+		current[0]++;
+
+		if (target_len) {
+			if (current[0] < target[0])
+				continue; /* Optimization: cannot be part of our set */
+			if (exact && current[0] > target[0])
+				return NULL;
+		}
+
+		list2 = *(list *)((char *)element_data + list2_offset);
+
+		if (target_len && LIST_SIZE(list2) < target[1]) {
+			if (exact)
+				return NULL;
+			continue;
+		}
+
+		current[1] = 0;
+		LIST_FOREACH(list2, dummy, e1) {
+			current[1]++;
+
+			/* Compare to our target match */
+			if (target_len) {
+				if ((result = snmp_oid_compare(current, 2, target,
+							       target_len)) < 0)
+					continue;
+
+				if (result == 0) {
+					if (!exact)
+						continue;
+
+					/* Got an exact match and asked for it */
+					return e1;
+				}
+
+				if (exact) {
+					/* result > 0, so no match */
+					return NULL;
+				}
+			}
+
+			/* This is our best match */
+			memcpy(target, current, sizeof(oid) * 2);
+			*length = (unsigned)vp->namelen + 2;
+			return e1;
+		}
+	}
+
+	/* No match at all */
 	return NULL;
 }
 
@@ -114,6 +210,7 @@ enum snmp_global_magic {
 	SNMP_TRAPS,
 	SNMP_LINKBEAT,
 	SNMP_LVSFLUSH,
+	SNMP_LVSFLUSH_ONSTOP,
 	SNMP_IPVS_64BIT_STATS,
 	SNMP_NET_NAMESPACE,
 	SNMP_DBUS,
@@ -128,6 +225,7 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	static unsigned long long_ret;
+	snmp_ret_t ret;
 
 	if (header_generic(vp, name, length, exact, var_len, write_method))
 		return NULL;
@@ -135,11 +233,13 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case SNMP_KEEPALIVEDVERSION:
 		*var_len = strlen(version_string);
-		return (u_char *)version_string;
+		ret.cp = version_string;
+		return ret.p;
 	case SNMP_ROUTERID:
 		if (!global_data->router_id) return NULL;
 		*var_len = strlen(global_data->router_id);
-		return (u_char *)global_data->router_id;
+		ret.cp = global_data->router_id;
+		return ret.p;
 	case SNMP_MAIL_SMTPSERVERADDRESSTYPE:
 		long_ret = (global_data->smtp_server.ss_family == AF_INET6)?2:1;
 		return (u_char *)&long_ret;
@@ -163,7 +263,8 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 	case SNMP_MAIL_EMAILFROM:
 		if (!global_data->email_from) return NULL;
 		*var_len = strlen(global_data->email_from);
-		return (u_char *)global_data->email_from;
+		ret.cp = global_data->email_from;
+		return ret.p;
 #ifdef _WITH_VRRP_
 	case SNMP_MAIL_EMAILFAULTS:
 		long_ret = global_data->no_email_faults?2:1;
@@ -181,6 +282,10 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 	case SNMP_LVSFLUSH:
 		long_ret = global_data->lvs_flush?1:2;
 		return (u_char *)&long_ret;
+	case SNMP_LVSFLUSH_ONSTOP:
+		long_ret = global_data->lvs_flush_onstop == LVS_FLUSH_FULL ? 1 :
+			   global_data->lvs_flush_onstop == LVS_FLUSH_VS ? 3 : 2;
+		return (u_char *)&long_ret;
 #endif
 	case SNMP_IPVS_64BIT_STATS:
 #ifdef _WITH_LVS_64BIT_STATS_
@@ -193,11 +298,13 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 #if HAVE_DECL_CLONE_NEWNET
 		if (global_data->network_namespace) {
 			*var_len = strlen(global_data->network_namespace);
-			return (u_char *)global_data->network_namespace;
+			ret.cp = global_data->network_namespace;
+			return ret.p;
 		}
 #endif
 		*var_len = 0;
-		return (u_char *)"";
+		ret.cp = "";
+		return ret.p;
 	case SNMP_DBUS:
 #ifdef _WITH_DBUS_
 		if (global_data->enable_dbus)
@@ -279,8 +386,10 @@ static struct variable8 global_vars[] = {
 	{SNMP_TRAPS, ASN_INTEGER, RONLY, snmp_scalar, 1, {4}},
 	/* linkBeat */
 	{SNMP_LINKBEAT, ASN_INTEGER, RONLY, snmp_scalar, 1, {5}},
+#ifdef _WITH_LVS_
 	/* lvsFlush */
 	{SNMP_LVSFLUSH, ASN_INTEGER, RONLY, snmp_scalar, 1, {6}},
+#endif
 #ifdef _WITH_LVS_64BIT_STATS_
 	/* LVS 64-bit stats */
 	{SNMP_IPVS_64BIT_STATS, ASN_INTEGER, RONLY, snmp_scalar, 1, {7}},
@@ -291,6 +400,10 @@ static struct variable8 global_vars[] = {
 #endif
 #ifdef _WITH_VRRP_
 	{SNMP_DYNAMIC_INTERFACES, ASN_INTEGER, RONLY, snmp_scalar, 1, {10}},
+#endif
+#ifdef _WITH_LVS_
+	/* lvsFlushOnStop */
+	{SNMP_LVSFLUSH_ONSTOP, ASN_INTEGER, RONLY, snmp_scalar, 1, {11}},
 #endif
 };
 
@@ -331,7 +444,7 @@ snmp_unregister_mib(oid *myoid, size_t len)
 }
 
 void
-snmp_agent_init(const char *snmp_socket, bool base_mib)
+snmp_agent_init(const char *snmp_socket_name, bool base_mib)
 {
 	if (snmp_running)
 		return;
@@ -358,10 +471,10 @@ snmp_agent_init(const char *snmp_socket, bool base_mib)
 			       SNMP_CALLBACK_SESSION_INIT,
 			       snmp_setup_session_cb, NULL);
 	/* Specify the socket to master agent, if provided */
-	if (snmp_socket != NULL) {
+	if (snmp_socket_name != NULL) {
 		netsnmp_ds_set_string(NETSNMP_DS_APPLICATION_ID,
 				      NETSNMP_DS_AGENT_X_SOCKET,
-				      snmp_socket);
+				      snmp_socket_name);
 	}
 	/*
 	 * Ping AgentX less often than every 15 seconds: pinging can
@@ -403,5 +516,6 @@ snmp_agent_close(bool base_mib)
 void
 register_snmp_addresses(void)
 {
+	register_thread_address("snmp_timeout_thread", snmp_timeout_thread);
 }
 #endif

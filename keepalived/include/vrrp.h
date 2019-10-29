@@ -50,6 +50,8 @@
 /* Special value for parameters when we want to know they haven't been set */
 #define	PARAMETER_UNSET		UINT_MAX
 
+struct _ip_address;
+
 typedef struct _vrrphdr {			/* rfc2338.5.1 */
 	uint8_t			vers_type;	/* 0-3=type, 4-7=version */
 	uint8_t			vrid;		/* virtual router id */
@@ -105,8 +107,8 @@ typedef struct {
  * of VRRP instances that need to be state sync together.
  */
 typedef struct _vrrp_sgroup {
-	char			*gname;			/* Group name */
-	vector_t		*iname;			/* Set of VRRP instances in this group, only used during initialisation */
+	const char		*gname;			/* Group name */
+	const vector_t		*iname;			/* Set of VRRP instances in this group, only used during initialisation */
 	list			vrrp_instances;		/* List of VRRP instances */
 	unsigned		num_member_fault;	/* Number of members of group in fault state */
 	unsigned		num_member_init;	/* Number of members of group in pending state */
@@ -182,10 +184,29 @@ typedef enum chksum_compatibility {
 } chksum_compatibility_t;
 #endif
 
+#ifdef CHECKSUM_DIAGNOSTICS
+typedef struct {
+	uint32_t		last_rx_checksum;
+	uint32_t		last_tx_checksum;
+	uint8_t			last_rx_priority;
+	uint8_t			last_tx_priority;
+	in_addr_t		last_rx_from;
+	bool			sent_to;
+	bool			received_from;
+} checksum_check_t;
+#endif
+
+typedef struct {
+	struct sockaddr_storage	address;
+#ifdef CHECKSUM_DIAGNOSTICS
+	checksum_check_t	chk;
+#endif
+} unicast_peer_t;
+
 /* parameters per virtual router -- rfc2338.6.1.2 */
 typedef struct _vrrp_t {
 	sa_family_t		family;			/* AF_INET|AF_INET6 */
-	char			*iname;			/* Instance Name */
+	const char		*iname;			/* Instance Name */
 	vrrp_sgroup_t		*sync;			/* Sync group we belong to */
 	vrrp_stats		*stats;			/* Statistics */
 	interface_t		*ifp;			/* Interface we belong to */
@@ -198,6 +219,10 @@ typedef struct _vrrp_t {
 	unsigned long		vmac_flags;		/* VRRP VMAC flags */
 	char			vmac_ifname[IFNAMSIZ];	/* Name of VRRP VMAC interface */
 	bool			duplicate_vrid_fault;	/* Set if we have a fault due to duplicate VRID */
+#ifdef _HAVE_VRRP_IPVLAN_
+	struct _ip_address	*ipvlan_addr;		/* Address to configure on an ipvlan interface */
+	int			ipvlan_type;		/* Bridge, private or VEPA mode */
+#endif
 #endif
 	interface_t		*configured_ifp;	/* Interface the configuration says we are on */
 	list			track_ifp;		/* Interface state we monitor */
@@ -211,6 +236,7 @@ typedef struct _vrrp_t {
 #endif
 	unsigned		num_script_if_fault;	/* Number of scripts and interfaces in fault state */
 	unsigned		num_script_init;	/* Number of scripts in init state */
+	bool			notifies_sent;		/* Set when initial notifies have been sent */
 	struct sockaddr_storage	saddr;			/* Src IP address to use in VRRP IP header */
 	bool			saddr_from_config;	/* Set if the source address is from configuration */
 	bool			track_saddr;		/* Fault state if configured saddr is missing */
@@ -224,6 +250,9 @@ typedef struct _vrrp_t {
 	list			unicast_peer;		/* List of Unicast peer to send advert to */
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	chksum_compatibility_t	unicast_chksum_compat;	/* Whether v1.3.6 and earlier chksum is used */
+#endif
+#ifdef CHECKSUM_DIAGNOSTICS
+	checksum_check_t	chk;
 #endif
 	struct sockaddr_storage master_saddr;		/* Store last heard Master address */
 	uint8_t			master_priority;	/* Store last heard priority */
@@ -251,7 +280,7 @@ typedef struct _vrrp_t {
 							 * VRRP adverts
 							 */
 	bool			promote_secondaries;	/* Set promote_secondaries option on interface */
-	bool			evip_add_ipv6;		/* Enable IPv6 for eVIPs if this is an IPv4 instance */
+	bool			evip_other_family;	/* There are eVIPs of the different address family from the vrrp family */
 	list			vroutes;		/* list of virtual routes */
 	list			vrules;			/* list of virtual rules */
 	unsigned		adver_int;		/* locally configured delay between advertisements*/
@@ -295,6 +324,7 @@ typedef struct _vrrp_t {
 	notify_script_t		*script_stop;
 	notify_script_t		*script_master_rx_lower_pri;
 	notify_script_t		*script;
+	int			notify_priority_changes;
 
 	/* rfc2338.6.2 */
 	uint32_t		ms_down_timer;
@@ -336,8 +366,9 @@ typedef struct _vrrp_t {
 #define VRRP_STATE_MAST			2	/* rfc2338.6.4.3 */
 #define VRRP_STATE_FAULT		3	/* internal */
 #define VRRP_STATE_STOP			98	/* internal */
-#define VRRP_DISPATCHER			99	/* internal */
 #define VRRP_EVENT_MASTER_RX_LOWER_PRI	1000	/* Dummy state for sending event notify */
+#define VRRP_EVENT_MASTER_PRIORITY_CHANGE 1001	/* Dummy state for sending event notify */
+#define VRRP_EVENT_BACKUP_PRIORITY_CHANGE 1002	/* Dummy state for sending event notify */
 
 /* VRRP packet handling */
 #define VRRP_PACKET_OK       0
@@ -373,23 +404,24 @@ typedef struct _vrrp_t {
 extern bool have_ipv4_instance;
 extern bool have_ipv6_instance;
 
+#ifdef _NETWORK_TIMESTAMP_
+extern bool do_network_timestamp;
+#endif
+
 /* prototypes */
 extern void clear_summary_flags(void);
-extern size_t vrrp_adv_len(vrrp_t *);
-extern vrrphdr_t *vrrp_get_header(sa_family_t, char *, size_t);
+extern size_t vrrp_adv_len(const vrrp_t *) __attribute__ ((pure));
+extern const vrrphdr_t *vrrp_get_header(sa_family_t, const char *, size_t);
 extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool);
 extern int open_vrrp_read_socket(sa_family_t, int, interface_t *, bool, int);
 extern int new_vrrp_socket(vrrp_t *);
 extern void vrrp_send_adv(vrrp_t *, uint8_t);
 extern void vrrp_send_link_update(vrrp_t *, unsigned);
-extern void add_vrrp_to_interface(vrrp_t *, interface_t *, int, bool, track_t);
+extern void add_vrrp_to_interface(vrrp_t *, interface_t *, int, bool, bool, track_t);
 extern void del_vrrp_from_interface(vrrp_t *, interface_t *);
-#ifdef _INCLUDE_UNUSED_CODE_
-extern bool vrrp_state_fault_rx(vrrp_t *, vrrphdr_t *, char *, ssize_t);
-#endif
-extern bool vrrp_state_master_rx(vrrp_t *, vrrphdr_t *, char *, ssize_t);
+extern bool vrrp_state_master_rx(vrrp_t *, const vrrphdr_t *, const char *, ssize_t);
 extern void vrrp_state_master_tx(vrrp_t *);
-extern void vrrp_state_backup(vrrp_t *, vrrphdr_t *, char *, ssize_t);
+extern void vrrp_state_backup(vrrp_t *, const vrrphdr_t *, const char *, ssize_t);
 extern void vrrp_state_goto_master(vrrp_t *);
 extern void vrrp_state_leave_master(vrrp_t *, bool);
 extern void vrrp_state_leave_fault(vrrp_t *);

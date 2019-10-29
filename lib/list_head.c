@@ -20,12 +20,14 @@
  */
 
 #include "list_head.h"
+#include "warnings.h"
+
 
 void list_sort(struct list_head *head,
 	       int (*cmp)(struct list_head *a, struct list_head *b))
 {
 	struct list_head *p, *q, *e, *list, *tail, *oldhead;
-	int insize, nmerges, psize, qsize, i;
+	unsigned insize, nmerges, psize, qsize, i;
 
 	list = head->next;
 	list_head_del(head);
@@ -59,14 +61,10 @@ void list_sort(struct list_head *head,
 					e = p;
 					p = p->next;
 					psize--;
-					if (p == oldhead)
-						p = NULL;
 				} else if (cmp(p, q) <= 0) {
 					e = p;
 					p = p->next;
 					psize--;
-					if (p == oldhead)
-						p = NULL;
 				} else {
 					e = q;
 					q = q->next;

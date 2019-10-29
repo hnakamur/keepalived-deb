@@ -62,10 +62,10 @@ const dns_type_t DNS_TYPE[] = {
 	{0, NULL}
 };
 
-static int dns_connect_thread(thread_t *);
-static int dns_send_thread(thread_t *);
+static int dns_connect_thread(thread_ref_t);
+static int dns_send_thread(thread_ref_t);
 
-static uint16_t
+static uint16_t __attribute__ ((pure))
 dns_type_lookup(const char *label)
 {
 	const dns_type_t *t;
@@ -78,7 +78,7 @@ dns_type_lookup(const char *label)
 	return 0;
 }
 
-static const char *
+static const char * __attribute__ ((pure))
 dns_type_name(uint16_t type)
 {
 	const dns_type_t *t;
@@ -91,8 +91,8 @@ dns_type_name(uint16_t type)
 	return "(unknown)";
 }
 
-static void
-dns_log_message(thread_t * thread, int level, const char *fmt, ...)
+static void __attribute__ ((format (printf, 3, 4)))
+dns_log_message(thread_ref_t thread, int level, const char *fmt, ...)
 {
 	char buf[MAX_LOG_MSG];
 	va_list args;
@@ -103,11 +103,11 @@ dns_log_message(thread_t * thread, int level, const char *fmt, ...)
 	vsnprintf(buf, sizeof (buf), fmt, args);
 	va_end(args);
 
-	log_message(level, "DNS_CHECK (%s) %s", FMT_DNS_RS(checker), buf);
+	log_message(level, "DNS_CHECK (%s) %s", FMT_CHK(checker), buf);
 }
 
-static int
-dns_final(thread_t * thread, int error, const char *fmt, ...)
+static int __attribute__ ((format (printf, 3, 4)))
+dns_final(thread_ref_t thread, int error, const char *fmt, ...)
 {
 	char buf[MAX_LOG_MSG];
 	va_list args;
@@ -120,7 +120,8 @@ dns_final(thread_t * thread, int error, const char *fmt, ...)
 	DNS_DBG("final error=%d attempts=%d retry=%d", error,
 		checker->retry_it, checker->retry);
 
-	thread_close_fd(thread);
+	if (thread->type != THREAD_TIMER)
+		thread_close_fd(thread);
 
 	if (error) {
 		if (checker->is_up || !checker->has_run) {
@@ -131,12 +132,13 @@ dns_final(thread_t * thread, int error, const char *fmt, ...)
 				va_start(args, fmt);
 				len = vsnprintf(buf, sizeof (buf), fmt, args);
 				va_end(args);
-				if (checker->has_run && checker->retry_it >= checker->retry)
-					snprintf(buf + len, sizeof(buf) - len, " after %d retries", checker->retry);
-				dns_log_message(thread, LOG_INFO, buf);
+				if (checker->has_run && checker->retry_it >= checker->retry && !checker->has_run)
+					snprintf(buf + len, sizeof(buf) - len, " after %u retries", checker->retry);
+				dns_log_message(thread, LOG_INFO, "%s", buf);
 			}
 			if (checker->retry_it < checker->retry) {
 				checker->retry_it++;
+				checker->has_run = true;
 				thread_add_timer(thread->master,
 						 dns_connect_thread, checker,
 						 checker->delay_before_retry);
@@ -170,7 +172,7 @@ dns_final(thread_t * thread, int error, const char *fmt, ...)
 }
 
 static int
-dns_recv_thread(thread_t * thread)
+dns_recv_thread(thread_ref_t thread)
 {
 	unsigned long timeout;
 	ssize_t ret;
@@ -188,11 +190,11 @@ dns_recv_thread(thread_t * thread)
 
 	timeout = timer_long(thread->sands) - timer_long(time_now);
 
-	ret = recv(thread->u.fd, rbuf, sizeof (rbuf), 0);
+	ret = recv(thread->u.f.fd, rbuf, sizeof (rbuf), 0);
 	if (ret == -1) {
 		if (check_EAGAIN(errno) || check_EINTR(errno)) {
 			thread_add_read(thread->master, dns_recv_thread,
-					checker, thread->u.fd, timeout);
+					checker, thread->u.f.fd, timeout, true);
 			return 0;
 		}
 		dns_final(thread, 1, "failed to read socket. %s", strerror(errno));
@@ -202,7 +204,7 @@ dns_recv_thread(thread_t * thread)
 	if (ret < (ssize_t) sizeof (r_header)) {
 		DNS_DBG("too small message. (%d bytes)", ret);
 		thread_add_read(thread->master, dns_recv_thread, checker,
-				thread->u.fd, timeout);
+				thread->u.f.fd, timeout, true);
 		return 0;
 	}
 
@@ -213,7 +215,7 @@ dns_recv_thread(thread_t * thread)
 		DNS_DBG("ID does not match. (%04x != %04x)",
 			ntohs(s_header->id), ntohs(r_header->id));
 		thread_add_read(thread->master, dns_recv_thread, checker,
-				thread->u.fd, timeout);
+				thread->u.f.fd, timeout, true);
 		return 0;
 	}
 
@@ -222,7 +224,7 @@ dns_recv_thread(thread_t * thread)
 	if (!DNS_QR(flags)) {
 		DNS_DBG("receive query message?");
 		thread_add_read(thread->master, dns_recv_thread, checker,
-				thread->u.fd, timeout);
+				thread->u.f.fd, timeout, true);
 		return 0;
 	}
 
@@ -243,11 +245,11 @@ dns_recv_thread(thread_t * thread)
 	} while(0)
 
 static int
-dns_make_query(thread_t * thread)
+dns_make_query(thread_ref_t thread)
 {
 	uint16_t flags = 0;
 	uint8_t *p;
-	char *s, *e;
+	const char *s, *e;
 	size_t n;
 	checker_t *checker = THREAD_ARG(thread);
 	dns_check_t *dns_check = CHECKER_ARG(checker);
@@ -255,6 +257,7 @@ dns_make_query(thread_t * thread)
 
 	DNS_SET_RD(flags, 1);	/* Recursion Desired */
 
+	/* coverity[dont_call] */
 	header->id = htons(random());
 	header->flags = htons(flags);
 	header->qdcount = htons(1);
@@ -288,7 +291,7 @@ dns_make_query(thread_t * thread)
 }
 
 static void
-dns_send(thread_t *thread)
+dns_send(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
 	dns_check_t *dns_check = CHECKER_ARG(checker);
@@ -297,11 +300,11 @@ dns_send(thread_t *thread)
 
 	timeout = timer_long(thread->sands) - timer_long(time_now);
 
-	ret = send(thread->u.fd, dns_check->sbuf, dns_check->slen, 0);
+	ret = send(thread->u.f.fd, dns_check->sbuf, dns_check->slen, 0);
 	if (ret == -1) {
 		if (check_EAGAIN(errno) || check_EINTR(errno)) {
 			thread_add_write(thread->master, dns_send_thread,
-					 checker, thread->u.fd, timeout);
+					 checker, thread->u.f.fd, timeout, true);
 			return;
 		}
 		dns_final(thread, 1, "failed to write socket.");
@@ -313,13 +316,13 @@ dns_send(thread_t *thread)
 		return;
 	}
 
-	thread_add_read(thread->master, dns_recv_thread, checker, thread->u.fd, timeout);
+	thread_add_read(thread->master, dns_recv_thread, checker, thread->u.f.fd, timeout, true);
 
 	return;
 }
 
 static int
-dns_send_thread(thread_t * thread)
+dns_send_thread(thread_ref_t thread)
 {
 	if (thread->type == THREAD_WRITE_TIMEOUT) {
 		dns_final(thread, 1, "write timeout to socket.");
@@ -332,7 +335,7 @@ dns_send_thread(thread_t * thread)
 }
 
 static int
-dns_check_thread(thread_t * thread)
+dns_check_thread(thread_ref_t thread)
 {
 	int status;
 
@@ -352,6 +355,9 @@ dns_check_thread(thread_t * thread)
 		dns_final(thread, 1, "connection error.");
 		break;
 	case connect_timeout:
+		dns_final(thread, 1, "connection timeout.");
+		break;
+	case connect_fail:
 		dns_final(thread, 1, "connection failure.");
 		break;
 	case connect_success:
@@ -368,9 +374,10 @@ dns_check_thread(thread_t * thread)
 }
 
 static int
-dns_connect_thread(thread_t * thread)
+dns_connect_thread(thread_ref_t thread)
 {
 	int fd, status;
+	thread_t thread_fd;
 
 	checker_t *checker = THREAD_ARG(thread);
 	conn_opts_t *co = checker->co;
@@ -406,9 +413,17 @@ dns_connect_thread(thread_t * thread)
 	status = socket_bind_connect(fd, co);
 
 	if (status == connect_success) {
-		thread->u.fd = fd;
-		dns_make_query(thread);
-		dns_send(thread);
+		thread_fd = *thread;
+		thread_fd.u.f.fd = fd;
+		dns_make_query(&thread_fd);
+		dns_send(&thread_fd);
+
+		return 0;
+	}
+
+	if (status == connect_fail) {
+		close(fd);
+		dns_final(thread, 1, "network unreachable for %s", inet_sockaddrtopair(&co->dst));
 
 		return 0;
 	}
@@ -426,22 +441,20 @@ dns_connect_thread(thread_t * thread)
 }
 
 static void
-dns_free(void *data)
+dns_free(checker_t *checker)
 {
-	checker_t *checker = data;
 	dns_check_t *dns_check = checker->data;
 
-	FREE(dns_check->name);
-	FREE(CHECKER_CO(data));
-	FREE(CHECKER_DATA(data));
-	FREE(data);
+	FREE_CONST(dns_check->name);
+	FREE(checker->co);
+	FREE(checker->data);
+	FREE(checker);
 }
 
 static void
-dns_dump(FILE *fp, void *data)
+dns_dump(FILE *fp, const checker_t *checker)
 {
-	checker_t *checker = data;
-	dns_check_t *dns_check = checker->data;
+	const dns_check_t *dns_check = checker->data;
 
 	conf_write(fp, "   Keepalive method = DNS_CHECK");
 	dump_checker_opts(fp, checker);
@@ -450,12 +463,12 @@ dns_dump(FILE *fp, void *data)
 }
 
 static bool
-dns_check_compare(void *a, void *b)
+dns_check_compare(const checker_t *old_c, const checker_t *new_c)
 {
-	dns_check_t *old = CHECKER_DATA(a);
-	dns_check_t *new = CHECKER_DATA(b);
+	const dns_check_t *old = old_c->data;
+	const dns_check_t *new = new_c->data;
 
-	if (!compare_conn_opts(CHECKER_CO(a), CHECKER_CO(b)))
+	if (!compare_conn_opts(old_c->co, new_c->co))
 		return false;
 	if (old->type != new->type)
 		return false;
@@ -466,7 +479,7 @@ dns_check_compare(void *a, void *b)
 }
 
 static void
-dns_check_handler(__attribute__((unused)) vector_t * strvec)
+dns_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	checker_t *checker;
 
@@ -474,7 +487,7 @@ dns_check_handler(__attribute__((unused)) vector_t * strvec)
 	dns_check->type = DNS_DEFAULT_TYPE;
 	dns_check->name = DNS_DEFAULT_NAME;
 	checker = queue_checker(dns_free, dns_dump, dns_connect_thread,
-				dns_check_compare, dns_check, CHECKER_NEW_CO());
+				dns_check_compare, dns_check, CHECKER_NEW_CO(), true);
 
 	/* Set the non-standard retry time */
 	checker->default_retry = DNS_DEFAULT_RETRY;
@@ -482,26 +495,24 @@ dns_check_handler(__attribute__((unused)) vector_t * strvec)
 }
 
 static void
-dns_type_handler(vector_t * strvec)
+dns_type_handler(const vector_t *strvec)
 {
 	uint16_t dns_type;
 	dns_check_t *dns_check = CHECKER_GET();
-	char *type_str = CHECKER_VALUE_STRING(strvec);
 
-	dns_type = dns_type_lookup(type_str);
+	dns_type = dns_type_lookup(strvec_slot(strvec, 1));
 	if (!dns_type)
-		report_config_error(CONFIG_GENERAL_ERROR, "Unknown DNS check type %s - defaulting to SOA", vector_size(strvec) < 2 ? "[blank]" : FMT_STR_VSLOT(strvec, 1));
+		report_config_error(CONFIG_GENERAL_ERROR, "Unknown DNS check type %s - ignoring",
+				    strvec_slot(strvec, 1));
 	else
 		dns_check->type = dns_type;
-
-	FREE(type_str);
 }
 
 static void
-dns_name_handler(vector_t * strvec)
+dns_name_handler(const vector_t *strvec)
 {
 	dns_check_t *dns_check = CHECKER_GET();
-	dns_check->name = CHECKER_VALUE_STRING(strvec);
+	dns_check->name = set_value(strvec);
 }
 
 static void
@@ -510,6 +521,7 @@ dns_check_end(void)
 	if (!check_conn_opts(CHECKER_GET_CO())) {
 		dequeue_new_checker();
 	}
+// Is name needed?
 }
 
 void

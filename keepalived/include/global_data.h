@@ -30,6 +30,10 @@
 #include <stdio.h>
 #include <sys/socket.h>
 
+#ifdef _HAVE_SCHED_RT_
+#include <sched.h>
+#endif
+
 #ifdef HAVE_LINUX_NETFILTER_X_TABLES_H
 #include <linux/netfilter/x_tables.h>
 #endif
@@ -76,21 +80,39 @@ typedef struct _email {
 	char				*addr;
 } email_t;
 
+#ifdef _WITH_LVS_
+typedef enum {
+	LVS_NO_FLUSH,
+	LVS_FLUSH_FULL,
+	LVS_FLUSH_VS
+} lvs_flush_t;
+#endif
+
 /* Configuration data root */
 typedef struct _data {
+	const char 			*process_name;
+#ifdef _WITH_VRRP_
+	const char			*vrrp_process_name;
+#endif
+#ifdef _WITH_LVS_
+	const char			*lvs_process_name;
+#endif
+#ifdef _WITH_BFD_
+	const char			*bfd_process_name;
+#endif
 #if HAVE_DECL_CLONE_NEWNET
-	char				*network_namespace;	/* network namespace name */
+	const char			*network_namespace;	/* network namespace name */
 	bool				namespace_with_ipsets;	/* override for namespaces with ipsets on Linux < 3.13 */
 #endif
-	char				*local_name;
-	char				*instance_name;		/* keepalived instance name */
+	const char			*local_name;
+	const char			*instance_name;		/* keepalived instance name */
 #ifdef _WITH_LINKBEAT_
 	bool				linkbeat_use_polling;
 #endif
-	char				*router_id;
-	char				*email_from;
+	const char			*router_id;
+	const char			*email_from;
 	struct sockaddr_storage		smtp_server;
-	char				*smtp_helo_name;
+	const char			*smtp_helo_name;
 	unsigned long			smtp_connection_to;
 	list				email;
 	int				smtp_alert;
@@ -99,7 +121,7 @@ typedef struct _data {
 	bool				allow_if_changes;
 	bool				no_email_faults;
 	int				smtp_alert_vrrp;
-	char				*default_ifname;	/* Name of default interface */
+	const char			*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
 #endif
 #ifdef _WITH_LVS_
@@ -112,6 +134,7 @@ typedef struct _data {
 	struct lvs_syncd_config		lvs_syncd;
 #endif
 	bool				lvs_flush;		/* flush any residual LVS config at startup */
+	lvs_flush_t			lvs_flush_onstop;	/* flush any LVS config at shutdown */
 #endif
 #ifdef _WITH_VRRP_
 	struct sockaddr_in		vrrp_mcast_group4;
@@ -135,13 +158,18 @@ typedef struct _data {
 	char				vrrp_ipset_address[IPSET_MAXNAMELEN];
 	char				vrrp_ipset_address6[IPSET_MAXNAMELEN];
 	char				vrrp_ipset_address_iface6[IPSET_MAXNAMELEN];
+#ifdef HAVE_IPSET_ATTR_IFACE
+	char				vrrp_ipset_igmp[IPSET_MAXNAMELEN];
+	char				vrrp_ipset_mld[IPSET_MAXNAMELEN];
+#endif
 #endif
 #endif
 #ifdef _WITH_NFTABLES_
-	char*				vrrp_nf_table_name;
+	const char			*vrrp_nf_table_name;
 	int				vrrp_nf_chain_priority;
 	bool				vrrp_nf_counters;
 	bool				vrrp_nf_ifindex;
+	unsigned			nft_version;
 #endif
 	bool				vrrp_check_unicast_src;
 	bool				vrrp_skip_check_adv_addr;
@@ -151,6 +179,7 @@ typedef struct _data {
 	bool				vrrp_no_swap;
 #ifdef _HAVE_SCHED_RT_
 	unsigned			vrrp_realtime_priority;
+	cpu_set_t			vrrp_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				vrrp_rlimit_rt;
 #endif
@@ -162,6 +191,7 @@ typedef struct _data {
 	bool				checker_no_swap;
 #ifdef _HAVE_SCHED_RT_
 	unsigned			checker_realtime_priority;
+	cpu_set_t			checker_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				checker_rlimit_rt;
 #endif
@@ -173,6 +203,7 @@ typedef struct _data {
 	bool				bfd_no_swap;
 #ifdef _HAVE_SCHED_RT_
 	unsigned			bfd_realtime_priority;
+	cpu_set_t			bfd_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				bfd_rlimit_rt;
 #endif
@@ -185,9 +216,12 @@ typedef struct _data {
 #ifdef _WITH_LVS_
 	notify_fifo_t			lvs_notify_fifo;
 #endif
+#ifdef _WITH_VRRP_
+	int				vrrp_notify_priority_changes;
+#endif
 #ifdef _WITH_SNMP_
 	bool				enable_traps;
-	char				*snmp_socket;
+	const char			*snmp_socket;
 #ifdef _WITH_VRRP_
 #ifdef _WITH_SNMP_VRRP_
 	bool				enable_snmp_vrrp;
@@ -205,7 +239,7 @@ typedef struct _data {
 #endif
 #ifdef _WITH_DBUS_
 	bool				enable_dbus;
-	char				*dbus_service_name;
+	const char			*dbus_service_name;
 #endif
 #ifdef _WITH_VRRP_
 	unsigned			vrrp_netlink_cmd_rcv_bufs;
@@ -231,6 +265,8 @@ typedef struct _data {
 	int				vrrp_rx_bufs_policy;
 	size_t				vrrp_rx_bufs_size;
 	int				vrrp_rx_bufs_multiples;
+	unsigned			vrrp_startup_delay;
+	bool				log_unknown_vrids;
 #endif
 } data_t;
 
@@ -239,9 +275,9 @@ extern data_t *global_data;	/* Global configuration data */
 extern data_t *old_global_data;	/* Old global configuration data - used during reload */
 
 /* Prototypes */
-extern void alloc_email(char *);
+extern void alloc_email(const char *);
 extern data_t *alloc_global_data(void);
-extern void init_global_data(data_t *, data_t *);
+extern void init_global_data(data_t *, data_t *, bool);
 extern void free_global_data(data_t *);
 extern void dump_global_data(FILE *, data_t *);
 

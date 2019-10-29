@@ -55,7 +55,6 @@
 #define	RTM_SIZE		1024
 #define	RTA_SIZE		1024
 #define	ENCAP_RTA_SIZE		 128
-#define NEXTHOP_RTA_SIZE	1024
 
 /* Utility functions */
 unsigned short
@@ -251,7 +250,7 @@ add_nexthop(nexthop_t *nh, struct rtmsg *rtm, struct rtattr *rta, size_t len, st
 	if (nh->ifp)
 		rtnh->rtnh_ifindex = (int)nh->ifp->ifindex;
 
-	if (nh->mask |= IPROUTE_BIT_WEIGHT)
+	if (nh->mask & IPROUTE_BIT_WEIGHT)
 		rtnh->rtnh_hops = nh->weight;
 
 	rtnh->rtnh_flags = nh->flags;
@@ -261,9 +260,9 @@ add_nexthop(nexthop_t *nh, struct rtmsg *rtm, struct rtattr *rta, size_t len, st
 
 #if HAVE_DECL_RTA_ENCAP
 	if (nh->encap.type != LWTUNNEL_ENCAP_NONE) {
-		unsigned short len = rta->rta_len;
-		add_encap(rta, len, &nh->encap);
-		rtnh->rtnh_len = (unsigned short)(rtnh->rtnh_len + rta->rta_len - len);
+		unsigned short rta_len = rta->rta_len;
+		add_encap(rta, rta_len, &nh->encap);
+		rtnh->rtnh_len = (unsigned short)(rtnh->rtnh_len + rta->rta_len - rta_len);
 	}
 #endif
 }
@@ -296,10 +295,9 @@ add_nexthops(ip_route_t *route, struct nlmsghdr *nlh, struct rtmsg *rtm)
 }
 
 /* Add/Delete IP route to/from a specific interface */
-static int
+static bool
 netlink_route(ip_route_t *iproute, int cmd)
 {
-	int status = 1;
 	struct {
 		struct nlmsghdr n;
 		struct rtmsg r;
@@ -511,12 +509,12 @@ netlink_route(ip_route_t *iproute, int cmd)
 	if (netlink_talk(&nl_cmd, &req.n) < 0) {
 #if HAVE_DECL_RTA_EXPIRES
 		/* If an expiry was set on the route, it may have disappeared already */
-		if (cmd != IPADDRESS_DEL || !(iproute->mask & IPROUTE_BIT_EXPIRES))
+		if (cmd != IPROUTE_DEL || !(iproute->mask & IPROUTE_BIT_EXPIRES))
 #endif
-			status = -1;
+			return true;
 	}
 
-	return status;
+	return false;
 }
 
 /* Add/Delete a list of IP routes */
@@ -530,10 +528,9 @@ netlink_rtlist(list rt_list, int cmd)
 	if (LIST_ISEMPTY(rt_list))
 		return;
 
-	for (e = LIST_HEAD(rt_list); e; ELEMENT_NEXT(e)) {
-		iproute = ELEMENT_DATA(e);
+	LIST_FOREACH(rt_list, iproute, e) {
 		if ((cmd == IPROUTE_DEL) == iproute->set) {
-			if (netlink_route(iproute, cmd) > 0)
+			if (!netlink_route(iproute, cmd))
 				iproute->set = (cmd == IPROUTE_ADD);
 			else
 				iproute->set = false;
@@ -542,26 +539,7 @@ netlink_rtlist(list rt_list, int cmd)
 }
 
 /* Route dump/allocation */
-#if HAVE_DECL_RTA_ENCAP
-void
-free_encap(void *rt_data)
-{
-	encap_t *encap = rt_data;
-
-	if (encap->type == LWTUNNEL_ENCAP_IP) {
-		FREE_PTR(encap->ip.dst);
-		FREE_PTR(encap->ip.src);
-	}
-	else if (encap->type == LWTUNNEL_ENCAP_IP6) {
-		FREE_PTR(encap->ip6.dst);
-		FREE_PTR(encap->ip6.src);
-	}
-
-	FREE(rt_data);
-}
-#endif
-
-void
+static void
 free_nh(void *rt_data)
 {
 	nexthop_t *nh = rt_data;
@@ -685,7 +663,7 @@ print_encap(char *op, size_t len, const encap_t* encap)
 #endif
 
 void
-format_iproute(ip_route_t *route, char *buf, size_t buf_len)
+format_iproute(const ip_route_t *route, char *buf, size_t buf_len)
 {
 	char *op = buf;
 	const char *buf_end = buf + buf_len;
@@ -695,21 +673,13 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 
 	if (route->type != RTN_UNICAST)
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", get_rttables_rtntype(route->type));
-	if (route->dst) {
+	if (route->dst)
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", ipaddresstos(NULL, route->dst));
-		if ((route->dst->ifa.ifa_family == AF_INET && route->dst->ifa.ifa_prefixlen != 32 ) ||
-		    (route->dst->ifa.ifa_family == AF_INET6 && route->dst->ifa.ifa_prefixlen != 128 ))
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "/%u", route->dst->ifa.ifa_prefixlen);
-	}
 	else
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", "default");
 
-	if (route->src) {
+	if (route->src)
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), " from %s", ipaddresstos(NULL, route->src));
-		if ((route->src->ifa.ifa_family == AF_INET && route->src->ifa.ifa_prefixlen != 32 ) ||
-		    (route->src->ifa.ifa_family == AF_INET6 && route->src->ifa.ifa_prefixlen != 128 ))
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "/%u", route->src->ifa.ifa_prefixlen);
-	}
 
 //#if HAVE_DECL_RTA_NEWDST
 //	/* MPLS only */
@@ -751,15 +721,15 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 
 	if (route->realms) {
 		if (route->realms & 0xFFFF0000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %d/", route->realms >> 16);
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %" PRIu32 "/", route->realms >> 16);
 		else
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ");
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%d", route->realms & 0xFFFF);
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%u", route->realms & 0xFFFF);
 	}
 
 #if HAVE_DECL_RTA_EXPIRES
 	if (route->mask & IPROUTE_BIT_EXPIRES)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " expires %dsec", route->expires);
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " expires %" PRIu32 "sec", route->expires);
 #endif
 
 #if HAVE_DECL_RTAX_CC_ALGO
@@ -770,7 +740,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 	if (route->mask & IPROUTE_BIT_RTT) {
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rtt", route->lock & (1<<RTAX_RTT) ? " lock" : "");
 		if (route->rtt >= 8000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rtt / 8000.0);
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rtt / (double)8000.0F);
 		else
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rtt / 8);
 	}
@@ -778,7 +748,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 	if (route->mask & IPROUTE_BIT_RTTVAR) {
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rttvar", route->lock & (1<<RTAX_RTTVAR) ? " lock" : "");
 		if (route->rttvar >= 4000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rttvar / 4000.0);
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rttvar / (double)4000.0F);
 		else
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rttvar / 4);
 	}
@@ -786,7 +756,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 	if (route->mask & IPROUTE_BIT_RTO_MIN) {
 		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rto_min", route->lock & (1<<RTAX_RTO_MIN) ? " lock" : "");
 		if (route->rto_min >= 1000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rto_min / 1000.0);
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rto_min / (double)1000.0F);
 		else
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rto_min);
 	}
@@ -840,7 +810,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 
 #if HAVE_DECL_RTAX_QUICKACK
 	if (route->mask & IPROUTE_BIT_QUICKACK)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " quickack %u", route->quickack);
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " quickack %d", route->quickack);
 #endif
 
 #if HAVE_DECL_RTA_PREF
@@ -854,7 +824,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 
 #if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
 	if (route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %u", "fastopen_no_cookie", route->fastopen_no_cookie);
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %d", "fastopen_no_cookie", route->fastopen_no_cookie);
 #endif
 
 #if HAVE_DECL_RTA_TTL_PROPAGATE
@@ -883,10 +853,10 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 
 			if (nh->realms) {
 				if (route->realms & 0xFFFF0000)
-					op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %d/", nh->realms >> 16);
+					op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %" PRIu32 "/", nh->realms >> 16);
 				else
 					op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ");
-				op += (size_t)snprintf(op, (size_t)(buf_end - op), "%d", nh->realms & 0xFFFF);
+				op += (size_t)snprintf(op, (size_t)(buf_end - op), "%" PRIu32, nh->realms & 0xFFFF);
 			}
 #if HAVE_DECL_RTA_ENCAP
 			if (nh->encap.type != LWTUNNEL_ENCAP_NONE)
@@ -907,14 +877,14 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 		if ((ifp = if_get_by_ifindex(route->configured_ifindex)))
 			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [dev %s]", ifp->ifname);
 		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [installed ifindex %d]", route->configured_ifindex);
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [installed ifindex %" PRIu32 "]", route->configured_ifindex);
 	}
 }
 
 void
-dump_iproute(FILE *fp, void *rt_data)
+dump_iproute(FILE *fp, const void *rt_data)
 {
-	ip_route_t *route = rt_data;
+	const ip_route_t *route = rt_data;
 	char *buf = MALLOC(ROUTE_BUF_SIZE);
 	size_t len;
 	size_t i;
@@ -933,9 +903,9 @@ dump_iproute(FILE *fp, void *rt_data)
 
 #if HAVE_DECL_RTA_ENCAP
 #if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
-static int parse_encap_mpls(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
+static int parse_encap_mpls(const vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 {
-	char *str;
+	const char *str;
 
 	encap->type = LWTUNNEL_ENCAP_MPLS;
 
@@ -954,10 +924,10 @@ static int parse_encap_mpls(vector_t *strvec, unsigned int *i_ptr, encap_t *enca
 }
 #endif
 
-static int parse_encap_ip(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
+static int parse_encap_ip(const vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 {
 	unsigned int i = *i_ptr;
-	char *str, *str1;
+	const char *str, *str1;
 
 	encap->type = LWTUNNEL_ENCAP_IP;
 
@@ -1013,7 +983,7 @@ static int parse_encap_ip(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 		i += 2;
 	}
 
-	if (!encap->ip.dst && !(encap->flags | IPROUTE_BIT_ENCAP_ID)) {
+	if (!encap->ip.dst && !(encap->flags & IPROUTE_BIT_ENCAP_ID)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "address or id missing for ip encapsulation");
 		goto err;
 	}
@@ -1039,9 +1009,9 @@ err:
 
 #if HAVE_DECL_LWTUNNEL_ENCAP_ILA
 static
-int parse_encap_ila(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
+int parse_encap_ila(const vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 {
-	char *str;
+	const char *str;
 
 	encap->type = LWTUNNEL_ENCAP_ILA;
 
@@ -1062,10 +1032,10 @@ int parse_encap_ila(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 #endif
 
 static
-int parse_encap_ip6(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
+int parse_encap_ip6(const vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 {
 	unsigned int i = *i_ptr;
-	char *str, *str1;
+	const char *str, *str1;
 
 	encap->type = LWTUNNEL_ENCAP_IP6;
 
@@ -1121,7 +1091,7 @@ int parse_encap_ip6(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 		i += 2;
 	}
 
-	if (!encap->ip.dst && !(encap->flags | IPROUTE_BIT_ENCAP_ID)) {
+	if (!encap->ip.dst && !(encap->flags & IPROUTE_BIT_ENCAP_ID)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "address or id missing for ip6 encapsulation");
 		goto err;
 	}
@@ -1144,9 +1114,9 @@ err:
 }
 
 static bool
-parse_encap(vector_t *strvec, unsigned int *i, encap_t *encap)
+parse_encap(const vector_t *strvec, unsigned int *i, encap_t *encap)
 {
-	char *str;
+	const char *str;
 
 	if (vector_size(strvec) <= ++*i) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Missing encap type");
@@ -1178,11 +1148,11 @@ parse_encap(vector_t *strvec, unsigned int *i, encap_t *encap)
 #endif
 
 static void
-parse_nexthops(vector_t *strvec, unsigned int i, ip_route_t *route)
+parse_nexthops(const vector_t *strvec, unsigned int i, ip_route_t *route)
 {
 	uint8_t family = AF_UNSPEC;
 	nexthop_t *new;
-	char *str;
+	const char *str;
 	uint32_t val;
 
 	if (!LIST_EXISTS(route->nhs))
@@ -1259,7 +1229,7 @@ parse_nexthops(vector_t *strvec, unsigned int i, ip_route_t *route)
 			else if (!strcmp(str, "realms")) {
 				/* Note: IPv4 only */
 				if (get_realms(&new->realms, strvec_slot(strvec, ++i))) {
-					report_config_error(CONFIG_GENERAL_ERROR, "Invalid realms %s for route", FMT_STR_VSLOT(strvec,i));
+					report_config_error(CONFIG_GENERAL_ERROR, "Invalid realms %s for route", strvec_slot(strvec,i));
 					goto err;
 				}
 				if (route->family == AF_UNSPEC)
@@ -1285,7 +1255,7 @@ parse_nexthops(vector_t *strvec, unsigned int i, ip_route_t *route)
 	}
 
 	if (i < vector_size(strvec)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Route has trailing nonsense after nexthops - %s", FMT_STR_VSLOT(strvec, i));
+		report_config_error(CONFIG_GENERAL_ERROR, "Route has trailing nonsense after nexthops - %s", strvec_slot(strvec, i));
 		goto err;
 	}
 
@@ -1296,18 +1266,18 @@ err:
 }
 
 void
-alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
+alloc_route(list rt_list, const vector_t *strvec, bool allow_track_group)
 {
 	ip_route_t *new;
 	interface_t *ifp;
-	char *str;
+	const char *str;
 	uint32_t val;
 	uint8_t val8;
 	unsigned int i = 0;
 	bool do_nexthop = false;
 	bool raw;
 	uint8_t family;
-	char *dest = NULL;
+	const char *dest = NULL;
 
 	new = (ip_route_t *) MALLOC(sizeof(ip_route_t));
 
@@ -1344,7 +1314,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 				FREE(new->pref_src);
 			new->pref_src = parse_ipaddress(NULL, strvec_slot(strvec, ++i), false);
 			if (!new->pref_src) {
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid route src address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid route src address %s", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (new->family == AF_UNSPEC)
@@ -1392,7 +1362,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 				FREE(new->via);
 			new->via = parse_ipaddress(NULL, str, false);
 			if (!new->via) {
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid route via address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid route via address %s", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (new->family == AF_UNSPEC)
@@ -1407,11 +1377,11 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 				FREE(new->src);
 			new->src = parse_route(strvec_slot(strvec, ++i));
 			if (!new->src) {
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid route from address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid route from address %s", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (new->src->ifa.ifa_family != AF_INET6) {
-				report_config_error(CONFIG_GENERAL_ERROR, "route from address only supported with IPv6 (%s)", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "route from address only supported with IPv6 (%s)", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (new->family == AF_UNSPEC)
@@ -1424,7 +1394,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		else if (!strcmp(str, "tos") || !strcmp(str,"dsfield")) {
 			/* Note: IPv4 only */
 			if (!find_rttables_dsfield(strvec_slot(strvec, ++i), &val8)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "TOS value %s is invalid", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "TOS value %s is invalid", strvec_slot(strvec, i));
 				goto err;
 			}
 
@@ -1433,14 +1403,14 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		}
 		else if (!strcmp(str, "table")) {
 			if (!find_rttables_table(strvec_slot(strvec, ++i), &val)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Routing table %s not found for route", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Routing table %s not found for route", strvec_slot(strvec, i));
 				goto err;
 			}
 			new->table = val;
 		}
 		else if (!strcmp(str, "protocol")) {
 			if (!find_rttables_proto(strvec_slot(strvec, ++i), &val8)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Protocol %s not found or invalid for route", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Protocol %s not found or invalid for route", strvec_slot(strvec, i));
 				goto err;
 			}
 			new->protocol = val8;
@@ -1449,7 +1419,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		else if (!strcmp(str, "scope")) {
 			/* Note: IPv4 only */
 			if (!find_rttables_scope(strvec_slot(strvec, ++i), &val8)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Scope %s not found or invalid for route", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Scope %s not found or invalid for route", strvec_slot(strvec, i));
 				goto err;
 			}
 			new->scope = val8;
@@ -1528,7 +1498,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 			}
 			if (get_time_rtt(&new->rtt, strvec_slot(strvec, i), &raw) ||
 			    (!raw && new->rtt >= UINT32_MAX / 8)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rtt %s for route", FMT_STR_VSLOT(strvec,i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rtt %s for route", strvec_slot(strvec,i));
 				goto err;
 			}
 			if (raw)
@@ -1541,8 +1511,8 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 				i++;
 			}
 			if (get_time_rtt(&new->rttvar, strvec_slot(strvec, i), &raw) ||
-			    (!raw && new->rtt >= UINT32_MAX / 4)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rttvar %s for route", FMT_STR_VSLOT(strvec,i));
+			    (!raw && new->rttvar >= UINT32_MAX / 4)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rttvar %s for route", strvec_slot(strvec,i));
 				goto err;
 			}
 			if (raw)
@@ -1583,7 +1553,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		}
 		else if (!strcmp(str, "realms")) {
 			if (get_realms(&new->realms, strvec_slot(strvec, ++i))) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid realms %s for route", FMT_STR_VSLOT(strvec,i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid realms %s for route", strvec_slot(strvec,i));
 				goto err;
 			}
 			if (new->family == AF_INET6) {
@@ -1598,7 +1568,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 				i++;
 			}
 			if (get_time_rtt(&new->rto_min, strvec_slot(strvec, i), &raw)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rto_min value %s specified for route", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rto_min value %s specified for route", strvec_slot(strvec, i));
 				goto err;
 			}
 			new->mask |= IPROUTE_BIT_RTO_MIN;
@@ -1619,7 +1589,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 			if (!strcmp("ecn", strvec_slot(strvec, i)))
 				new->features |= RTAX_FEATURE_ECN;
 			else
-				report_config_error(CONFIG_GENERAL_ERROR, "feature %s not supported", FMT_STR_VSLOT(strvec,i));
+				report_config_error(CONFIG_GENERAL_ERROR, "feature %s not supported", strvec_slot(strvec,i));
 		}
 		else if (!strcmp(str, "quickack")) {
 			i++;
@@ -1688,7 +1658,6 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		else if (!strcmp(str, "fastopen_no_cookie")) {
 			i++;
 #if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
-			uint32_t val;
 			if (get_u32(&val, strvec_slot(strvec, i), 1, "Invalid fastopen_no_cookie value %s specified for route"))
 				goto err;
 			new->fastopen_no_cookie = !!val;
@@ -1719,7 +1688,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 			nh = MALLOC(sizeof(nexthop_t));
 			nh->addr = parse_ipaddress(NULL, strvec_slot(strvec, ++i), false);
 			if (!nh->addr) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid \"or\" address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid \"or\" address %s", strvec_slot(strvec, i));
 				FREE(nh);
 				goto err;
 			}
@@ -1737,11 +1706,11 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 		else if (allow_track_group && !strcmp(str, "track_group")) {
 			i++;
 			if (new->track_group) {
-				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", strvec_slot(strvec, i));
 				break;
 			}
 			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
-				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
 		}
 		else {
 			if (!strcmp(str, "to"))
@@ -1773,7 +1742,7 @@ alloc_route(list rt_list, vector_t *strvec, bool allow_track_group)
 	if (do_nexthop)
 		parse_nexthops(strvec, i, new);
 	else if (i < vector_size(strvec)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Route has trailing nonsense - %s", FMT_STR_VSLOT(strvec, i));
+		report_config_error(CONFIG_GENERAL_ERROR, "Route has trailing nonsense - %s", strvec_slot(strvec, i));
 		goto err;
 	}
 
@@ -1826,15 +1795,13 @@ err:
 }
 
 /* Try to find a route in a list */
-static bool
+static ip_route_t *
 route_exist(list l, ip_route_t *iproute)
 {
 	ip_route_t *ipr;
 	element e;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		ipr = ELEMENT_DATA(e);
-
+	LIST_FOREACH(l, ipr, e) {
 		/* The kernel's key to a route is (to, tos, preference, table) */
 		if (IP_ISEQ(ipr->dst, iproute->dst) &&
 		    ipr->dst->ifa.ifa_prefixlen == iproute->dst->ifa.ifa_prefixlen &&
@@ -1843,17 +1810,17 @@ route_exist(list l, ip_route_t *iproute)
 		     ipr->metric == iproute->metric) &&
 		    ipr->table == iproute->table) {
 			ipr->set = iproute->set;
-			return true;
+			return ipr;
 		}
 	}
-	return false;
+	return NULL;
 }
 
 /* Clear diff routes */
 void
 clear_diff_routes(list l, list n)
 {
-	ip_route_t *iproute;
+	ip_route_t *iproute, *new_iproute;
 	element e;
 
 	/* No route in previous conf */
@@ -1867,10 +1834,9 @@ clear_diff_routes(list l, list n)
 		return;
 	}
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		iproute = ELEMENT_DATA(e);
+	LIST_FOREACH(l, iproute, e) {
 		if (iproute->set) {
-			if (!route_exist(n, iproute)) {
+			if (!(new_iproute = route_exist(n, iproute))) {
 				log_message(LOG_INFO, "ip route %s/%d ... , no longer exist"
 						    , ipaddresstos(NULL, iproute->dst), iproute->dst->ifa.ifa_prefixlen);
 				netlink_route(iproute, IPROUTE_DEL);
@@ -1878,8 +1844,19 @@ clear_diff_routes(list l, list n)
 			else {
 				/* There are too many route options to compare to see if the
 				 * routes are the same or not, so just replace the existing route
-				 * with the new one. */
-				netlink_route(iproute, IPROUTE_REPLACE);
+				 * with the new one.
+				 * We try replacing the route, but if, for example, it has a src
+				 * address that is a new VIP, then the route won't be able to be
+				 * added (replaced) now. In this case delete the old route, mark
+				 * it as not set, and then it will be added later when any new
+				 * routes are added. */
+				netlink_error_ignore = EINVAL;
+				if (netlink_route(new_iproute, IPROUTE_REPLACE)) {
+					netlink_error_ignore = 0;
+					netlink_route(iproute, IPROUTE_DEL);
+					new_iproute->set = false;
+				} else
+					netlink_error_ignore = 0;
 			}
 		}
 	}
@@ -1897,7 +1874,7 @@ reinstate_static_route(ip_route_t *route)
 {
 	char buf[256];
 
-	route->set = (netlink_route(route, IPROUTE_ADD) > 0);
+	route->set = !netlink_route(route, IPROUTE_ADD);
 
 	format_iproute(route, buf, sizeof(buf));
 	log_message(LOG_INFO, "Restoring deleted static route %s", buf);

@@ -31,6 +31,7 @@
 #include "rttables.h"
 
 #include "global_data.h"
+#include "main.h"
 #include "vrrp_data.h"
 #include "vrrp_sync.h"
 #ifdef _HAVE_VRRP_VMAC_
@@ -55,20 +56,19 @@ vrrp_data_t *old_vrrp_data = NULL;
 char *vrrp_buffer;
 size_t vrrp_buffer_len;
 
-static char *
+static const char *
 get_state_str(int state)
 {
 	if (state == VRRP_STATE_INIT) return "INIT";
 	if (state == VRRP_STATE_BACK) return "BACKUP";
 	if (state == VRRP_STATE_MAST) return "MASTER";
 	if (state == VRRP_STATE_FAULT) return "FAULT";
-	if (state == VRRP_DISPATCHER) return "DISPATCHER";
 	return "unknown";
 }
 
 /* Static addresses facility function */
 void
-alloc_saddress(vector_t *strvec)
+alloc_saddress(const vector_t *strvec)
 {
 	if (!LIST_EXISTS(vrrp_data->static_addresses))
 		vrrp_data->static_addresses = alloc_list(free_ipaddress, dump_ipaddress);
@@ -78,7 +78,7 @@ alloc_saddress(vector_t *strvec)
 #ifdef _HAVE_FIB_ROUTING_
 /* Static routes facility function */
 void
-alloc_sroute(vector_t *strvec)
+alloc_sroute(const vector_t *strvec)
 {
 	if (!LIST_EXISTS(vrrp_data->static_routes))
 		vrrp_data->static_routes = alloc_list(free_iproute, dump_iproute);
@@ -87,7 +87,7 @@ alloc_sroute(vector_t *strvec)
 
 /* Static rules facility function */
 void
-alloc_srule(vector_t *strvec)
+alloc_srule(const vector_t *strvec)
 {
 	if (!LIST_EXISTS(vrrp_data->static_rules))
 		vrrp_data->static_rules = alloc_list(free_iprule, dump_iprule);
@@ -105,7 +105,7 @@ free_vgroup(void *data)
 		log_message(LOG_INFO, "sync group %s - iname vector exists when freeing group", vgroup->gname);
 		free_strvec(vgroup->iname);
 	}
-	FREE(vgroup->gname);
+	FREE_CONST(vgroup->gname);
 	free_list(&vgroup->vrrp_instances);
 	free_list(&vgroup->track_ifp);
 	free_list(&vgroup->track_script);
@@ -125,24 +125,24 @@ free_vgroup(void *data)
 }
 
 static void
-dump_notify_script(FILE *fp, notify_script_t *script, char *type)
+dump_notify_script(FILE *fp, const notify_script_t *script, const char *type)
 {
 	if (!script)
 		return;
 
-	conf_write(fp, "   %s state transition script = %s, uid:gid %d:%d", type,
+	conf_write(fp, "   %s state transition script = %s, uid:gid %u:%u", type,
 	       cmd_str(script), script->uid, script->gid);
 }
 
 static void
-dump_vgroup(FILE *fp, void *data)
+dump_vgroup(FILE *fp, const void *data)
 {
-	vrrp_sgroup_t *vgroup = data;
+	const vrrp_sgroup_t *vgroup = data;
 	element e;
 
 	conf_write(fp, " VRRP Sync Group = %s, %s", vgroup->gname, get_state_str(vgroup->state));
 	if (vgroup->vrrp_instances) {
-		conf_write(fp, "   VRRP member instances = %d", LIST_SIZE(vgroup->vrrp_instances));
+		conf_write(fp, "   VRRP member instances = %u", LIST_SIZE(vgroup->vrrp_instances));
 		for (e = LIST_HEAD(vgroup->vrrp_instances); e; ELEMENT_NEXT(e)) {
 			vrrp_t *vrrp = ELEMENT_DATA(e);
 			conf_write(fp, "     %s", vrrp->iname);
@@ -152,26 +152,26 @@ dump_vgroup(FILE *fp, void *data)
 		conf_write(fp, "   sync group tracking weight set");
 	conf_write(fp, "   Using smtp notification = %s", vgroup->smtp_alert ? "yes" : "no");
 	if (!LIST_ISEMPTY(vgroup->track_ifp)) {
-		conf_write(fp, "   Tracked interfaces = %d", LIST_SIZE(vgroup->track_ifp));
+		conf_write(fp, "   Tracked interfaces = %u", LIST_SIZE(vgroup->track_ifp));
 		dump_list(fp, vgroup->track_ifp);
 	}
 	if (!LIST_ISEMPTY(vgroup->track_script)) {
-		conf_write(fp, "   Tracked scripts = %d", LIST_SIZE(vgroup->track_script));
+		conf_write(fp, "   Tracked scripts = %u", LIST_SIZE(vgroup->track_script));
 		dump_list(fp, vgroup->track_script);
 	}
 	if (!LIST_ISEMPTY(vgroup->track_file)) {
-		conf_write(fp, "   Tracked files = %d", LIST_SIZE(vgroup->track_file));
+		conf_write(fp, "   Tracked files = %u", LIST_SIZE(vgroup->track_file));
 		dump_list(fp, vgroup->track_file);
 	}
 #ifdef _WITH_CN_PROC_
 	if (!LIST_ISEMPTY(vgroup->track_process)) {
-		conf_write(fp, "   Tracked process = %d", LIST_SIZE(vgroup->track_process));
+		conf_write(fp, "   Tracked process = %u", LIST_SIZE(vgroup->track_process));
 		dump_list(fp, vgroup->track_process);
 	}
 #endif
 #ifdef _WITH_BFD_
 	if (!LIST_ISEMPTY(vgroup->track_bfd)) {
-		conf_write(fp, "   Tracked BFDs = %d", LIST_SIZE(vgroup->track_bfd));
+		conf_write(fp, "   Tracked BFDs = %u", LIST_SIZE(vgroup->track_bfd));
 		dump_list(fp, vgroup->track_bfd);
 	}
 #endif
@@ -183,12 +183,12 @@ dump_vgroup(FILE *fp, void *data)
 }
 
 void
-dump_tracking_vrrp(FILE *fp, void *data)
+dump_tracking_vrrp(FILE *fp, const void *data)
 {
-	tracking_vrrp_t *tvp = (tracking_vrrp_t *)data;
-	vrrp_t *vrrp = tvp->vrrp;
+	const tracking_vrrp_t *tvp = (const tracking_vrrp_t *)data;
+	const vrrp_t *vrrp = tvp->vrrp;
 
-	conf_write(fp, "     %s, weight %d%s", vrrp->iname, tvp->weight, tvp->type == TRACK_VRRP_DYNAMIC ? " (dynamic)" : "");
+	conf_write(fp, "     %s, weight %d%s%s", vrrp->iname, tvp->weight, tvp->weight_multiplier == -1 ? " reverse" : "", tvp->type == TRACK_VRRP_DYNAMIC ? " (dynamic)" : "");
 }
 
 static void
@@ -197,21 +197,21 @@ free_vscript(void *data)
 	vrrp_script_t *vscript = data;
 
 	free_list(&vscript->tracking_vrrp);
-	FREE(vscript->sname);
+	FREE_CONST(vscript->sname);
 	FREE_PTR(vscript->script.args);
 	FREE(vscript);
 }
 static void
-dump_vscript(FILE *fp, void *data)
+dump_vscript(FILE *fp, const void *data)
 {
-	vrrp_script_t *vscript = data;
+	const vrrp_script_t *vscript = data;
 	const char *str;
 
 	conf_write(fp, " VRRP Script = %s", vscript->sname);
 	conf_write(fp, "   Command = %s", cmd_str(&vscript->script));
 	conf_write(fp, "   Interval = %lu sec", vscript->interval / TIMER_HZ);
 	conf_write(fp, "   Timeout = %lu sec", vscript->timeout / TIMER_HZ);
-	conf_write(fp, "   Weight = %d", vscript->weight);
+	conf_write(fp, "   Weight = %d%s", vscript->weight, vscript->weight_reverse ? " reverse" : "");
 	conf_write(fp, "   Rise = %d", vscript->rise);
 	conf_write(fp, "   Fall = %d", vscript->fall);
 	conf_write(fp, "   Insecure = %s", vscript->insecure ? "yes" : "no");
@@ -225,8 +225,8 @@ dump_vscript(FILE *fp, void *data)
 		str = (vscript->result >= vscript->rise) ? "GOOD" : "BAD";
 	}
 	conf_write(fp, "   Status = %s", str);
-	conf_write(fp, "   Script uid:gid = %d:%d", vscript->script.uid, vscript->script.gid);
-	conf_write(fp, "   VRRP instances = %d", vscript->tracking_vrrp ? LIST_SIZE(vscript->tracking_vrrp) : 0);
+	conf_write(fp, "   Script uid:gid = %u:%u", vscript->script.uid, vscript->script.gid);
+	conf_write(fp, "   VRRP instances = %u", vscript->tracking_vrrp ? LIST_SIZE(vscript->tracking_vrrp) : 0);
 	if (vscript->tracking_vrrp)
 		dump_list(fp, vscript->tracking_vrrp);
 	conf_write(fp, "   State = %s",
@@ -242,20 +242,20 @@ free_vfile(void *data)
 	vrrp_tracked_file_t *vfile = data;
 
 	free_list(&vfile->tracking_vrrp);
-	FREE(vfile->fname);
-	FREE(vfile->file_path);
+	FREE_CONST(vfile->fname);
+	FREE_CONST(vfile->file_path);
 	FREE(vfile);
 }
 static void
-dump_vfile(FILE *fp, void *data)
+dump_vfile(FILE *fp, const void *data)
 {
-	vrrp_tracked_file_t *vfile = data;
+	const vrrp_tracked_file_t *vfile = data;
 
 	conf_write(fp, " VRRP Track file = %s", vfile->fname);
 	conf_write(fp, "   File = %s", vfile->file_path);
 	conf_write(fp, "   Status = %d", vfile->last_status);
-	conf_write(fp, "   Weight = %d", vfile->weight);
-	conf_write(fp, "   Tracking VRRP instances = %d", vfile->tracking_vrrp ? LIST_SIZE(vfile->tracking_vrrp) : 0);
+	conf_write(fp, "   Weight = %d%s", vfile->weight, vfile->weight_reverse ? " reverse" : "");
+	conf_write(fp, "   Tracking VRRP instances = %u", vfile->tracking_vrrp ? LIST_SIZE(vfile->tracking_vrrp) : 0);
 	if (vfile->tracking_vrrp)
 		dump_list(fp, vfile->tracking_vrrp);
 }
@@ -267,23 +267,49 @@ free_vprocess(void *data)
 	vrrp_tracked_process_t *vprocess = data;
 
 	free_list(&vprocess->tracking_vrrp);
-	FREE(vprocess->pname);
-	FREE(vprocess->process_path);
+	FREE_CONST(vprocess->pname);
+	FREE_CONST(vprocess->process_path);
+	FREE_CONST_PTR(vprocess->process_params);
 	FREE(vprocess);
 }
 static void
-dump_vprocess(FILE *fp, void *data)
+dump_vprocess(FILE *fp, const void *data)
 {
-	vrrp_tracked_process_t *vprocess = data;
+	const vrrp_tracked_process_t *vprocess = data;
+	char *params;
+	char *p;
 
 	conf_write(fp, " VRRP Track process = %s", vprocess->pname);
 	conf_write(fp, "   Process = %s", vprocess->process_path);
-	conf_write(fp, "   Min processes = %d", vprocess->quorum);
-	conf_write(fp, "   Current processes = %d", vprocess->num_cur_proc);
-	conf_write(fp, "   Weight = %d", vprocess->weight);
-	conf_write(fp, "   Delay = %fs", (double)vprocess->delay / TIMER_HZ);
+	if (vprocess->process_params) {
+		params = MALLOC(vprocess->process_params_len);
+		memcpy(params, vprocess->process_params, vprocess->process_params_len);
+		p = params;
+		for (p = strchr(params, '\0'); p < params + vprocess->process_params_len - 1; p = strchr(params + 1, '\0'))
+			*p = ' ';
+		conf_write(fp, "   Parameters = %s", params);
+		FREE(params);
+	}
+	if (vprocess->param_match != PARAM_MATCH_NONE)
+		conf_write(fp, "   Param match%s",
+			       vprocess->param_match == PARAM_MATCH_EXACT ? "" :
+			       vprocess->param_match == PARAM_MATCH_PARTIAL ? " = partial" :
+			       vprocess->param_match == PARAM_MATCH_INITIAL ? " = initial" :
+			       "unknown");
+	conf_write(fp, "   Min processes = %u", vprocess->quorum);
+	if (vprocess->quorum_max < UINT_MAX)
+		conf_write(fp, "   Max processes = %u", vprocess->quorum_max);
+	conf_write(fp, "   Current processes = %u", vprocess->num_cur_proc);
+	conf_write(fp, "   Have quorum = %s", vprocess->have_quorum ? "true" : "false");
+	conf_write(fp, "   Weight = %d%s", vprocess->weight, vprocess->weight_reverse ? " reverse" : "");
+	conf_write(fp, "   Terminate delay = %fs", (double)vprocess->terminate_delay / TIMER_HZ);
+	conf_write(fp, "   Fork delay = %fs", (double)vprocess->fork_delay / TIMER_HZ);
+	if (fp) {
+		conf_write(fp, "   Fork delay timer %srunning", vprocess->fork_timer_thread ? "" : "not ");
+		conf_write(fp, "   Terminate delay timer %srunning", vprocess->terminate_timer_thread ? "" : "not ");
+	}
 	conf_write(fp, "   Full command = %s", vprocess->full_command ? "true" : "false");
-	conf_write(fp, "   Tracking VRRP instances = %d", vprocess->tracking_vrrp ? LIST_SIZE(vprocess->tracking_vrrp) : 0);
+	conf_write(fp, "   Tracking VRRP instances = %u", vprocess->tracking_vrrp ? LIST_SIZE(vprocess->tracking_vrrp) : 0);
 	if (vprocess->tracking_vrrp)
 		dump_list(fp, vprocess->tracking_vrrp);
 }
@@ -292,13 +318,14 @@ dump_vprocess(FILE *fp, void *data)
 #ifdef _WITH_BFD_
 /* Track bfd dump */
 static void
-dump_vrrp_bfd(FILE *fp, void *track_data)
+dump_vrrp_bfd(FILE *fp, const void *track_data)
 {
-	vrrp_tracked_bfd_t *vbfd = track_data;
+	const vrrp_tracked_bfd_t *vbfd = track_data;
 
 	conf_write(fp, " VRRP Track BFD = %s", vbfd->bname);
-	conf_write(fp, "   Weight = %d", vbfd->weight);
-	conf_write(fp, "   Tracking VRRP instances = %d", vbfd->tracking_vrrp ? LIST_SIZE(vbfd->tracking_vrrp) : 0);
+	conf_write(fp, "   Weight = %d%s", vbfd->weight, vbfd->weight_reverse ? " reverse" : "");
+	conf_write(fp, "   Bfd is %s", vbfd->bfd_up ? "up" : "down");
+	conf_write(fp, "   Tracking VRRP instances = %u", vbfd->tracking_vrrp ? LIST_SIZE(vbfd->tracking_vrrp) : 0);
 	if (vbfd->tracking_vrrp)
 		dump_list(fp, vbfd->tracking_vrrp);
 }
@@ -319,8 +346,11 @@ free_sock(void *sock_data)
 {
 	sock_t *sock = sock_data;
 
-	/* First of all cancel pending thread */
-	thread_cancel(sock->thread);
+	/* First of all cancel pending thread. If we are reloading
+	 * thread_cleanup_master() has already been called, and so
+	 * the thread already will have been cancelled. */
+	if (!reload)
+		thread_cancel(sock->thread);
 
 	/* Close related socket */
 	if (sock->fd_in > 0)
@@ -331,11 +361,11 @@ free_sock(void *sock_data)
 }
 
 static void
-dump_sock(FILE *fp, void *sock_data)
+dump_sock(FILE *fp, const void *sock_data)
 {
-	sock_t *sock = sock_data;
+	const sock_t *sock = sock_data;
 
-	conf_write(fp, "VRRP sockpool: [ifindex(%u), family(%s), proto(%u), unicast(%d), fd(%d,%d)]"
+	conf_write(fp, "VRRP sockpool: [ifindex(%u), family(%s), proto(%d), unicast(%d), fd(%d,%d)]"
 			    , sock->ifp->ifindex
 			    , sock->family == AF_INET ? "IPv4" : sock->family == AF_INET6 ? "IPv6" : "unknown"
 			    , sock->proto
@@ -345,11 +375,11 @@ dump_sock(FILE *fp, void *sock_data)
 }
 
 static void
-dump_sock_pool(FILE *fp, list sock_pool)
+dump_sock_pool(FILE *fp, const list sock_pool)
 {
-	sock_t *sock;
+	const sock_t *sock;
 	element e;
-	vrrp_t *vrrp;
+	const vrrp_t *vrrp;
 
 	LIST_FOREACH(sock_pool, sock, e) {
 		conf_write(fp, " fd_in %d fd_out = %d", sock->fd_in, sock->fd_out);
@@ -359,7 +389,7 @@ dump_sock_pool(FILE *fp, list sock_pool)
 		conf_write(fp, "   Type = %scast", sock->unicast ? "Uni" : "Multi");
 		conf_write(fp, "   Rx buf size = %d", sock->rx_buf_size);
 		conf_write(fp, "   VRRP instances");
-		rb_for_each_entry(vrrp, &sock->rb_vrid, rb_vrid)
+		rb_for_each_entry_const(vrrp, &sock->rb_vrid, rb_vrid)
 			conf_write(fp, "     %s vrid %d", vrrp->iname, vrrp->vrid);
 	}
 }
@@ -371,11 +401,15 @@ free_unicast_peer(void *data)
 }
 
 static void
-dump_unicast_peer(FILE *fp, void *data)
+dump_unicast_peer(FILE *fp, const void *data)
 {
-	struct sockaddr_storage *peer = data;
+	const unicast_peer_t *peer = data;
 
-	conf_write(fp, "     %s", inet_sockaddrtos(peer));
+	conf_write(fp, "     %s", inet_sockaddrtos(&peer->address));
+#ifdef CHECKSUM_DIAGNOSTICS
+	conf_write(fp, "       last rx checksum = 0x%4.4x, priority %d", peer->chk.last_rx_checksum, peer->chk.last_rx_priority);
+	conf_write(fp, "       last tx checksum = 0x%4.4x, priority %d", peer->chk.last_tx_checksum, peer->chk.last_tx_priority);
+#endif
 }
 
 static void
@@ -383,7 +417,10 @@ free_vrrp(void *data)
 {
 	vrrp_t *vrrp = data;
 
-	FREE(vrrp->iname);
+	FREE_CONST(vrrp->iname);
+#ifdef _HAVE_VRRP_IPVLAN_
+	FREE_PTR(vrrp->ipvlan_addr);
+#endif
 	FREE_PTR(vrrp->send_buffer);
 	free_notify_script(&vrrp->script_backup);
 	free_notify_script(&vrrp->script_master);
@@ -411,9 +448,9 @@ free_vrrp(void *data)
 }
 
 static void
-dump_vrrp(FILE *fp, void *data)
+dump_vrrp(FILE *fp, const void *data)
 {
-	vrrp_t *vrrp = data;
+	const vrrp_t *vrrp = data;
 #ifdef _WITH_VRRP_AUTH_
 	char auth_data[sizeof(vrrp->auth_data) + 1];
 #endif
@@ -435,7 +472,7 @@ dump_vrrp(FILE *fp, void *data)
 			conf_write(fp, "   Master router = %s", inet_sockaddrtos(&vrrp->master_saddr));
 			conf_write(fp, "   Master priority = %d", vrrp->master_priority);
 			if (vrrp->version == VRRP_VERSION_3)
-				conf_write(fp, "   Master advert int = %.2f sec", (float)vrrp->master_adver_int / TIMER_HZ);
+				conf_write(fp, "   Master advert int = %.2f sec", vrrp->master_adver_int / TIMER_HZ_DOUBLE);
 		}
 	}
 	conf_write(fp, "   Wantstate = %s", get_state_str(vrrp->wantstate));
@@ -445,9 +482,9 @@ dump_vrrp(FILE *fp, void *data)
 		if (vrrp->duplicate_vrid_fault)
 			conf_write(fp, "   Duplicate VRID");
 #endif
-		conf_write(fp, "   Number of track scripts init = %d", vrrp->num_script_init);
+		conf_write(fp, "   Number of track scripts init = %u", vrrp->num_script_init);
 		ctime_r(&vrrp->last_transition.tv_sec, time_str);
-		conf_write(fp, "   Last transition = %ld (%.24s)", vrrp->last_transition.tv_sec, time_str);
+		conf_write(fp, "   Last transition = %ld.%6.6ld (%.24s.%6.6ld)", vrrp->last_transition.tv_sec, vrrp->last_transition.tv_usec, time_str, vrrp->last_transition.tv_usec);
 		if (!ctime_r(&vrrp->sands.tv_sec, time_str))
 			strcpy(time_str, "invalid time ");
 		if (vrrp->sands.tv_sec == TIMER_DISABLED)
@@ -458,12 +495,29 @@ dump_vrrp(FILE *fp, void *data)
 	}
 #ifdef _HAVE_VRRP_VMAC_
 	if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
-		conf_write(fp, "   Use VMAC, is_up = %s,  xmit_base = %s",
+		conf_write(fp, "   Use VMAC, i/f name %s, is_up = %s, xmit_base = %s",
+				vrrp->vmac_ifname,
 				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
 				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? "true" : "false");
+#ifdef _HAVE_VRRP_IPVLAN_
+	else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags))
+		conf_write(fp, "   Use IPVLAN, i/f %s, is_up = %s%s%s, type %s",
+				vrrp->vmac_ifname,
+				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
+				vrrp->ipvlan_addr ? ", i/f address = " : "",
+				vrrp->ipvlan_addr ? ipaddresstos(NULL, vrrp->ipvlan_addr) : "",
+#ifdef IPVLAN_F_VEPA	/* Since Linux v4.15 */
+				!vrrp->ipvlan_type ? "bridge" : vrrp->ipvlan_type == IPVLAN_F_PRIVATE ? "private" : vrrp->ipvlan_type == IPVLAN_F_VEPA ? "vepa" : "unknown"
+#else
+				"bridge"
+#endif
+					);
+#endif
 	if (vrrp->ifp->is_ours) {
-		conf_write(fp, "   Interface = %s, vmac on %s, xmit %s i/f", IF_NAME(vrrp->ifp),
-				vrrp->ifp->base_ifp->ifname, __test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? "base" : "vmac");
+		conf_write(fp, "   Interface = %s, %s on %s%s", IF_NAME(vrrp->ifp),
+				__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) ? "vmac" : "ipvlan",
+				vrrp->ifp != vrrp->ifp->base_ifp ? vrrp->ifp->base_ifp->ifname : "(unknown)",
+				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? ", xmit base i/f" : "");
 	} else
 #endif
 		conf_write(fp, "   Interface = %s", IF_NAME(vrrp->ifp));
@@ -481,12 +535,12 @@ dump_vrrp(FILE *fp, void *data)
 						    ? inet_sockaddrtos(&vrrp->saddr)
 						    : "(none)",
 						  vrrp->saddr_from_config ? " (from configuration)" : "");
-	conf_write(fp, "   Gratuitous ARP delay = %d",
+	conf_write(fp, "   Gratuitous ARP delay = %u",
 		       vrrp->garp_delay/TIMER_HZ);
-	conf_write(fp, "   Gratuitous ARP repeat = %d", vrrp->garp_rep);
-	conf_write(fp, "   Gratuitous ARP refresh = %lu",
+	conf_write(fp, "   Gratuitous ARP repeat = %u", vrrp->garp_rep);
+	conf_write(fp, "   Gratuitous ARP refresh = %ld",
 		       vrrp->garp_refresh.tv_sec);
-	conf_write(fp, "   Gratuitous ARP refresh repeat = %d", vrrp->garp_refresh_rep);
+	conf_write(fp, "   Gratuitous ARP refresh repeat = %u", vrrp->garp_refresh_rep);
 	conf_write(fp, "   Gratuitous ARP lower priority delay = %u", vrrp->garp_lower_prio_delay / TIMER_HZ);
 	conf_write(fp, "   Gratuitous ARP lower priority repeat = %u", vrrp->garp_lower_prio_rep);
 	conf_write(fp, "   Send advert after receive lower priority advert = %s", vrrp->lower_prio_no_advert ? "false" : "true");
@@ -497,19 +551,19 @@ dump_vrrp(FILE *fp, void *data)
 		conf_write(fp, "   Effective priority = %d", vrrp->effective_priority);
 		conf_write(fp, "   Total priority = %d", vrrp->total_priority);
 	}
-	conf_write(fp, "   Advert interval = %d %s",
+	conf_write(fp, "   Advert interval = %u %s",
 		(vrrp->version == VRRP_VERSION_2) ? (vrrp->adver_int / TIMER_HZ) :
 		(vrrp->adver_int / (TIMER_HZ / 1000)),
 		(vrrp->version == VRRP_VERSION_2) ? "sec" : "milli-sec");
 	if (vrrp->state == VRRP_STATE_BACK && vrrp->version == VRRP_VERSION_3)
-		conf_write(fp, "   Master advert interval = %d milli-sec", vrrp->master_adver_int / (TIMER_HZ / 1000));
+		conf_write(fp, "   Master advert interval = %u milli-sec", vrrp->master_adver_int / (TIMER_HZ / 1000));
 #ifdef _WITH_FIREWALL_
 	conf_write(fp, "   Accept = %s", vrrp->accept ? "enabled" : "disabled");
 #endif
 	conf_write(fp, "   Preempt = %s", vrrp->nopreempt ? "disabled" : "enabled");
 	if (vrrp->preempt_delay)
 		conf_write(fp, "   Preempt delay = %g secs",
-		       (float)vrrp->preempt_delay / TIMER_HZ);
+		       vrrp->preempt_delay / TIMER_HZ_DOUBLE);
 	conf_write(fp, "   Promote_secondaries = %s", vrrp->promote_secondaries ? "enabled" : "disabled");
 #if defined _WITH_VRRP_AUTH_
 	if (vrrp->auth_type) {
@@ -532,17 +586,22 @@ dump_vrrp(FILE *fp, void *data)
 	if (vrrp->debug)
 		conf_write(fp, "   Debug level = %d", vrrp->debug);
 
+#ifdef CHECKSUM_DIAGNOSTICS
+	conf_write(fp, "   last rx checksum = 0x%4.4x, priority %d", vrrp->chk.last_rx_checksum, vrrp->chk.last_rx_priority);
+	conf_write(fp, "   last tx checksum = 0x%4.4x, priority %d", vrrp->chk.last_tx_checksum, vrrp->chk.last_tx_priority);
+#endif
+
 	if (!LIST_ISEMPTY(vrrp->vip)) {
-		conf_write(fp, "   Virtual IP = %d", LIST_SIZE(vrrp->vip));
+		conf_write(fp, "   Virtual IP = %u", LIST_SIZE(vrrp->vip));
 		dump_list(fp, vrrp->vip);
 	}
 	if (!LIST_ISEMPTY(vrrp->evip)) {
-		conf_write(fp, "   Virtual IP Excluded = %d",
+		conf_write(fp, "   Virtual IP Excluded = %u",
 			LIST_SIZE(vrrp->evip));
 		dump_list(fp, vrrp->evip);
 	}
 	if (!LIST_ISEMPTY(vrrp->unicast_peer)) {
-		conf_write(fp, "   Unicast Peer = %d",
+		conf_write(fp, "   Unicast Peer = %u",
 			LIST_SIZE(vrrp->unicast_peer));
 		dump_list(fp, vrrp->unicast_peer);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
@@ -559,36 +618,36 @@ dump_vrrp(FILE *fp, void *data)
 		conf_write(fp, "   No sockets allocated");
 #ifdef _HAVE_FIB_ROUTING_
 	if (!LIST_ISEMPTY(vrrp->vroutes)) {
-		conf_write(fp, "   Virtual Routes = %d", LIST_SIZE(vrrp->vroutes));
+		conf_write(fp, "   Virtual Routes = %u", LIST_SIZE(vrrp->vroutes));
 		dump_list(fp, vrrp->vroutes);
 	}
 	if (!LIST_ISEMPTY(vrrp->vrules)) {
-		conf_write(fp, "   Virtual Rules = %d", LIST_SIZE(vrrp->vrules));
+		conf_write(fp, "   Virtual Rules = %u", LIST_SIZE(vrrp->vrules));
 		dump_list(fp, vrrp->vrules);
 	}
 #endif
 
 	if (!LIST_ISEMPTY(vrrp->track_ifp)) {
-		conf_write(fp, "   Tracked interfaces = %d", LIST_SIZE(vrrp->track_ifp));
+		conf_write(fp, "   Tracked interfaces = %u", LIST_SIZE(vrrp->track_ifp));
 		dump_list(fp, vrrp->track_ifp);
 	}
 	if (!LIST_ISEMPTY(vrrp->track_script)) {
-		conf_write(fp, "   Tracked scripts = %d", LIST_SIZE(vrrp->track_script));
+		conf_write(fp, "   Tracked scripts = %u", LIST_SIZE(vrrp->track_script));
 		dump_list(fp, vrrp->track_script);
 	}
 	if (!LIST_ISEMPTY(vrrp->track_file)) {
-		conf_write(fp, "   Tracked files = %d", LIST_SIZE(vrrp->track_file));
+		conf_write(fp, "   Tracked files = %u", LIST_SIZE(vrrp->track_file));
 		dump_list(fp, vrrp->track_file);
 	}
 #ifdef _WITH_CN_PROC_
 	if (!LIST_ISEMPTY(vrrp->track_process)) {
-		conf_write(fp, "   Tracked processes = %d", LIST_SIZE(vrrp->track_process));
+		conf_write(fp, "   Tracked processes = %u", LIST_SIZE(vrrp->track_process));
 		dump_list(fp, vrrp->track_process);
 	}
 #endif
 #ifdef _WITH_BFD_
 	if (!LIST_ISEMPTY(vrrp->track_bfd)) {
-		conf_write(fp, "   Tracked BFDs = %d", LIST_SIZE(vrrp->track_bfd));
+		conf_write(fp, "   Tracked BFDs = %u", LIST_SIZE(vrrp->track_bfd));
 		dump_list(fp, vrrp->track_bfd);
 	}
 #endif
@@ -607,12 +666,12 @@ dump_vrrp(FILE *fp, void *data)
 		dump_notify_script(fp, vrrp->script, "Generic");
 	if (vrrp->script_master_rx_lower_pri)
 		dump_notify_script(fp, vrrp->script_master_rx_lower_pri, "Master rx lower pri");
+	conf_write(fp, "   Notify priority changes = %s", vrrp->notify_priority_changes ? "true" : "false");
 }
 
 void
-alloc_static_track_group(char *gname)
+alloc_static_track_group(const char *gname)
 {
-	size_t size = strlen(gname);
 	static_track_group_t *new;
 
 	if (!LIST_EXISTS(vrrp_data->static_track_groups))
@@ -620,31 +679,28 @@ alloc_static_track_group(char *gname)
 
 	/* Allocate new VRRP group structure */
 	new = (static_track_group_t *) MALLOC(sizeof(*new));
-	new->gname = (char *) MALLOC(size + 1);
-	memcpy(new->gname, gname, size);
+	new->gname = STRDUP(gname);
 
 	list_add(vrrp_data->static_track_groups, new);
 }
 
 void
-alloc_vrrp_sync_group(char *gname)
+alloc_vrrp_sync_group(const char *gname)
 {
-	size_t size = strlen(gname);
 	vrrp_sgroup_t *new;
 
 	/* Allocate new VRRP group structure */
 	new = (vrrp_sgroup_t *) MALLOC(sizeof(vrrp_sgroup_t));
-	new->gname = (char *) MALLOC(size + 1);
 	new->state = VRRP_STATE_INIT;
 	new->last_email_state = VRRP_STATE_INIT;
-	memcpy(new->gname, gname, size);
+	new->gname = STRDUP(gname);
 	new->sgroup_tracking_weight = false;
 	new->smtp_alert = -1;
 
 	list_add(vrrp_data->vrrp_sync_group, new);
 }
 
-vrrp_stats *
+static vrrp_stats *
 alloc_vrrp_stats(void)
 {
 	vrrp_stats *new;
@@ -673,9 +729,8 @@ alloc_vrrp_stats(void)
 }
 
 void
-alloc_vrrp(char *iname)
+alloc_vrrp(const char *iname)
 {
-	size_t size = strlen(iname);
 	vrrp_t *new;
 
 	/* Allocate new VRRP structure */
@@ -689,8 +744,7 @@ alloc_vrrp(char *iname)
 	new->version = 0;
 	new->master_priority = 0;
 	new->last_transition = timer_now();
-	new->iname = (char *) MALLOC(size + 1);
-	memcpy(new->iname, iname, size);
+	new->iname = STRDUP(iname);
 	new->stats = alloc_vrrp_stats();
 #ifdef _WITH_FIREWALL_
 	new->accept = PARAMETER_UNSET;
@@ -707,6 +761,7 @@ alloc_vrrp(char *iname)
 	new->unicast_chksum_compat = CHKSUM_COMPATIBILITY_NONE;
 #endif
 	new->smtp_alert = -1;
+	new->notify_priority_changes = -1;
 
 	new->skip_check_adv_addr = global_data->vrrp_skip_check_adv_addr;
 	new->strict_mode = PARAMETER_UNSET;
@@ -715,30 +770,30 @@ alloc_vrrp(char *iname)
 }
 
 void
-alloc_vrrp_unicast_peer(vector_t *strvec)
+alloc_vrrp_unicast_peer(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
-	struct sockaddr_storage *peer = NULL;
+	unicast_peer_t *peer;
 
 	if (!LIST_EXISTS(vrrp->unicast_peer))
 		vrrp->unicast_peer = alloc_list(free_unicast_peer, dump_unicast_peer);
 
 	/* Allocate new unicast peer */
-	peer = (struct sockaddr_storage *) MALLOC(sizeof(struct sockaddr_storage));
-	if (inet_stosockaddr(strvec_slot(strvec, 0), NULL, peer)) {
+	peer = (unicast_peer_t *) MALLOC(sizeof(unicast_peer_t));
+	if (inet_stosockaddr(strvec_slot(strvec, 0), NULL, &peer->address)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: VRRP instance[%s] malformed unicast"
 				     " peer address[%s]. Skipping..."
-				   , vrrp->iname, FMT_STR_VSLOT(strvec, 0));
+				   , vrrp->iname, strvec_slot(strvec, 0));
 		FREE(peer);
 		return;
 	}
 
 	if (!vrrp->family)
-		vrrp->family = peer->ss_family;
-	else if (peer->ss_family != vrrp->family) {
+		vrrp->family = peer->address.ss_family;
+	else if (peer->address.ss_family != vrrp->family) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: VRRP instance[%s] and unicast peer address"
 				     "[%s] MUST be of the same family !!! Skipping..."
-				   , vrrp->iname, FMT_STR_VSLOT(strvec, 0));
+				   , vrrp->iname, strvec_slot(strvec, 0));
 		FREE(peer);
 		return;
 	}
@@ -747,115 +802,115 @@ alloc_vrrp_unicast_peer(vector_t *strvec)
 }
 
 void
-alloc_vrrp_track_if(vector_t *strvec)
+alloc_vrrp_track_if(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
 	if (!LIST_EXISTS(vrrp->track_ifp))
 		vrrp->track_ifp = alloc_list(free_track_if, dump_track_if);
-	alloc_track_if(vrrp, strvec);
+	alloc_track_if(vrrp->iname, vrrp->track_ifp, strvec);
 }
 
 void
-alloc_vrrp_track_script(vector_t *strvec)
+alloc_vrrp_track_script(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
 	if (!LIST_EXISTS(vrrp->track_script))
 		vrrp->track_script = alloc_list(free_track_script, dump_track_script);
-	alloc_track_script(vrrp, strvec);
+	alloc_track_script(vrrp->iname, vrrp->track_script, strvec);
 }
 
 void
-alloc_vrrp_track_file(vector_t *strvec)
+alloc_vrrp_track_file(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
 	if (!LIST_EXISTS(vrrp->track_file))
 		vrrp->track_file = alloc_list(free_track_file, dump_track_file);
-	alloc_track_file(vrrp, strvec);
+	alloc_track_file(vrrp->iname, vrrp->track_file, strvec);
 }
 
 #ifdef _WITH_CN_PROC_
 void
-alloc_vrrp_track_process(vector_t *strvec)
+alloc_vrrp_track_process(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
 	if (!LIST_EXISTS(vrrp->track_process))
 		vrrp->track_process = alloc_list(free_track_process, dump_track_process);
-	alloc_track_process(vrrp, strvec);
+	alloc_track_process(vrrp->iname, vrrp->track_process, strvec);
 }
 #endif
 
 #ifdef _WITH_BFD_
 void
-alloc_vrrp_track_bfd(vector_t *strvec)
+alloc_vrrp_track_bfd(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
 	if (!LIST_EXISTS(vrrp->track_bfd))
 		vrrp->track_bfd = alloc_list(free_vrrp_tracked_bfd, dump_vrrp_tracked_bfd);
-	alloc_track_bfd(vrrp, strvec);
+	alloc_track_bfd(vrrp->iname, vrrp->track_bfd, strvec);
 }
 #endif
 
 void
-alloc_vrrp_group_track_if(vector_t *strvec)
+alloc_vrrp_group_track_if(const vector_t *strvec)
 {
 	vrrp_sgroup_t *sgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
 
 	if (!LIST_EXISTS(sgroup->track_ifp))
 		sgroup->track_ifp = alloc_list(free_track_if, dump_track_if);
-	alloc_group_track_if(sgroup, strvec);
+	alloc_track_if(sgroup->gname, sgroup->track_ifp, strvec);
 }
 
 void
-alloc_vrrp_group_track_script(vector_t *strvec)
+alloc_vrrp_group_track_script(const vector_t *strvec)
 {
 	vrrp_sgroup_t *sgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
 
 	if (!LIST_EXISTS(sgroup->track_script))
 		sgroup->track_script = alloc_list(free_track_script, dump_track_script);
-	alloc_group_track_script(sgroup, strvec);
+	alloc_track_script(sgroup->gname, sgroup->track_script, strvec);
 }
 
 void
-alloc_vrrp_group_track_file(vector_t *strvec)
+alloc_vrrp_group_track_file(const vector_t *strvec)
 {
 	vrrp_sgroup_t *sgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
 
 	if (!LIST_EXISTS(sgroup->track_file))
 		sgroup->track_file = alloc_list(free_track_file, dump_track_file);
-	alloc_group_track_file(sgroup, strvec);
+	alloc_track_file(sgroup->gname, sgroup->track_file, strvec);
 }
 
 #ifdef _WITH_CN_PROC_
 void
-alloc_vrrp_group_track_process(vector_t *strvec)
+alloc_vrrp_group_track_process(const vector_t *strvec)
 {
 	vrrp_sgroup_t *sgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
 
 	if (!LIST_EXISTS(sgroup->track_process))
 		sgroup->track_process = alloc_list(free_track_process, dump_track_process);
-	alloc_group_track_process(sgroup, strvec);
+	alloc_track_process(sgroup->gname, sgroup->track_process, strvec);
 }
 #endif
 
 #ifdef _WITH_BFD_
 void
-alloc_vrrp_group_track_bfd(vector_t *strvec)
+alloc_vrrp_group_track_bfd(const vector_t *strvec)
 {
 	vrrp_sgroup_t *sgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
 
 	if (!LIST_EXISTS(sgroup->track_bfd))
 		sgroup->track_bfd = alloc_list(free_vrrp_tracked_bfd, dump_vrrp_tracked_bfd);
-	alloc_group_track_bfd(sgroup, strvec);
+	alloc_track_bfd(sgroup->gname, sgroup->track_bfd, strvec);
 }
 #endif
 
 void
-alloc_vrrp_vip(vector_t *strvec)
+alloc_vrrp_vip(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 	void *list_end = NULL;
@@ -874,14 +929,14 @@ alloc_vrrp_vip(vector_t *strvec)
 		if (vrrp->family == AF_UNSPEC)
 			vrrp->family = address_family;
 		else if (address_family != vrrp->family) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s): address family must match VRRP instance [%s] - ignoring", vrrp->iname, FMT_STR_VSLOT(strvec, 0));
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): address family must match VRRP instance [%s] - ignoring", vrrp->iname, strvec_slot(strvec, 0));
 			free_list_element(vrrp->vip, vrrp->vip->tail);
 		}
 	}
 }
 
 void
-alloc_vrrp_evip(vector_t *strvec)
+alloc_vrrp_evip(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
@@ -892,7 +947,7 @@ alloc_vrrp_evip(vector_t *strvec)
 
 #ifdef _HAVE_FIB_ROUTING_
 void
-alloc_vrrp_vroute(vector_t *strvec)
+alloc_vrrp_vroute(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
@@ -902,7 +957,7 @@ alloc_vrrp_vroute(vector_t *strvec)
 }
 
 void
-alloc_vrrp_vrule(vector_t *strvec)
+alloc_vrrp_vrule(const vector_t *strvec)
 {
 	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
 
@@ -913,15 +968,13 @@ alloc_vrrp_vrule(vector_t *strvec)
 #endif
 
 void
-alloc_vrrp_script(char *sname)
+alloc_vrrp_script(const char *sname)
 {
-	size_t size = strlen(sname);
 	vrrp_script_t *new;
 
 	/* Allocate new VRRP script structure */
 	new = (vrrp_script_t *) MALLOC(sizeof(vrrp_script_t));
-	new->sname = (char *) MALLOC(size + 1);
-	memcpy(new->sname, sname, size + 1);
+	new->sname = STRDUP(sname);
 	new->interval = VRRP_SCRIPT_DI * TIMER_HZ;
 	new->timeout = VRRP_SCRIPT_DT * TIMER_HZ;
 	new->weight = VRRP_SCRIPT_DW;
@@ -934,31 +987,28 @@ alloc_vrrp_script(char *sname)
 }
 
 void
-alloc_vrrp_file(char *fname)
+alloc_vrrp_file(const char *fname)
 {
-	size_t size = strlen(fname);
 	vrrp_tracked_file_t *new;
 
 	/* Allocate new VRRP file structure */
 	new = (vrrp_tracked_file_t *) MALLOC(sizeof(vrrp_tracked_file_t));
-	new->fname = (char *) MALLOC(size + 1);
-	memcpy(new->fname, fname, size + 1);
+	new->fname = STRDUP(fname);
 	new->weight = 1;
 	list_add(vrrp_data->vrrp_track_files, new);
 }
 
 #ifdef _WITH_CN_PROC_
 void
-alloc_vrrp_process(char *pname)
+alloc_vrrp_process(const char *pname)
 {
-	size_t size = strlen(pname);
 	vrrp_tracked_process_t *new;
 
 	/* Allocate new VRRP file structure */
 	new = (vrrp_tracked_process_t *) MALLOC(sizeof(vrrp_tracked_process_t));
-	new->pname = (char *) MALLOC(size + 1);
-	memcpy(new->pname, pname, size + 1);
+	new->pname = STRDUP(pname);
 	new->quorum = 1;
+	new->quorum_max = UINT_MAX;
 	list_add(vrrp_data->vrrp_track_processes, new);
 }
 #endif
@@ -1034,7 +1084,7 @@ free_vrrp_data(vrrp_data_t * data)
 }
 
 static void
-dump_vrrp_data(FILE *fp, vrrp_data_t * data)
+dump_vrrp_data(FILE *fp, const vrrp_data_t * data)
 {
 	if (!LIST_ISEMPTY(data->static_addresses)) {
 		conf_write(fp, "------< Static Addresses >------");

@@ -333,7 +333,7 @@ free_iprule(void *rule_data)
 }
 
 void
-format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
+format_iprule(const ip_rule_t *rule, char *buf, size_t buf_len)
 {
 	char *op = buf;
 	char *buf_end = buf + buf_len;
@@ -344,21 +344,13 @@ format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
 	if (rule->invert)
 		op += snprintf(op, (size_t)(buf_end - op), "not ");
 
-	if (rule->from_addr) {
+	if (rule->from_addr)
 		op += snprintf(op, (size_t)(buf_end - op), "from %s", ipaddresstos(NULL, rule->from_addr));
-		if ((rule->from_addr->ifa.ifa_family == AF_INET && rule->from_addr->ifa.ifa_prefixlen != 32 ) ||
-		    (rule->from_addr->ifa.ifa_family == AF_INET6 && rule->from_addr->ifa.ifa_prefixlen != 128 ))
-			op += snprintf(op, (size_t)(buf_end - op), "/%d", rule->from_addr->ifa.ifa_prefixlen);
-	}
 	else
 		op += snprintf(op, (size_t)(buf_end - op), "from all" );
 
-	if (rule->to_addr) {
+	if (rule->to_addr)
 		op += snprintf(op, (size_t)(buf_end - op), " to %s", ipaddresstos(NULL, rule->to_addr));
-		if ((rule->to_addr->ifa.ifa_family == AF_INET && rule->to_addr->ifa.ifa_prefixlen != 32 ) ||
-		    (rule->to_addr->ifa.ifa_family == AF_INET6 && rule->to_addr->ifa.ifa_prefixlen != 128 ))
-			op += snprintf(op, (size_t)(buf_end - op), "/%d", rule->to_addr->ifa.ifa_prefixlen);
-	}
 
 	if (rule->mask & IPRULE_BIT_PRIORITY)
 		op += snprintf(op, (size_t)(buf_end - op), " priority %u", rule->priority);
@@ -386,12 +378,12 @@ format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
 
 #if HAVE_DECL_FRA_SUPPRESS_PREFIXLEN
 	if (rule->suppress_prefix_len != -1)
-		op += snprintf(op, (size_t)(buf_end - op), " suppress_prefixlen %u", rule->suppress_prefix_len);
+		op += snprintf(op, (size_t)(buf_end - op), " suppress_prefixlen %" PRIi32, rule->suppress_prefix_len);
 #endif
 
 #if HAVE_DECL_FRA_SUPPRESS_IFGROUP
 	if (rule->mask & IPRULE_BIT_SUP_GROUP)
-		op += snprintf(op, (size_t)(buf_end - op), " suppress_ifgroup %d", rule->suppress_group);
+		op += snprintf(op, (size_t)(buf_end - op), " suppress_ifgroup %" PRIu32, rule->suppress_group);
 #endif
 
 #if HAVE_DECL_FRA_TUN_ID
@@ -430,7 +422,7 @@ format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
 #endif
 
 	if (rule->realms)
-		op += snprintf(op, (size_t)(buf_end - op), " realms %d/%d", rule->realms >> 16, rule->realms & 0xffff);
+		op += snprintf(op, (size_t)(buf_end - op), " realms %" PRIu32 "/%u", rule->realms >> 16, rule->realms & 0xffff);
 
 	if (rule->action == FR_ACT_TO_TBL)
 		op += snprintf(op, (size_t)(buf_end - op), " lookup %u", rule->table);
@@ -447,9 +439,9 @@ format_iprule(ip_rule_t *rule, char *buf, size_t buf_len)
 }
 
 void
-dump_iprule(FILE *fp, void *rule_data)
+dump_iprule(FILE *fp, const void *rule_data)
 {
-	ip_rule_t *rule = rule_data;
+	const ip_rule_t *rule = rule_data;
 	char *buf = MALLOC(RULE_BUF_SIZE);
 
 	format_iprule(rule, buf, RULE_BUF_SIZE);
@@ -460,10 +452,10 @@ dump_iprule(FILE *fp, void *rule_data)
 }
 
 void
-alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_track_group)
+alloc_rule(list rule_list, const vector_t *strvec, __attribute__((unused)) bool allow_track_group)
 {
 	ip_rule_t *new;
-	char *str;
+	const char *str;
 	unsigned int i = 0;
 	unsigned long val, val1;
 	unsigned val_unsigned;
@@ -513,7 +505,7 @@ alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_
 				FREE(new->from_addr);
 			new->from_addr = parse_route(strvec_slot(strvec, ++i));
 			if (!new->from_addr) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rule from address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rule from address %s", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (family == AF_UNSPEC)
@@ -529,7 +521,7 @@ alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_
 				FREE(new->to_addr);
 			new->to_addr = parse_route(strvec_slot(strvec, ++i));
 			if (!new->to_addr) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rule to address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rule to address %s", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (family == AF_UNSPEC)
@@ -543,7 +535,7 @@ alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_
 		else if (!strcmp(str, "table") ||
 			 !strcmp(str, "lookup")) {
 			if (!find_rttables_table(strvec_slot(strvec, ++i), &uval32)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Routing table %s not found for rule", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Routing table %s not found for rule", strvec_slot(strvec, i));
 				goto err;
 			}
 			if (uval32 == 0) {
@@ -572,7 +564,7 @@ alloc_rule(list rule_list, vector_t *strvec, __attribute__((unused)) bool allow_
 		}
 		else if (!strcmp(str, "tos") || !strcmp(str, "dsfield")) {
 			if (!find_rttables_dsfield(strvec_slot(strvec, ++i), &uval8)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "TOS value %s is invalid", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "TOS value %s is invalid", strvec_slot(strvec, i));
 				goto err;
 			}
 
@@ -617,7 +609,7 @@ fwmark_err:
 		else if (!strcmp(str, "realms")) {
 			str = strvec_slot(strvec, ++i);
 			if (get_realms(&uval32, str)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid realms %s for rule", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid realms %s for rule", strvec_slot(strvec, i));
 				goto err;
 			}
 
@@ -643,7 +635,7 @@ fwmark_err:
 #if HAVE_DECL_FRA_SUPPRESS_IFGROUP
 		else if (!strcmp(str, "suppress_ifgroup") || !strcmp(str, "sup_group")) {
 			if (!find_rttables_group(strvec_slot(strvec, ++i), &uval32)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "suppress_group %s is invalid", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "suppress_group %s is invalid", strvec_slot(strvec, i));
 				goto err;
 			}
 			new->suppress_group = uval32;
@@ -683,14 +675,14 @@ fwmark_err:
 #endif
 #if HAVE_DECL_FRA_UID_RANGE
 		else if (!strcmp(str, "uidrange")) {
-			uint32_t start, end;
-			if (sscanf(strvec_slot(strvec, ++i), "%" PRIu32 "-%" PRIu32, &start, &end) != 2) {
+			uint32_t range_start, range_end;
+			if (sscanf(strvec_slot(strvec, ++i), "%" PRIu32 "-%" PRIu32, &range_start, &range_end) != 2) {
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid uidrange %s specified", str);
 				goto err;
 			}
 			new->mask |= IPRULE_BIT_UID_RANGE;
-			new->uid_range.start = start;
-			new->uid_range.end = end;
+			new->uid_range.start = range_start;
+			new->uid_range.end = range_end;
 		}
 #endif
 #if HAVE_DECL_FRA_L3MDEV
@@ -706,7 +698,7 @@ fwmark_err:
 #if HAVE_DECL_FRA_PROTOCOL
 		else if (!strcmp(str, "protocol")) {
 			if (!read_unsigned_strvec(strvec, ++i, &val_unsigned, 0, UINT8_MAX, false))
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid protocol %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid protocol %s", strvec_slot(strvec, i));
 			else {
 				new->protocol = val_unsigned;
 				new->mask |= IPRULE_BIT_PROTOCOL;
@@ -717,7 +709,7 @@ fwmark_err:
 		else if (!strcmp(str, "ipproto")) {
 			int ip_proto = inet_proto_a2n(strvec_slot(strvec, ++i));
 			if (ip_proto < 0 || ip_proto > UINT8_MAX)
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid ipproto %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid ipproto %s", strvec_slot(strvec, i));
 			else {
 				new->ip_proto = ip_proto;
 				new->mask |= IPRULE_BIT_IP_PROTO;
@@ -733,7 +725,7 @@ fwmark_err:
 			if (ret == 1)
 				sport.end = sport.start;
 			if (ret != 2)
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid sport range %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid sport range %s", strvec_slot(strvec, i));
 			else {
 				new->src_port = sport;
 				new->mask |= IPRULE_BIT_SPORT_RANGE;
@@ -749,7 +741,7 @@ fwmark_err:
 			if (ret == 1)
 				dport.end = dport.start;
 			if (ret != 2)
-				report_config_error(CONFIG_GENERAL_ERROR, "invalid dport range %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "invalid dport range %s", strvec_slot(strvec, i));
 			else {
 				new->dst_port = dport;
 				new->mask |= IPRULE_BIT_DPORT_RANGE;
@@ -763,11 +755,11 @@ fwmark_err:
 		else if (allow_track_group && !strcmp(str, "track_group")) {
 			i++;
 			if (new->track_group) {
-				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", strvec_slot(strvec, i));
 				break;
 			}
 			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
-                                report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
+                                report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
 		}
 #endif
 		else {
@@ -864,7 +856,7 @@ fwmark_err:
 	if (!(new->mask & IPRULE_BIT_PRIORITY)) {
 		new->priority = new->family == AF_INET ? next_rule_priority_ipv4-- : next_rule_priority_ipv6--;
 		new->mask |= IPRULE_BIT_PRIORITY;
-		report_config_error(CONFIG_GENERAL_ERROR, "Rule has no preference specifed - setting to %u. This is probably not what you want.", new->priority);
+		report_config_error(CONFIG_GENERAL_ERROR, "Rule has no preference specified - setting to %u. This is probably not what you want.", new->priority);
 	}
 
 	list_add(rule_list, new);

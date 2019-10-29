@@ -49,18 +49,23 @@
 
 #define INFINITY_LIFE_TIME      0xFFFFFFFF
 
-char *
-ipaddresstos(char *buf, ip_address_t *ipaddress)
+const char *
+ipaddresstos(char *buf, const ip_address_t *ipaddress)
 {
-	static char addr_str[INET6_ADDRSTRLEN];
+	static char addr_str[INET6_ADDRSTRLEN + 4];	/* allow for subnet */
+	char *end;
 
 	if (!buf)
 		buf = addr_str;
 
-	if (IP_IS6(ipaddress)) {
+	if (IP_IS6(ipaddress))
 		inet_ntop(AF_INET6, &ipaddress->u.sin6_addr, buf, INET6_ADDRSTRLEN);
-	} else {
+	else
 		inet_ntop(AF_INET, &ipaddress->u.sin.sin_addr, buf, INET_ADDRSTRLEN);
+	if ((ipaddress->ifa.ifa_family == AF_INET && ipaddress->ifa.ifa_prefixlen != 32 ) ||
+	    (ipaddress->ifa.ifa_family == AF_INET6 && ipaddress->ifa.ifa_prefixlen != 128 )) {
+		end = addr_str + strlen(addr_str);
+		snprintf(end, addr_str + sizeof(addr_str) - end, "/%u", ipaddress->ifa.ifa_prefixlen);
 	}
 
 	return buf;
@@ -235,15 +240,13 @@ free_ipaddress(void *if_data)
 }
 
 void
-format_ipaddress(ip_address_t *ipaddr, char *buf, size_t buf_len)
+format_ipaddress(const ip_address_t *ipaddr, char *buf, size_t buf_len)
 {
-	char peer[INET6_ADDRSTRLEN];
+	char peer[INET6_ADDRSTRLEN + 4];	/* allow for subnet */
 	char *buf_p = buf;
 	char *buf_end = buf + buf_len;
 
 	buf_p += snprintf(buf_p, buf_end - buf_p, "%s", ipaddresstos(NULL, ipaddr));
-	if (!ipaddr->have_peer)
-		buf_p += snprintf(buf_p, buf_end - buf_p, "/%d", ipaddr->ifa.ifa_prefixlen);
 	if (!IP_IS6(ipaddr) && ipaddr->u.sin.sin_brd.s_addr) {
 		buf_p += snprintf(buf_p, buf_end - buf_p, " brd %s",
 			 inet_ntop2(ipaddr->u.sin.sin_brd.s_addr));
@@ -296,9 +299,9 @@ format_ipaddress(ip_address_t *ipaddr, char *buf, size_t buf_len)
 }
 
 void
-dump_ipaddress(FILE *fp, void *if_data)
+dump_ipaddress(FILE *fp, const void *if_data)
 {
-	ip_address_t *ipaddr = if_data;
+	const ip_address_t *ipaddr = if_data;
 	char buf[256];
 
 	format_ipaddress(ipaddr, buf, sizeof(buf));
@@ -307,12 +310,13 @@ dump_ipaddress(FILE *fp, void *if_data)
 }
 
 ip_address_t *
-parse_ipaddress(ip_address_t *ip_address, char *str, bool allow_subnet_mask)
+parse_ipaddress(ip_address_t *ip_address, const char *str, bool allow_subnet_mask)
 {
 	ip_address_t *new = ip_address;
 	void *addr;
-	char *p;
+	const char *p;
 	unsigned prefixlen;
+	const char *str_dup = NULL;
 
 	/* No ip address, allocate a brand new one */
 	if (!new)
@@ -328,31 +332,32 @@ parse_ipaddress(ip_address_t *ip_address, char *str, bool allow_subnet_mask)
 		p = NULL;
 
 	if (p) {
-		*p = 0;
 		if (!read_unsigned(p + 1, &prefixlen, 0, new->ifa.ifa_prefixlen, true))
 			report_config_error(CONFIG_GENERAL_ERROR, "Invalid address prefix len %s for address %s - using %d", p + 1, str, new->ifa.ifa_prefixlen);
 		else
 			new->ifa.ifa_prefixlen = prefixlen;
+
+		str_dup = STRNDUP(str, p - str);
 	}
 
 	addr = (IP_IS6(new)) ? (void *) &new->u.sin6_addr :
 			       (void *) &new->u.sin.sin_addr;
-	if (!inet_pton(IP_FAMILY(new), str, addr)) {
+	if (!inet_pton(IP_FAMILY(new), str_dup ? str_dup : str, addr)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "VRRP parsed invalid IP %s. skipping IP...", str);
 		if (!ip_address)
 			FREE(new);
 		new = NULL;
 	}
 
-	/* Restore slash */
-	if (p)
-		*p = '/';
+	/* Release dup'd string */
+	if (str_dup)
+		FREE_CONST(str_dup);
 
 	return new;
 }
 
 ip_address_t *
-parse_route(char *str)
+parse_route(const char *str)
 {
 	ip_address_t *new = (ip_address_t *)MALLOC(sizeof(ip_address_t));
 
@@ -369,11 +374,16 @@ parse_route(char *str)
 		return new;
 	}
 
-	return parse_ipaddress(new, str, true);
+	if (!parse_ipaddress(new, str, true)) {
+		FREE(new);
+		return NULL;
+	}
+
+	return new;
 }
 
 void
-alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_track_group)
+alloc_ipaddress(list ip_list, const vector_t *strvec, const interface_t *ifp, bool allow_track_group)
 {
 /* The way this works is slightly strange.
  *
@@ -388,12 +398,12 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
  */
 	ip_address_t *new;
 	interface_t *ifp_local;
-	char *str;
+	const char *str;
 	unsigned int i = 0, addr_idx = 0;
 	uint8_t scope;
 	bool param_avail;
 	bool param_missing = false;
-	char *param;
+	const char *param;
 	ip_address_t peer = { .ifa.ifa_family = AF_UNSPEC };
 	int brd_len = 0;
 	uint32_t mask;
@@ -423,13 +433,13 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 			}
 
 			if (new->ifp) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify static ipaddress device more than once for %s", FMT_STR_VSLOT(strvec, addr_idx));
+				report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify static ipaddress device more than once for %s", strvec_slot(strvec, addr_idx));
 				FREE(new);
 				return;
 			}
 			if (!(ifp_local = if_get_by_ifname(strvec_slot(strvec, ++i), IF_CREATE_IF_DYNAMIC))) {
 				report_config_error(CONFIG_GENERAL_ERROR, "WARNING - interface %s for ip address %s doesn't exist",
-						FMT_STR_VSLOT(strvec, i), FMT_STR_VSLOT(strvec, addr_idx));
+						strvec_slot(strvec, i), strvec_slot(strvec, addr_idx));
 				FREE(new);
 				return;
 			}
@@ -441,7 +451,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 			}
 
 			if (!find_rttables_scope(strvec_slot(strvec, ++i), &scope))
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid scope '%s' specified for %s - ignoring", FMT_STR_VSLOT(strvec,i), FMT_STR_VSLOT(strvec, addr_idx));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid scope '%s' specified for %s - ignoring", strvec_slot(strvec,i), strvec_slot(strvec, addr_idx));
 			else
 				new->ifa.ifa_scope = scope;
 		} else if (!strcmp(str, "broadcast") || !strcmp(str, "brd")) {
@@ -453,7 +463,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 			if (IP_IS6(new)) {
 				report_config_error(CONFIG_GENERAL_ERROR, "VRRP is trying to assign a broadcast %s to the IPv6 address %s !!?? "
 						      "WTF... skipping VIP..."
-						    , FMT_STR_VSLOT(strvec, i), FMT_STR_VSLOT(strvec, addr_idx));
+						    , strvec_slot(strvec, i), strvec_slot(strvec, addr_idx));
 				FREE(new);
 				return;
 			}
@@ -467,7 +477,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 				brd_len = -1;
 			else if (!inet_pton(AF_INET, param, &new->u.sin.sin_brd)) {
 				report_config_error(CONFIG_GENERAL_ERROR, "VRRP is trying to assign invalid broadcast %s. "
-						      "skipping VIP...", FMT_STR_VSLOT(strvec, i));
+						      "skipping VIP...", strvec_slot(strvec, i));
 				FREE(new);
 				return;
 			}
@@ -487,14 +497,14 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 
 			i++;
 			if (new->have_peer) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Peer %s - another peer has already been specified", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Peer %s - another peer has already been specified", strvec_slot(strvec, i));
 				continue;
 			}
 
 			if (!parse_ipaddress(&peer, strvec_slot(strvec,i), false))
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid peer address %s", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid peer address %s", strvec_slot(strvec, i));
 			else if (peer.ifa.ifa_family != new->ifa.ifa_family)
-				report_config_error(CONFIG_GENERAL_ERROR, "Peer address %s does not match address family", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "Peer address %s does not match address family", strvec_slot(strvec, i));
 			else {
 				if ((new->ifa.ifa_family == AF_INET6 && new->ifa.ifa_prefixlen != 128) ||
 				    (new->ifa.ifa_family == AF_INET && new->ifa.ifa_prefixlen != 32))
@@ -539,11 +549,11 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 			}
 			i++;
 			if (new->track_group) {
-				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", FMT_STR_VSLOT(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s is a duplicate", strvec_slot(strvec, i));
 				break;
 			}
 			if (!(new->track_group = find_track_group(strvec_slot(strvec, i))))
-                                report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", FMT_STR_VSLOT(strvec, i));
+                                report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
 		} else
 			report_config_error(CONFIG_GENERAL_ERROR, "Unknown configuration entry '%s' for ip address - ignoring", str);
 		i++;
@@ -551,7 +561,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 
 	/* Check if there was a missing parameter for a keyword */
 	if (param_missing) {
-		report_config_error(CONFIG_GENERAL_ERROR, "No %s parameter specified for %s", str, FMT_STR_VSLOT(strvec, addr_idx));
+		report_config_error(CONFIG_GENERAL_ERROR, "No %s parameter specified for %s", str, strvec_slot(strvec, addr_idx));
 		free(new);
 		return;
 	}
@@ -578,7 +588,7 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 			global_data->default_ifp = if_get_by_ifname(DFLT_INT, IF_CREATE_IF_DYNAMIC);
 			if (!global_data->default_ifp) {
 				report_config_error(CONFIG_GENERAL_ERROR, "Default interface %s doesn't exist for static address %s.",
-							DFLT_INT, FMT_STR_VSLOT(strvec, addr_idx));
+							DFLT_INT, strvec_slot(strvec, addr_idx));
 				FREE(new);
 				return;
 			}
@@ -588,11 +598,11 @@ alloc_ipaddress(list ip_list, vector_t *strvec, interface_t *ifp, bool allow_tra
 
 	if (new->ifa.ifa_family == AF_INET6) {
 		if (new->ifa.ifa_scope) {
-			report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify scope for IPv6 addresses (%s) - ignoring scope", FMT_STR_VSLOT(strvec, addr_idx));
+			report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify scope for IPv6 addresses (%s) - ignoring scope", strvec_slot(strvec, addr_idx));
 			new->ifa.ifa_scope = 0;
 		}
 		if (new->label) {
-			report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify label for IPv6 addresses (%s) - ignoring label", FMT_STR_VSLOT(strvec, addr_idx));
+			report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify label for IPv6 addresses (%s) - ignoring label", strvec_slot(strvec, addr_idx));
 			FREE(new->label);
 			new->label = NULL;
 		}
@@ -612,9 +622,13 @@ address_exist(vrrp_t *vrrp, ip_address_t *ipaddress)
 {
 	ip_address_t *ipaddr;
 	element e;
-	bool found = false;
 	char addr_str[INET6_ADDRSTRLEN];
 	void *addr;
+
+	/* If the following check isn't made, we get lots of compiler warnings */
+	if (!ipaddress)
+		return true;
+
 
 	LIST_FOREACH(vrrp->vip, ipaddr, e) {
 		if (IP_ISEQ(ipaddr, ipaddress)) {
@@ -626,42 +640,35 @@ address_exist(vrrp_t *vrrp, ip_address_t *ipaddress)
 			ipaddr->nftable_rule_set = ipaddress->nftable_rule_set;
 #endif
 			ipaddr->ifa.ifa_index = ipaddress->ifa.ifa_index;
-			found = true;
-			break;
+			return true;
 		}
 	}
 
-	if (!found) {
-		LIST_FOREACH(vrrp->evip, ipaddr, e) {
-			if (IP_ISEQ(ipaddr, ipaddress)) {
-				ipaddr->set = ipaddress->set;
+	LIST_FOREACH(vrrp->evip, ipaddr, e) {
+		if (IP_ISEQ(ipaddr, ipaddress)) {
+			ipaddr->set = ipaddress->set;
 #ifdef _WITH_IPTABLES_
-				ipaddr->iptable_rule_set = ipaddress->iptable_rule_set;
+			ipaddr->iptable_rule_set = ipaddress->iptable_rule_set;
 #endif
 #ifdef _WITH_NFTABLES_
-				ipaddr->nftable_rule_set = ipaddress->nftable_rule_set;
+			ipaddr->nftable_rule_set = ipaddress->nftable_rule_set;
 #endif
-				ipaddr->ifa.ifa_index = ipaddress->ifa.ifa_index;
-				found = true;
-				break;
-			}
+			ipaddr->ifa.ifa_index = ipaddress->ifa.ifa_index;
+			return true;
 		}
 	}
 
-	if (!found)
-		return false;
-
-	addr = (IP_IS6(ipaddr)) ? (void *) &ipaddr->u.sin6_addr :
-				  (void *) &ipaddr->u.sin.sin_addr;
-	inet_ntop(IP_FAMILY(ipaddr), addr, addr_str, INET6_ADDRSTRLEN);
+	addr = (IP_IS6(ipaddress)) ? (void *) &ipaddress->u.sin6_addr :
+				  (void *) &ipaddress->u.sin.sin_addr;
+	inet_ntop(IP_FAMILY(ipaddress), addr, addr_str, INET6_ADDRSTRLEN);
 
 	log_message(LOG_INFO, "(%s) ip address %s/%d dev %s, no longer exist"
 			    , vrrp->iname
 			    , addr_str
-			    , ipaddr->ifa.ifa_prefixlen
-			    , ipaddr->ifp->ifname);
+			    , ipaddress->ifa.ifa_prefixlen
+			    , ipaddress->ifp->ifname);
 
-	return true;
+	return false;
 }
 
 /* Clear diff addresses */
@@ -703,7 +710,7 @@ clear_address_list(list delete_addr,
 	netlink_iplist(delete_addr, IPADDRESS_DEL, false);
 #ifdef _WITH_FIREWALL_
 	if (remove_from_firewall)
-		firewall_remove_rule_to_iplist(delete_addr, false);
+		firewall_remove_rule_to_iplist(delete_addr);
 #endif
 }
 

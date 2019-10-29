@@ -34,12 +34,13 @@ typedef struct timeval timeval_t;
 extern timeval_t time_now;
 
 #ifdef _TIMER_CHECK_
-bool do_timer_check;
+extern bool do_timer_check;
 #endif
 
 /* Some defines */
 #define TIMER_HZ		1000000
-#define TIMER_HZ_FLOAT		1000000.0
+#define TIMER_HZ_FLOAT		1000000.0F
+#define TIMER_HZ_DOUBLE		((double)1000000.0F)
 #define TIMER_CENTI_HZ		10000
 #define TIMER_MAX_SEC		1000U
 #define TIMER_NEVER		ULONG_MAX	/* Used with time intervals in TIMER_HZ units */
@@ -48,13 +49,13 @@ bool do_timer_check;
 #define	NSEC_PER_SEC		1000000000	/* nanoseconds per second. Avoids typos by having a definition */
 
 #ifdef _TIMER_CHECK_
-#define timer_now()	timer_now_r((__FILE__), (char *)(__FUNCTION__), (__LINE__))
-#define set_time_now()	set_time_now_r((__FILE__), (char *)(__FUNCTION__), (__LINE__))
+#define timer_now()	timer_now_r((__FILE__), (__func__), (__LINE__))
+#define set_time_now()	set_time_now_r((__FILE__), (__func__), (__LINE__))
 #endif
 
 #define RB_TIMER_CMP(obj)					\
 static inline int						\
-obj##_timer_cmp(obj##_t *r1, obj##_t *r2)			\
+obj##_timer_cmp(const obj##_t *r1, const obj##_t *r2)		\
 {								\
 	if (r1->sands.tv_sec == TIMER_DISABLED) {		\
 		if (r2->sands.tv_sec == TIMER_DISABLED)		\
@@ -87,6 +88,17 @@ timer_add_now(timeval_t a)
 	timeradd(&time_now, &a, &a);
 
 	return a;
+}
+
+/* Returns true if time a + diff_hz < time_now */
+static inline bool
+timer_cmp_now_diff(timeval_t a, unsigned long diff_hz)
+{
+	timeval_t b = { .tv_sec = diff_hz / TIMER_HZ, .tv_usec = diff_hz % TIMER_HZ };
+
+	timeradd(&b, &a, &b);
+
+	return !!timercmp(&b, &time_now, <);
 }
 
 /* Return time as unsigned long */

@@ -24,7 +24,7 @@ The following build packages are needed:
 	make
 	autoconf automake (to build from git source tree rather than tarball)
 The following libraries need to be installed:
-	openssl-devel libnl3-devel ipset-devel iptables-devel libnfnetlink-devel
+	openssl-devel libnl3-devel ipset-devel iptables-devel
 For magic file identification support:
 	file-devel
 For SNMP support:
@@ -52,7 +52,7 @@ On Debian, install:
 On Ubuntu, install:
 	build-essential pkg-config, and to build from git repo automake autoconf
 The following libraries need to be installed:
-	iptables-dev libipset-dev libnfnetlink-dev libnl-3-dev libnl-genl-3-dev libssl-dev
+	iptables-dev libipset-dev libnl-3-dev libnl-genl-3-dev libssl-dev
 For magic file identification support:
 	libmagic-dev
 For SNMP support:
@@ -74,11 +74,13 @@ For building the documentation, the following packages need to be installed:
 Alpine Linux
 ------------
 The following libraries need to be installed:
-	iptables-dev ipset-dev libnfnetlink-dev libnl3-dev musl-dev and openssl-dev or libressl-dev
+	iptables-dev ipset-dev libnl3-dev musl-dev libnftnl-dev and openssl-dev or libressl-dev
 For magic file identification support:
-	TBD
+	file-dev
 For SNMP support:
 	net-snmp-dev (requires libressl-dev and not openssl-dev)
+For PCRE support
+	pcre2-dev
 
 For building the documentation, the following packages need to be installed:
 	py-sphinx py3-sphinx_rtd_theme
@@ -89,9 +91,9 @@ For building the documentation, the following packages need to be installed:
 Archlinux
 ---------
 Run the following to install the required libraries:
-	pacman -S ipset libnfnetlink libnl1
+	pacman -S ipset libnl1
 For magic file identification support:
-	TBD
+	TDB
 For SNMP support:
 	pacman -S net-snmp
 for PCRE support:
@@ -222,6 +224,28 @@ does not work within a container. Installing gdb in the container (edit
 the image/Dockerfile to add it before make build) may be helpful if you
 need to examine core files in the container.
 
+
+Running in an AWS container
+===========================
+The VRRP protocol is not enabled in AWS security groups. If you are using AWS,
+create a rule in the AWS security group. The rule should be "Custom Protocol"
+and value should be "112" (the VRRP protocol number). All ports should be opened.
+
+
+Running with SElinux
+====================
+If the system running keepalived has SElinux enabled in enforcing mode, keepalived
+may have difficulty running scripts, accessing configuration files, etc, especially
+if keepalived is being started by systemd.
+
+By default, scripts should be located in /usr/libexec/keepalived, or alternatively,
+to set the necessary security context for a script, execute:
+chcon -t keepalived_unconfined_script_exec_t PATH_TO_SCRIPT
+
+See
+   https://www.mankier.com/8/keepalived_selinux and
+   https://www.mankier.com/8/keepalived_unconfined_script_selinux
+for further details of SElinux and keepalived.
 
 
 Have fun with it !

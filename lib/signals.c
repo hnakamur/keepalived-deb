@@ -34,6 +34,7 @@
 #ifdef _INCLUDE_UNUSED_CODE_
 #include <sys/epoll.h>
 #endif
+#include <inttypes.h>
 
 #include "signals.h"
 #include "utils.h"
@@ -94,9 +95,9 @@ static sigset_t dfl_sig;
 static sigset_t parent_sig;
 
 /* Signal handling thread */
-static thread_t *signal_thread;
+static thread_ref_t signal_thread;
 
-int
+int __attribute__((pure))
 get_signum(const char *sigfunc)
 {
 	if (!strcmp(sigfunc, "STOP"))
@@ -178,9 +179,9 @@ signal_pending(void)
 /* Signal flag */
 #ifndef HAVE_SIGNALFD
 static void
-signal_handler(int sig)
+signal_handler(uint32_t sig)
 {
-	if (write(signal_pipe[1], &sig, sizeof(int)) != sizeof(int)) {
+	if (write(signal_pipe[1], &sig, sizeof(uint32_t)) != sizeof(uint32_t)) {
 		DBG("signal_pipe write error %s", strerror(errno));
 		assert(0);
 
@@ -304,21 +305,25 @@ signal_ignore(int signo)
 
 /* Handlers callback  */
 static int
-signal_run_callback(thread_t *thread)
+signal_run_callback(thread_ref_t thread)
 {
-	int sig;
+	uint32_t sig;
 #ifdef HAVE_SIGNALFD
 	struct signalfd_siginfo siginfo;
 
 	while (read(signal_fd, &siginfo, sizeof(struct signalfd_siginfo)) == sizeof(struct signalfd_siginfo)) {
 		sig = siginfo.ssi_signo;
 #else
-	while (read(signal_pipe[0], &sig, sizeof(int)) == sizeof(int)) {
+	while (read(signal_pipe[0], &sig, sizeof(uint32_t)) == sizeof(uint32_t)) {
 #endif
 
 #ifdef _EPOLL_DEBUG_
-		if (do_epoll_debug)
-			log_message(LOG_INFO, "Signal %d, func %s()", sig, get_signal_function_name(signal_handler_func[sig-1]));
+		if (do_epoll_debug) {
+			if (sig >= 1 && sig < sizeof(signal_handler_func) / sizeof(signal_handler_func[0]))
+				log_message(LOG_INFO, "Signal %" PRIu32 ", func %s()", sig, get_signal_function_name(signal_handler_func[sig-1]));
+			else
+				log_message(LOG_INFO, "Signal %" PRIu32 ", unknown function", sig);
+		}
 #endif
 
 #ifdef USE_SIGNAL_THREADS
@@ -339,7 +344,7 @@ signal_run_callback(thread_t *thread)
 #endif
 	}
 
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.fd, TIMER_NEVER);
+	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, false);
 
 	return 0;
 }
@@ -355,9 +360,9 @@ clear_signal_handler_addresses(void)
 
 /* Handlers intialization */
 void
-add_signal_read_thread(thread_master_t *master)
+add_signal_read_thread(thread_master_t *thread_master)
 {
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, master->signal_fd, TIMER_NEVER);
+	signal_thread = thread_add_read(thread_master, signal_run_callback, NULL, thread_master->signal_fd, TIMER_NEVER, false);
 }
 
 void

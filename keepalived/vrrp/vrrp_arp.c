@@ -80,6 +80,7 @@ static ssize_t send_arp(ip_address_t *ipaddress, ssize_t pack_len)
 	memset(&sll, 0, sizeof(sll));
 	((struct sockaddr_large_ll *)&sll)->sll_family = AF_PACKET;
 	((struct sockaddr_large_ll *)&sll)->sll_hatype = ifp->hw_type;
+	((struct sockaddr_large_ll *)&sll)->sll_protocol = htons(ETHERTYPE_ARP);
 	((struct sockaddr_large_ll *)&sll)->sll_ifindex = (int) ifp->ifindex;
 
 	/* The values in sll_addr and sll_halen appear to be ignored */
@@ -95,9 +96,11 @@ static ssize_t send_arp(ip_address_t *ipaddress, ssize_t pack_len)
 	/* Send packet */
 	len = sendto(garp_fd, garp_buffer, pack_len, 0,
 		     (struct sockaddr *)&sll, sizeof(sll));
-	if (len < 0)
-		log_message(LOG_INFO, "Error %d sending gratuitous ARP on %s for %s", errno,
+	if (len < 0) {
+		/* coverity[bad_printf_format_string] */
+		log_message(LOG_INFO, "Error %d (%m) sending gratuitous ARP on %s for %s", errno,
 			    IF_NAME(ipaddress->ifp), inet_ntop2(ipaddress->u.sin.sin_addr.s_addr));
+	}
 	return len;
 }
 

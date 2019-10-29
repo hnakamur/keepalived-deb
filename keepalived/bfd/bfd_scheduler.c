@@ -27,6 +27,8 @@
 #include <netdb.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <stdlib.h>
 
 #include "bfd.h"
 #include "bfd_data.h"
@@ -41,10 +43,14 @@
 #include "signals.h"
 #include "assert_debug.h"
 
+/* RFC5881 section 4 */
+#define	BFD_MIN_PORT	49152
+#define	BFD_MAX_PORT	65535
+
 static int bfd_send_packet(int, bfdpkt_t *, bool);
 static void bfd_sender_schedule(bfd_t *);
 
-static void bfd_state_down(bfd_t *, char diag);
+static void bfd_state_down(bfd_t *, u_char diag);
 static void bfd_state_admindown(bfd_t *);
 static void bfd_state_up(bfd_t *);
 static void bfd_dump_timers(FILE *fp, bfd_t *);
@@ -57,7 +63,7 @@ static void bfd_dump_timers(FILE *fp, bfd_t *);
  */
 
 inline static long
-thread_time_to_wakeup(thread_t *thread)
+thread_time_to_wakeup(thread_ref_t thread)
 {
 	struct timeval tmp_time;
 
@@ -68,7 +74,7 @@ thread_time_to_wakeup(thread_t *thread)
 
 /* Sends one BFD control packet and reschedules itself if needed */
 static int
-bfd_sender_thread(thread_t *thread)
+bfd_sender_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
 	bfdpkt_t pkt;
@@ -118,11 +124,11 @@ get_jitter(bfd_t * bfd)
 	 * negotiated transmission interval.
 	 */
 	if (bfd->local_detect_mult)
-		min_jitter = bfd->local_tx_intv * 0.1;
+		min_jitter = bfd->local_tx_intv / 10;	/* 10% <=> / 10 */
 	else
 		min_jitter = 0;
 
-	return rand_intv(min_jitter, bfd->local_tx_intv * 0.25);
+	return rand_intv(min_jitter, bfd->local_tx_intv / 4);	/* 25% <=> / 4 */
 }
 
 /* Schedules bfd_sender_thread to run in local_tx_intv minus applied jitter */
@@ -159,7 +165,7 @@ bfd_sender_reschedule(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_sender_thread is scheduled to run, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_sender_scheduled(bfd_t *bfd)
 {
 	assert(bfd);
@@ -194,7 +200,7 @@ bfd_sender_resume(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_sender_thread is suspended, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_sender_suspended(bfd_t *bfd)
 {
 	assert(bfd);
@@ -220,7 +226,7 @@ bfd_sender_discard(bfd_t *bfd)
 
 /* Marks session as down because of Control Detection Time Expiration */
 static int
-bfd_expire_thread(thread_t *thread)
+bfd_expire_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
 	uint32_t dead_time, overdue_time;
@@ -246,7 +252,7 @@ bfd_expire_thread(thread_t *thread)
 	if (bfd->local_state == BFD_STATE_UP ||
 	    __test_bit(LOG_EXTRA_DETAIL_BIT, &debug))
 		log_message(LOG_WARNING, "BFD_Instance(%s) Expired after"
-			    " %i ms (%i usec overdue)",
+			    " %" PRIu32 " ms (%" PRIu32 " usec overdue)",
 			    bfd->iname, dead_time / 1000, overdue_time);
 
 	/*
@@ -295,7 +301,7 @@ bfd_expire_reschedule(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_expire_thread is scheduled to run, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_expire_scheduled(bfd_t *bfd)
 {
 	assert(bfd);
@@ -329,7 +335,7 @@ bfd_expire_resume(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_expire_thread is suspended, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_expire_suspended(bfd_t *bfd)
 {
 	assert(bfd);
@@ -355,7 +361,7 @@ bfd_expire_discard(bfd_t *bfd)
 
 /* Resets BFD session to initial state */
 static int
-bfd_reset_thread(thread_t *thread)
+bfd_reset_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
 
@@ -396,7 +402,7 @@ bfd_reset_cancel(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_reset_thread is scheduled to run, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_reset_scheduled(bfd_t *bfd)
 {
 	assert(bfd);
@@ -430,7 +436,7 @@ bfd_reset_resume(bfd_t *bfd)
 }
 
 /* Returns 1 if bfd_reset_thread is suspended, 0 otherwise */
-static int
+static int __attribute__ ((pure))
 bfd_reset_suspended(bfd_t *bfd)
 {
 	assert(bfd);
@@ -474,7 +480,7 @@ bfd_state_fall(bfd_t *bfd, bool send_event)
 
 /* Runs when BFD session state goes Down */
 static void
-bfd_state_down(bfd_t *bfd, char diag)
+bfd_state_down(bfd_t *bfd, u_char diag)
 {
 	assert(bfd);
 	assert(BFD_VALID_DIAG(diag));
@@ -652,7 +658,7 @@ bfd_handle_packet(bfdpkt_t *pkt)
 
 	/* Lookup session */
 	if (!pkt->hdr->remote_discr)
-		bfd = find_bfd_by_addr(&pkt->src_addr);
+		bfd = find_bfd_by_addr(&pkt->src_addr, &pkt->dst_addr);
 	else
 		bfd = find_bfd_by_discr(ntohl(pkt->hdr->remote_discr));
 
@@ -806,10 +812,11 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 {
 	ssize_t len;
 	unsigned int ttl = 0;
-	struct msghdr msg = { 0 };
+	struct msghdr msg;
 	struct cmsghdr *cmsg = NULL;
-	char cbuf[CMSG_SPACE(sizeof (ttl))] = { 0 };
-	struct iovec iov[1] = { {0} };
+	char cbuf[CMSG_SPACE(sizeof (struct in6_pktinfo)) + CMSG_SPACE(sizeof(ttl))];
+	struct iovec iov[1];
+	struct in6_pktinfo *pktinfo;
 
 	assert(pkt);
 	assert(fd >= 0);
@@ -825,6 +832,7 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 	msg.msg_iovlen = 1;
 	msg.msg_control = cbuf;
 	msg.msg_controllen = sizeof (cbuf);
+	msg.msg_flags = 0;	/* Unnecessary, but keep coverity happy */
 
 	len = recvmsg(fd, &msg, MSG_DONTWAIT);
 	if (len == -1) {
@@ -845,6 +853,16 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 		if ((cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TTL) ||
 		    (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT))
 			ttl = *CMSG_DATA(cmsg);
+		else if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
+			pktinfo = (struct in6_pktinfo *)CMSG_DATA(cmsg);
+			if (IN6_IS_ADDR_V4MAPPED(&pktinfo->ipi6_addr)) {
+				((struct sockaddr_in *)&pkt->dst_addr)->sin_addr.s_addr = pktinfo->ipi6_addr.s6_addr32[3];
+				pkt->dst_addr.ss_family = AF_INET;
+			} else {
+				memcpy(&((struct sockaddr_in6 *)&pkt->dst_addr)->sin6_addr, &pktinfo->ipi6_addr, sizeof(pktinfo->ipi6_addr));
+				pkt->dst_addr.ss_family = AF_INET6;
+			}
+		}
 		else
 			log_message(LOG_WARNING, "recvmsg() received"
 				    " unexpected control message (level %d type %d)",
@@ -873,7 +891,7 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 
 /* Runs when data is available in listening socket */
 static int
-bfd_receiver_thread(thread_t *thread)
+bfd_receiver_thread(thread_ref_t thread)
 {
 	bfd_data_t *data;
 	bfdpkt_t pkt;
@@ -884,7 +902,7 @@ bfd_receiver_thread(thread_t *thread)
 	data = THREAD_ARG(thread);
 	assert(data);
 
-	fd = thread->u.fd;
+	fd = thread->u.f.fd;
 	assert(fd >= 0);
 
 	data->thread_in = NULL;
@@ -897,7 +915,7 @@ bfd_receiver_thread(thread_t *thread)
 
 	data->thread_in =
 	    thread_add_read(thread->master, bfd_receiver_thread, data,
-			    fd, TIMER_NEVER);
+			    fd, TIMER_NEVER, false);
 
 	return 0;
 }
@@ -925,15 +943,17 @@ bfd_open_fd_in(bfd_data_t *data)
 	hints.ai_socktype = SOCK_DGRAM;
 
 	if ((ret = getaddrinfo(NULL, BFD_CONTROL_PORT, &hints, &ai_in)))
-		log_message(LOG_ERR, "getaddrinfo() error (%s)", gai_strerror(ret));
+		log_message(LOG_ERR, "getaddrinfo() error %d (%s)", ret, gai_strerror(ret));
 	else if ((data->fd_in = socket(AF_INET6, ai_in->ai_socktype, ai_in->ai_protocol)) == -1)
-		log_message(LOG_ERR, "socket() error (%m)");
+		log_message(LOG_ERR, "socket() error %d (%m)", errno);
 	else if ((ret = setsockopt(data->fd_in, IPPROTO_IP, IP_RECVTTL, &yes, sizeof (yes))) == -1)
-		log_message(LOG_ERR, "setsockopt(IP_RECVTTL) error (%m)");
+		log_message(LOG_ERR, "setsockopt(IP_RECVTTL) error %d (%m)", errno);
 	else if ((ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &yes, sizeof (yes))) == -1)
-		log_message(LOG_ERR, "setsockopt(IPV6_RECVHOPLIMIT) error (%m)");
+		log_message(LOG_ERR, "setsockopt(IPV6_RECVHOPLIMIT) error %d (%m)", errno);
+	else if ((ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof (yes))) == -1)
+		log_message(LOG_ERR, "setsockopt(IPV6_RECVPKTINFO) error %d (%m)", errno);
 	else if ((ret = bind(data->fd_in, ai_in->ai_addr, ai_in->ai_addrlen)) == -1)
-		log_message(LOG_ERR, "bind() error (%m)");
+		log_message(LOG_ERR, "bind() error %d (%m)", errno);
 
 	if (ret)
 		ret = 1;
@@ -942,12 +962,51 @@ bfd_open_fd_in(bfd_data_t *data)
 	return ret;
 }
 
+static bool
+read_local_port_range(uint32_t port_limits[2])
+{
+	char buf[5 + 1 + 5 + 1 + 1];	/* 32768<TAB>60999<NL> */
+	int fd;
+	ssize_t len;
+	long val[2];
+	char *endptr;
+
+	/* Default to sensible values */
+	port_limits[0] = 49152;
+	port_limits[1] = 60999;
+
+	fd = open("/proc/sys/net/ipv4/ip_local_port_range", O_RDONLY);
+	if (fd == -1)
+		return false;
+	len = read(fd, buf, sizeof(buf));
+	close(fd);
+
+	if (len == -1 || len == sizeof(buf))
+		return false;
+
+	buf[len] = '\0';
+
+	val[0] = strtol(buf, &endptr, 10);
+	if (val[0] <= 0 || val[0] == LONG_MAX || (*endptr != '\t' && *endptr != ' '))
+		return false;
+	val[1] = strtol(buf, &endptr, 10);
+	if (val[1] <= 0 || val[0] == LONG_MAX || *endptr != '\n')
+		return false;
+
+	port_limits[0] = val[0];
+	port_limits[1] = val[1];
+
+	return true;
+}
+
 /* Prepares UDP socket for sending data to neighbor */
 static int
 bfd_open_fd_out(bfd_t *bfd)
 {
 	int ttl;
 	int ret;
+	uint32_t port_limits[2];
+	uint16_t orig_port, port;
 
 	assert(bfd);
 	assert(bfd->fd_out == -1);
@@ -960,15 +1019,55 @@ bfd_open_fd_out(bfd_t *bfd)
 	}
 
 	if (bfd->src_addr.ss_family) {
-		ret =
-		    bind(bfd->fd_out, (struct sockaddr *) &bfd->src_addr,
-			 sizeof (struct sockaddr));
+		/* Generate a random port number within the valid range */
+		read_local_port_range(port_limits);
+		if (port_limits[0] < BFD_MIN_PORT)
+			port_limits[0] = BFD_MIN_PORT;
+		if (port_limits[1] > BFD_MAX_PORT)
+			port_limits[1] = BFD_MAX_PORT;
+
+		/* Ensure we have a range of at least 1024 ports (an arbitrary number)
+		 * to try. */
+		if (port_limits[0] + 1023 > port_limits[1]) {
+			/* Just use the BFD defaults */
+			port_limits[0] = BFD_MIN_PORT;
+			port_limits[1] = BFD_MAX_PORT;
+		}
+
+		orig_port = port = rand_intv(port_limits[0], port_limits[1]);
+		do {
+			/* Try binding socket to the address until we find one available */
+			if (bfd->src_addr.ss_family == AF_INET)
+				((struct sockaddr_in *)&bfd->src_addr)->sin_port = htons(port);
+			else
+				((struct sockaddr_in6 *)&bfd->src_addr)->sin6_port = htons(port);
+
+			ret = bind(bfd->fd_out, (struct sockaddr *) &bfd->src_addr,
+				   sizeof (struct sockaddr));
+
+			if (ret == -1 && errno == EADDRINUSE) {
+				/* Port already in use, try next */
+				if (++port > port_limits[1])
+					port = port_limits[0];
+				if (port == orig_port)
+					break;
+				continue;
+			}
+
+			break;
+		} while (true);
+
 		if (ret == -1) {
 			log_message(LOG_ERR,
 				    "BFD_Instance(%s) bind() error (%m)",
 				    bfd->iname);
 			return 1;
 		}
+	} else {
+		/* We have a problem here - we do not have a source address, and so
+		 * cannot bind the socket. That means that we will get a system allocated
+		 * port, which may be outside the range [49152, 65535], as specified in
+		 * RFC5881. */
 	}
 
 	ttl = bfd->ttl;
@@ -1033,7 +1132,7 @@ bfd_register_workers(bfd_data_t *data)
 
 	/* Set timeout to not expire */
 	data->thread_in = thread_add_read(master, bfd_receiver_thread,
-					  data, data->fd_in, TIMER_NEVER);
+					  data, data->fd_in, TIMER_NEVER, false);
 
 	/* Resume or schedule threads */
 	for (e = LIST_HEAD(data->bfd); e; ELEMENT_NEXT(e)) {
@@ -1122,7 +1221,7 @@ bfd_dispatcher_release(bfd_data_t *data)
 
 /* Starts BFD dispatcher */
 int
-bfd_dispatcher_init(thread_t *thread)
+bfd_dispatcher_init(thread_ref_t thread)
 {
 	bfd_data_t *data;
 

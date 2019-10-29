@@ -33,6 +33,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <errno.h>
+#include <string.h>
 
 #include "vector.h"
 #if defined _DEBUG_ || defined DEBUG_EINTR
@@ -48,6 +49,11 @@
 
 #define STR(x)  #x
 
+#define	VERSION_STRING		PACKAGE_NAME " v" PACKAGE_VERSION " (" GIT_DATE ")"
+#define COPYRIGHT_STRING	"Copyright(C) 2001-" GIT_YEAR " Alexandre Cassen, <acassen@gmail.com>"
+
+#define max(a,b) ((a) >= (b) ? (a) : (b))
+
 #ifdef _WITH_PERF_
 typedef enum {
 	PERF_NONE,
@@ -56,6 +62,16 @@ typedef enum {
 	PERF_END,
 } perf_t;
 #endif
+
+/* Some library functions that take pointer parameters should have them
+ * specified as const pointers, but don't. We need to cast away the constness,
+ * but also want to avoid compiler warnings for doing so. The following "trick"
+ * achieves that. */ 
+#define no_const(type, var_cp) \
+({ union { type *p; const type *cp; } ps = { .cp = var_cp }; \
+ ps.p;})
+
+#define no_const_char_p(var_cp)	no_const(char, var_cp)
 
 /* If signalfd() is used, we will have no signal handlers, and
  * so we cannot get EINTR. If we cannot get EINTR, there is no
@@ -68,7 +84,7 @@ static inline bool
 check_EINTR(int xx)
 {
 	if ((xx) == EINTR) {
-		log_message(LOG_INFO, "%s:%s(%d) - EINTR returned", (__FILE__), (__FUNCTION__), (__LINE__));
+		log_message(LOG_INFO, "%s:%s(%d) - EINTR returned", (__FILE__), (__func__), (__LINE__));
 		return true;
 	}
 
@@ -89,6 +105,20 @@ check_EINTR(int xx)
 #define check_EAGAIN(xx)	((xx) == EAGAIN || (xx) == EWOULDBLOCK)
 #endif
 
+/* Used in functions returning a string matching a defined value */
+#define switch_define_str(x) case x: return #x
+
+/* Buffer length needed for inet_sockaddrtotrio() - '[' + INET6_ADDRSTRLEN + ']' + ':' + 'sctp' + ':' + 'nnnnn' */
+#define SOCKADDRTRIO_STR_LEN	(INET6_ADDRSTRLEN + 13)
+
+/* The argv parameter to execve etc is declared as char *const [], whereas
+ * it should be char const *const [], so we use the following union to cast
+ * away the const that we have, but execve etc doesn't. */
+union non_const_args {
+	const char *const *args;
+	char *const *execve_args;
+};
+
 /* inline stuff */
 static inline int __ip6_addr_equal(const struct in6_addr *a1,
 				   const struct in6_addr *a2)
@@ -106,16 +136,16 @@ static inline bool sockstorage_equal(const struct sockaddr_storage *s1,
 		return false;
 
 	if (s1->ss_family == AF_INET6) {
-		struct sockaddr_in6 *a1 = (struct sockaddr_in6 *) s1;
-		struct sockaddr_in6 *a2 = (struct sockaddr_in6 *) s2;
+		const struct sockaddr_in6 *a1 = (const struct sockaddr_in6 *) s1;
+		const struct sockaddr_in6 *a2 = (const struct sockaddr_in6 *) s2;
 
 //		if (IN6_ARE_ADDR_EQUAL(a1, a2) && (a1->sin6_port == a2->sin6_port))
 		if (__ip6_addr_equal(&a1->sin6_addr, &a2->sin6_addr) &&
 		    (a1->sin6_port == a2->sin6_port))
 			return true;
 	} else if (s1->ss_family == AF_INET) {
-		struct sockaddr_in *a1 = (struct sockaddr_in *) s1;
-		struct sockaddr_in *a2 = (struct sockaddr_in *) s2;
+		const struct sockaddr_in *a1 = (const struct sockaddr_in *) s1;
+		const struct sockaddr_in *a2 = (const struct sockaddr_in *) s2;
 
 		if ((a1->sin_addr.s_addr == a2->sin_addr.s_addr) &&
 		    (a1->sin_port == a2->sin_port))
@@ -126,18 +156,18 @@ static inline bool sockstorage_equal(const struct sockaddr_storage *s1,
 	return false;
 }
 
-static inline bool inaddr_equal(sa_family_t family, void *addr1, void *addr2)
+static inline bool inaddr_equal(sa_family_t family, const void *addr1, const void *addr2)
 {
 	if (family == AF_INET6) {
-		struct in6_addr *a1 = (struct in6_addr *) addr1;
-		struct in6_addr *a2 = (struct in6_addr *) addr2;
+		const struct in6_addr *a1 = (const struct in6_addr *) addr1;
+		const struct in6_addr *a2 = (const struct in6_addr *) addr2;
 
 		return __ip6_addr_equal(a1, a2);
 	}
 
 	if (family == AF_INET) {
-		struct in_addr *a1 = (struct in_addr *) addr1;
-		struct in_addr *a2 = (struct in_addr *) addr2;
+		const struct in_addr *a1 = (const struct in_addr *) addr1;
+		const struct in_addr *a2 = (const struct in_addr *) addr2;
 
 		return (a1->s_addr == a2->s_addr);
 	}
@@ -183,6 +213,9 @@ static inline uint16_t csum_incremental_update16(const uint16_t old_csum, const 
 	return ~acc & 0xffff;
 }
 
+#define strcpy_safe(dst, src) \
+	(dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1))
+
 /* global vars exported */
 extern unsigned long debug;
 extern mode_t umask_val;
@@ -191,41 +224,53 @@ extern perf_t perf_run;
 #endif
 
 /* Prototypes defs */
-extern void dump_buffer(char *, size_t, FILE *, int);
+extern void dump_buffer(const char *, size_t, FILE *, int);
+#ifdef CHECKSUM_DIAGNOSTICS
+extern void log_buffer(const char *, const void *, size_t);
+#endif
 #ifdef _WITH_STACKTRACE_
 extern void write_stacktrace(const char *, const char *);
 #endif
-extern char *make_file_name(const char *, const char *, const char *, const char *);
+extern const char *make_file_name(const char *, const char *, const char *, const char *);
+extern void set_process_name(const char *);
 #ifdef _WITH_PERF_
 extern void run_perf(const char *, const char *, const char *);
 #endif
 extern uint16_t in_csum(const uint16_t *, size_t, uint32_t, uint32_t *);
-extern char *inet_ntop2(uint32_t);
+extern const char *inet_ntop2(uint32_t);
 extern bool inet_stor(const char *, uint32_t *);
 extern int domain_stosockaddr(const char *, const char *, struct sockaddr_storage *);
-extern int inet_stosockaddr(char *, const char *, struct sockaddr_storage *);
-extern void inet_ip4tosockaddr(struct in_addr *, struct sockaddr_storage *);
-extern void inet_ip6tosockaddr(struct in6_addr *, struct sockaddr_storage *);
-extern char *inet_sockaddrtos(struct sockaddr_storage *);
-extern char *inet_sockaddrtopair(struct sockaddr_storage *);
-extern char *inet_sockaddrtotrio(struct sockaddr_storage *, uint16_t);
-extern uint16_t inet_sockaddrport(struct sockaddr_storage *);
-extern uint32_t inet_sockaddrip4(struct sockaddr_storage *);
-extern int inet_sockaddrip6(struct sockaddr_storage *, struct in6_addr *);
-extern int inet_inaddrcmp(int, const void *, const void *);
-extern int inet_sockaddrcmp(const struct sockaddr_storage *, const struct sockaddr_storage *);
-extern void format_mac_buf(char *, size_t, unsigned char *, size_t);
-extern char *get_local_name(void);
-extern bool string_equal(const char *, const char *);
+extern bool inet_stosockaddr(const char *, const char *, struct sockaddr_storage *);
+extern void inet_ip4tosockaddr(const struct in_addr *, struct sockaddr_storage *);
+extern void inet_ip6tosockaddr(const struct in6_addr *, struct sockaddr_storage *);
+extern bool check_valid_ipaddress(const char *, bool);
+extern const char *inet_sockaddrtos(const struct sockaddr_storage *);
+extern const char *inet_sockaddrtopair(const struct sockaddr_storage *);
+extern const char *inet_sockaddrtotrio(const struct sockaddr_storage *, uint16_t);
+extern char *inet_sockaddrtotrio_r(const struct sockaddr_storage *, uint16_t, char *);
+extern uint16_t inet_sockaddrport(const struct sockaddr_storage *) __attribute__ ((pure));
+extern void inet_set_sockaddrport(struct sockaddr_storage *, uint16_t);
+extern uint32_t inet_sockaddrip4(const struct sockaddr_storage *) __attribute__ ((pure));
+extern int inet_sockaddrip6(const struct sockaddr_storage *, struct in6_addr *);
+extern int inet_inaddrcmp(int, const void *, const void *); __attribute__ ((pure))
+extern int inet_sockaddrcmp(const struct sockaddr_storage *, const struct sockaddr_storage *) __attribute__ ((pure));
+extern void format_mac_buf(char *, size_t, const unsigned char *, size_t);
+extern const char *get_local_name(void) __attribute__((malloc));
+extern bool string_equal(const char *, const char *) __attribute__ ((pure));
+extern int integer_to_string(const int, char *, size_t);
 extern FILE *fopen_safe(const char *, const char *);
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
 #if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-extern int fork_exec(char **);
+extern int fork_exec(const char * const []);
 #endif
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
 extern int open_pipe(int [2]);
 #endif
 extern int memcmp_constant_time(const void *, const void *, size_t);
+
+#if defined _WITH_LVS_ || defined _LIBIPSET_DYNAMIC_
+extern bool keepalived_modprobe(const char *);
+#endif
 
 #endif

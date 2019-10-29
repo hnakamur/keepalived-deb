@@ -39,15 +39,16 @@
 #include "vrrp_iproute.h"
 #endif
 #include "parser.h"
+#include "memory.h"
 
 bool
-get_realms(uint32_t *realms, char *str)
+get_realms(uint32_t *realms, const char *str)
 {
 	uint32_t val, val1;
 	char *end;
 
 	if ((end = strchr(str,'/')))
-		*end = '\0';
+		str = STRNDUP(str,  end - str);
 
 	if (!find_rttables_realms(str, &val))
 		goto err;
@@ -59,7 +60,7 @@ get_realms(uint32_t *realms, char *str)
 		val <<= 16;
 		val |= val1;
 
-		*end = '/';
+		FREE_CONST(str);
 	}
 
 	*realms = val;
@@ -68,7 +69,7 @@ get_realms(uint32_t *realms, char *str)
 
 err:
 	if (end)
-		*end = '/';
+		FREE_CONST(str);
 	return true;
 }
 
@@ -132,24 +133,32 @@ get_u64(uint64_t *val, const char *str, uint64_t max, const char* errmsg)
 bool
 get_time_rtt(uint32_t *val, const char *str, bool *raw)
 {
-	double t;
+	float t;
 	unsigned long res;
 	char *end;
 	size_t offset;
+	int ftype;
 
 	errno = 0;
 	if (strchr(str, '.') ||
-	    (strpbrk(str,"Ee" ) && !strpbrk(str, "xX"))) {
-		t = strtod(str, &end);
-		if (t <= 0.0)
-			return true;
+	    (strpbrk(str, "Ee") && !strpbrk(str, "xX"))) {
+		t = strtof(str, &end);
 
-		/* no digits? */
+		/* no digits or extra characters */
 		if (end == str)
 			return true;
 
-		/* overflow */
-		if (t == HUGE_VAL && errno == ERANGE)
+		ftype = fpclassify(t);
+		if (ftype != FP_ZERO && ftype != FP_SUBNORMAL) {
+			if (errno == ERANGE) /* overflow */
+				return true;
+			if (ftype != FP_NORMAL) /* NaN, infinity */
+				return true;
+		}
+		else
+			t = 0.0F;	/* in case FP_SUBNORMAL */
+
+		if (t <= 0.0F)
 			return true;
 
 		if (t >= UINT32_MAX)
@@ -175,7 +184,7 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 		if (res > UINT32_MAX)
 			return true;
 
-		t = (double)res;
+		t = (float)res;
 	}
 
 	if (*end) {
@@ -183,7 +192,7 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 		if (!strcasecmp(end, "s") ||
 		    !strcasecmp(end, "sec") ||
 		    !strcasecmp(end, "secs")) {
-			if (t >= UINT32_MAX / 1000)
+			if (t * 1000U >= UINT32_MAX)
 				return false;
 			t *= 1000;
 		}
@@ -248,7 +257,7 @@ get_addr64(uint64_t *ap, const char *cp)
 	return false;
 }
 
-#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
+#if HAVE_DECL_RTA_ENCAP && HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 bool
 parse_mpls_address(const char *str, encap_mpls_t *mpls)
 {

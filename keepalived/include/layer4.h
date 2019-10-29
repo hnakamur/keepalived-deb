@@ -35,7 +35,9 @@ enum connect_result {
 	connect_error,
 	connect_in_progress,
 	connect_timeout,
-	connect_success
+	connect_fail,
+	connect_success,
+	connect_result_next
 };
 
 /* connection options structure definition */
@@ -52,19 +54,19 @@ typedef struct _conn_opts {
 /* Prototypes defs */
 #ifdef _WITH_LVS_
 extern enum connect_result
- socket_bind_connect(int, conn_opts_t *);
+socket_bind_connect(int, conn_opts_t *);
 #endif
 
 extern enum connect_result
- socket_connect(int, struct sockaddr_storage *);
+socket_connect(int, struct sockaddr_storage *);
 
 extern enum connect_result
- socket_state(thread_t *, int (*func) (thread_t *));
+socket_state(thread_ref_t, thread_func_t);
 
 #ifdef _WITH_LVS_
 extern bool
- socket_connection_state(int, enum connect_result
-		      , thread_t *, int (*func) (thread_t *)
+socket_connection_state(int, enum connect_result
+		      , thread_ref_t, thread_func_t
 		      , unsigned long);
 #endif
 
@@ -84,15 +86,15 @@ tcp_connect(int fd, struct sockaddr_storage *addr)
 }
 
 static inline enum connect_result
-tcp_socket_state(thread_t * thread, int (*func) (thread_t *))
+tcp_socket_state(thread_ref_t thread, thread_func_t func)
 {
 	return socket_state(thread, func);
 }
 
 #ifdef _WITH_LVS_
 static inline bool
-tcp_connection_state(int fd, enum connect_result status, thread_t * thread,
-		     int (*func) (thread_t *), unsigned long timeout)
+tcp_connection_state(int fd, enum connect_result status, thread_ref_t thread,
+		     thread_func_t func, unsigned long timeout)
 {
 	return socket_connection_state(fd, status, thread, func, timeout);
 }

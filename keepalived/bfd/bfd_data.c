@@ -40,12 +40,27 @@ char *bfd_buffer;
  * bfd_t functions
  */
 /* Initialize bfd_t */
-void
-alloc_bfd(char *name)
+bool
+alloc_bfd(const char *name)
 {
 	bfd_t *bfd;
 
 	assert(name);
+
+	if (strlen(name) >= sizeof(bfd->iname)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
+			    " name too long (maximum length is %zu"
+			    " characters) - ignoring", name,
+			    sizeof(bfd->iname) - 1);
+		return false;
+	}
+
+	if (find_bfd_by_name(name)) {
+		report_config_error(CONFIG_GENERAL_ERROR,
+			    "Configuration error: BFD instance %s"
+			    " already configured - ignoring", name);
+		return false;
+	}
 
 	bfd = (bfd_t *) MALLOC(sizeof (bfd_t));
 	strcpy(bfd->iname, name);
@@ -69,6 +84,8 @@ alloc_bfd(char *name)
 	bfd->sands_rst = -1;
 
 	list_add(bfd_data->bfd, bfd);
+
+	return true;
 }
 
 static void
@@ -80,12 +97,12 @@ free_bfd(void *data)
 
 /* Dump BFD instance configuration parameters */
 static void
-dump_bfd(FILE *fp, void *data)
+dump_bfd(FILE *fp, const void *data)
 {
-	bfd_t *bfd;
+	const bfd_t *bfd;
 
 	assert(data);
-	bfd = (bfd_t *)data;
+	bfd = (const bfd_t *)data;
 
 	conf_write(fp, " BFD Instance = %s", bfd->iname);
 	conf_write(fp, "   Neighbor IP = %s",
@@ -95,13 +112,13 @@ dump_bfd(FILE *fp, void *data)
 		conf_write(fp, "   Source IP = %s",
 			    inet_sockaddrtos(&bfd->src_addr));
 
-	conf_write(fp, "   Required min RX interval = %i ms",
+	conf_write(fp, "   Required min RX interval = %u ms",
 		    bfd->local_min_rx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired min TX interval = %i ms",
+	conf_write(fp, "   Desired min TX interval = %u ms",
 		    bfd->local_min_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired idle TX interval = %i ms",
+	conf_write(fp, "   Desired idle TX interval = %u ms",
 		    bfd->local_idle_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Detection multiplier = %i",
+	conf_write(fp, "   Detection multiplier = %d",
 		    bfd->local_detect_mult);
 	conf_write(fp, "   %s = %d",
 		    bfd->nbr_addr.ss_family == AF_INET ? "TTL" : "hoplimit",
@@ -119,7 +136,7 @@ dump_bfd(FILE *fp, void *data)
 }
 
 /* Looks up bfd instance by name */
-static bfd_t *
+static bfd_t * __attribute__ ((pure))
 find_bfd_by_name2(const char *name, const bfd_data_t *data)
 {
 	element e;
@@ -141,7 +158,7 @@ find_bfd_by_name2(const char *name, const bfd_data_t *data)
 	return NULL;
 }
 
-bfd_t *
+bfd_t * __attribute__ ((pure))
 find_bfd_by_name(const char *name)
 {
 	return find_bfd_by_name2(name, bfd_data);
@@ -183,7 +200,7 @@ free_bfd_data(bfd_data_t * data)
 }
 
 void
-dump_bfd_data(FILE *fp, bfd_data_t * data)
+dump_bfd_data(FILE *fp, const bfd_data_t * data)
 {
 	assert(data);
 
@@ -240,21 +257,35 @@ free_bfd_buffer(void)
 /*
  * Lookup functions
  */
-/* Looks up bfd instance by neighbor address */
-bfd_t *
-find_bfd_by_addr(const struct sockaddr_storage *addr)
+/* Looks up bfd instance by neighbor address, and optional local address.
+ * If local address is not set, then it is a configuration time check and
+ * the bfd instance is configured without a local address. */
+bfd_t * __attribute__ ((pure))
+find_bfd_by_addr(const struct sockaddr_storage *nbr_addr, const struct sockaddr_storage *local_addr)
 {
 	element e;
 	bfd_t *bfd;
-	assert(addr);
+	assert(nbr_addr);
+	assert(local_addr);
 	assert(bfd_data);
 
-	if (LIST_ISEMPTY(bfd_data->bfd))
-		return NULL;
+	LIST_FOREACH(bfd_data->bfd, bfd, e) {
+		if (&bfd->nbr_addr == nbr_addr)
+			continue;
 
-	for (e = LIST_HEAD(bfd_data->bfd); e; ELEMENT_NEXT(e)) {
-		bfd = ELEMENT_DATA(e);
-		if (!inet_sockaddrcmp(&bfd->nbr_addr, addr))
+		if (inet_sockaddrcmp(&bfd->nbr_addr, nbr_addr))
+			continue;
+
+		if (!bfd->src_addr.ss_family)
+			return bfd;
+
+		if (!local_addr->ss_family) {
+			/* A new bfd instance without an address is being configured,
+			 * but we already have the neighbor address configured. */
+			return bfd;
+		}
+
+		if (!inet_sockaddrcmp(&bfd->src_addr, local_addr))
 			return bfd;
 	}
 
@@ -262,7 +293,7 @@ find_bfd_by_addr(const struct sockaddr_storage *addr)
 }
 
 /* Looks up bfd instance by local discriminator */
-bfd_t *
+bfd_t * __attribute__ ((pure))
 find_bfd_by_discr(const uint32_t discr)
 {
 	element e;
@@ -283,13 +314,23 @@ find_bfd_by_discr(const uint32_t discr)
 /*
  * Utility functions
  */
+
+/* Check if uint64_t is large enough to hold uint32_t * int */
+#if INT_MAX <= INT32_MAX
+#define CALC_TYPE uint64_t
+#else
+#define CALC_TYPE double
+#endif
+
 /* Generates a random number in the specified interval */
 uint32_t
 rand_intv(uint32_t min, uint32_t max)
 {
-	double scaled = (double) rand() / RAND_MAX;
-	return (max - min + 1) * scaled + min;
+	/* coverity[dont_call] */
+	return (uint32_t)((((CALC_TYPE)max - min + 1) * random()) / (RAND_MAX + 1U)) + min;
 }
+
+#undef CALC_TYPE
 
 /* Returns random disciminator number */
 uint32_t
@@ -302,11 +343,12 @@ bfd_get_random_discr(bfd_data_t *data)
 	assert(data);
 
 	do {
-		discr = rand_intv(1, UINT32_MAX);
+		/* rand_intv(1, UINT32_MAX) only returns even numbers, since
+		 * RAND_MAX == INT32_MAX == UINT32_MAX / 2 */
+		discr = (rand_intv(1, UINT32_MAX) & ~1) | (time_now.tv_sec & 1);
 
 		/* Check for collisions */
-		for (e = LIST_HEAD(data->bfd); e; ELEMENT_NEXT(e)) {
-			bfd = ELEMENT_DATA(e);
+		LIST_FOREACH(data->bfd, bfd, e) {
 			if (bfd->local_discr == discr) {
 				discr = 0;
 				break;

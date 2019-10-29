@@ -24,7 +24,7 @@
  * To test this code, one can use the following:
  *
  * Build keepalived with SNMP support with one or more of the following options
-     ./configure--enable-snmp-keepalived --enable-snmp-checker [or --enable-snmp to enable previous two options] \
+     ./configure--enable-snmp-vrrp --enable-snmp-checker [or --enable-snmp to enable previous two options] \
 		 --enable-snmp-rfcv2 --enable-snmp-rfcv3 [or --enable-snmp-rfc to enable previous two options]
 
  * Edit /etc/snmp/snmpd.conf to contain the following:
@@ -70,7 +70,7 @@
      enable_snmp_rfc	(enables enable_snmp_rfcv2 enable_snmp_rfcv3)
      enable_snmp_rfcv2
      enable_snmp_rfcv3
-     enable_snmp_traps
+     enable_traps
 
  * Run keepalived. Some traps/notifications should be generated which will be displayed on the terminal running snmptrapd
 
@@ -111,6 +111,7 @@
 #endif
 #include <linux/fib_rules.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include "vrrp.h"
 #include "vrrp_snmp.h"
@@ -129,6 +130,8 @@
 #include "main.h"
 #include "rttables.h"
 #include "parser.h"
+#include "warnings.h"
+#include "utils.h"
 
 #include "snmp.h"
 
@@ -141,6 +144,7 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_SCRIPT_COMMAND,
 	VRRP_SNMP_SCRIPT_INTERVAL,
 	VRRP_SNMP_SCRIPT_WEIGHT,
+	VRRP_SNMP_SCRIPT_WEIGHT_REVERSE,
 	VRRP_SNMP_SCRIPT_RESULT,
 	VRRP_SNMP_SCRIPT_RISE,
 	VRRP_SNMP_SCRIPT_FALL,
@@ -148,6 +152,24 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_FILE_PATH,
 	VRRP_SNMP_FILE_RESULT,
 	VRRP_SNMP_FILE_WEIGHT,
+	VRRP_SNMP_FILE_WEIGHT_REVERSE,
+	VRRP_SNMP_BFD_NAME,
+	VRRP_SNMP_BFD_RESULT,
+	VRRP_SNMP_BFD_WEIGHT,
+	VRRP_SNMP_BFD_WEIGHT_REVERSE,
+	VRRP_SNMP_PROCESS_NAME,
+	VRRP_SNMP_PROCESS_PATH,
+	VRRP_SNMP_PROCESS_PARAMS,
+	VRRP_SNMP_PROCESS_PARAM_MATCH,
+	VRRP_SNMP_PROCESS_WEIGHT,
+	VRRP_SNMP_PROCESS_WEIGHT_REVERSE,
+	VRRP_SNMP_PROCESS_QUORUM,
+	VRRP_SNMP_PROCESS_QUORUM_MAX,
+	VRRP_SNMP_PROCESS_FORKDELAY,
+	VRRP_SNMP_PROCESS_TERMINATEDELAY,
+	VRRP_SNMP_PROCESS_FULLCOMMAND,
+	VRRP_SNMP_PROCESS_CURPROC,
+	VRRP_SNMP_PROCESS_RESULT,
 	VRRP_SNMP_ADDRESS_ADDRESSTYPE,
 	VRRP_SNMP_ADDRESS_VALUE,
 	VRRP_SNMP_ADDRESS_BROADCAST,
@@ -203,16 +225,34 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI,
 	VRRP_SNMP_TRACKEDINTERFACE_NAME,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT,
+	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE,
 	VRRP_SNMP_TRACKEDSCRIPT_NAME,
 	VRRP_SNMP_TRACKEDSCRIPT_WEIGHT,
+	VRRP_SNMP_TRACKEDSCRIPT_WEIGHT_REVERSE,
 	VRRP_SNMP_TRACKEDFILE_NAME,
 	VRRP_SNMP_TRACKEDFILE_WEIGHT,
+	VRRP_SNMP_TRACKEDFILE_WEIGHT_REVERSE,
+	VRRP_SNMP_TRACKEDBFD_NAME,
+	VRRP_SNMP_TRACKEDBFD_WEIGHT,
+	VRRP_SNMP_TRACKEDBFD_WEIGHT_REVERSE,
+	VRRP_SNMP_TRACKEDPROCESS_NAME,
+	VRRP_SNMP_TRACKEDPROCESS_WEIGHT,
+	VRRP_SNMP_TRACKEDPROCESS_WEIGHT_REVERSE,
 	VRRP_SNMP_SGROUPTRACKEDINTERFACE_NAME,
 	VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT,
+	VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT_REVERSE,
 	VRRP_SNMP_SGROUPTRACKEDSCRIPT_NAME,
 	VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT,
+	VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT_REVERSE,
 	VRRP_SNMP_SGROUPTRACKEDFILE_NAME,
 	VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT,
+	VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT_REVERSE,
+	VRRP_SNMP_SGROUPTRACKEDBFD_NAME,
+	VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT,
+	VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT_REVERSE,
+	VRRP_SNMP_SGROUPTRACKEDPROCESS_NAME,
+	VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT,
+	VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT_REVERSE,
 };
 
 #ifdef _HAVE_FIB_ROUTING_
@@ -342,7 +382,6 @@ enum snmp_next_hop_magic {
 #define HEADER_STATE_VIRTUAL_ROUTE 5
 #define HEADER_STATE_STATIC_RULE 6
 #define HEADER_STATE_VIRTUAL_RULE 7
-#define HEADER_STATE_NEXT_HOP 11
 #endif
 #define HEADER_STATE_END 12
 
@@ -360,8 +399,7 @@ enum rfcv2_snmp_node_magic {
 };
 
 enum rfcv2_snmp_oper_magic {
-	VRRP_RFC_SNMP_OPER_VRID = 2,
-	VRRP_RFC_SNMP_OPER_AUTH_KEY,
+	VRRP_RFC_SNMP_OPER_AUTH_KEY = 3,
 	VRRP_RFC_SNMP_OPER_ADVERT_INT,
 	VRRP_RFC_SNMP_OPER_PREEMPT,
 	VRRP_RFC_SNMP_OPER_VR_UPTIME,
@@ -378,8 +416,7 @@ enum rfcv2_snmp_oper_magic {
 };
 
 enum rfcv2_snmp_assoc_ip_magic {
-	VRRP_RFC_SNMP_ASSOC_IP_ADDR = 2,
-	VRRP_RFC_SNMP_ASSOC_IP_ADDR_ROW
+	VRRP_RFC_SNMP_ASSOC_IP_ADDR_ROW = 3
 };
 
 enum rfcv2_snmp_stats_err_magic {
@@ -419,8 +456,6 @@ enum rfcv2_snmp_stats_magic {
 
 /* Magic for RFC MIB functions */
 enum rfcv3_snmp_oper_magic {
-	VRRP_RFCv3_SNMP_OPER_VRID,
-	VRRP_RFCv3_SNMP_OPER_INET_ADDR_TYPE,
 	VRRP_RFCv3_SNMP_OPER_MIP,
 	VRRP_RFCv3_SNMP_OPER_PIP,
 	VRRP_RFCv3_SNMP_OPER_VMAC,
@@ -435,8 +470,7 @@ enum rfcv3_snmp_oper_magic {
 };
 
 enum rfcv3_snmp_assoc_ip_magic {
-	VRRP_RFCv3_SNMP_ASSOC_IP_ADDR = 2,
-	VRRP_RFCv3_SNMP_ASSOC_IP_ADDR_ROW_STATUS
+	VRRP_RFCv3_SNMP_ASSOC_IP_ADDR_ROW_STATUS = 3
 };
 
 enum rfcv3_snmp_stats_err_magic {
@@ -494,7 +528,7 @@ set_counter64 (struct counter64 *c64, uint64_t val)
 
 #ifdef _FOR_DEBUGGING_
 static void
-sprint_oid(char *str, oid* oid, int len)
+sprint_oid(char *str, const oid* oid, int len)
 {
 	int offs = 0;
 	int i;
@@ -523,6 +557,7 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_script_t *scr;
+	snmp_ret_t ret;
 
 	if ((scr = (vrrp_script_t *)snmp_header_list_table(vp, name, length, exact,
 							   var_len, write_method,
@@ -532,7 +567,8 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case VRRP_SNMP_SCRIPT_NAME:
 		*var_len = strlen(scr->sname);
-		return (u_char *)scr->sname;
+		ret.cp = scr->sname;
+		return ret.p;
 	case VRRP_SNMP_SCRIPT_COMMAND:
 		cmd_str_r(&scr->script, buf, sizeof(buf));
 		*var_len = strlen(buf);
@@ -542,6 +578,9 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_SCRIPT_WEIGHT:
 		long_ret.s = scr->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SCRIPT_WEIGHT_REVERSE:
+		long_ret.u = scr->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_SCRIPT_RESULT:
 		switch (scr->init_state) {
@@ -570,6 +609,7 @@ vrrp_snmp_file(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_tracked_file_t *file;
+	snmp_ret_t ret;
 
 	if ((file = (vrrp_tracked_file_t *)snmp_header_list_table(vp, name, length, exact,
 							   var_len, write_method,
@@ -579,21 +619,141 @@ vrrp_snmp_file(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case VRRP_SNMP_FILE_NAME:
 		*var_len = strlen(file->fname);
-		return (u_char *)file->fname;
+		ret.cp = file->fname;
+		return ret.p;
 	case VRRP_SNMP_FILE_PATH:
 		*var_len = strlen(file->file_path);
-		return (u_char *)file->file_path;
+		ret.cp = file->file_path;
+		return ret.p;
 	case VRRP_SNMP_FILE_RESULT:
 		long_ret.s = file->last_status;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_FILE_WEIGHT:
 		long_ret.s = file->weight;
 		return (u_char *)&long_ret;
+	case VRRP_SNMP_FILE_WEIGHT_REVERSE:
+		long_ret.u = file->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
 	default:
 		break;
 	}
 	return NULL;
 }
+
+#ifdef _WITH_BFD_
+static u_char*
+vrrp_snmp_bfd(struct variable *vp, oid *name, size_t *length,
+		 int exact, size_t *var_len, WriteMethod **write_method)
+{
+	vrrp_tracked_bfd_t *bfd;
+	snmp_ret_t ret;
+
+	if ((bfd = (vrrp_tracked_bfd_t *)snmp_header_list_table(vp, name, length, exact,
+							   var_len, write_method,
+							   vrrp_data->vrrp_track_bfds)) == NULL)
+		return NULL;
+
+	switch (vp->magic) {
+	case VRRP_SNMP_BFD_NAME:
+		*var_len = strlen(bfd->bname);
+		ret.cp = bfd->bname;
+		return ret.p;
+	case VRRP_SNMP_BFD_RESULT:
+		long_ret.s = bfd->bfd_up;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_BFD_WEIGHT:
+		long_ret.s = bfd->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_BFD_WEIGHT_REVERSE:
+		long_ret.u = bfd->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	default:
+		break;
+	}
+	return NULL;
+}
+#endif
+
+#ifdef _WITH_CN_PROC_
+static u_char*
+vrrp_snmp_process(struct variable *vp, oid *name, size_t *length,
+		 int exact, size_t *var_len, WriteMethod **write_method)
+{
+	vrrp_tracked_process_t *proc;
+	snmp_ret_t ret;
+
+	if ((proc = (vrrp_tracked_process_t *)snmp_header_list_table(vp, name, length, exact,
+							   var_len, write_method,
+							   vrrp_data->vrrp_track_processes)) == NULL)
+		return NULL;
+
+	switch (vp->magic) {
+	case VRRP_SNMP_PROCESS_NAME:
+		*var_len = strlen(proc->pname);
+		ret.cp = proc->pname;
+		return ret.p;
+	case VRRP_SNMP_PROCESS_PATH:
+		*var_len = strlen(proc->process_path);
+		ret.cp = proc->process_path;
+		return ret.p;
+	case VRRP_SNMP_PROCESS_PARAMS:
+		if (!proc->process_params_len) {
+			*var_len = 0;
+			ret.cp = "";
+		} else {
+			/* We need to replace the nul terminators with spaces */
+			size_t len;
+			unsigned i;
+
+			len = proc->process_params_len - 1 < sizeof(buf) ? proc->process_params_len - 1 : sizeof(buf);
+			memcpy(buf, proc->process_params, len);
+			buf[sizeof(buf) - 1] = '\0';
+
+			for (i = strlen(buf); i < len; i += strlen(buf + i)) {
+				buf[i++] = ' ';
+				if (i >= len)
+					break;
+			}
+			*var_len = len;
+			ret.cp = buf;
+		}
+		return ret.p;
+	case VRRP_SNMP_PROCESS_PARAM_MATCH:
+		long_ret.u = proc->param_match;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_WEIGHT:
+		long_ret.u = proc->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_WEIGHT_REVERSE:
+		long_ret.u = proc->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_QUORUM:
+		long_ret.u = proc->quorum;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_QUORUM_MAX:
+		long_ret.u = proc->quorum_max;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_FORKDELAY:
+		long_ret.u = proc->fork_delay;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_TERMINATEDELAY:
+		long_ret.u = proc->terminate_delay;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_FULLCOMMAND:
+		long_ret.u = proc->full_command ? 1 : 2;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_CURPROC:
+		long_ret.u = proc->num_cur_proc;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_PROCESS_RESULT:
+		long_ret.u = proc->have_quorum ? 1 : 2;
+		return (u_char *)&long_ret;
+	default:
+		break;
+	}
+	return NULL;
+}
+#endif
 
 /* Header function using a FSM. `state' is the initial state, either
    HEADER_STATE_STATIC_ADDRESS, HEADER_STATE_STATIC_ROUTE or
@@ -659,6 +819,7 @@ vrrp_header_ar_table(struct variable *vp, oid *name, size_t *length,
 			break;
 		case HEADER_STATE_EXCLUDED_VIRTUAL_ADDRESS:
 			/* Try excluded virtual addresses */
+			/* coverity[var_deref_op] */
 			l2 = ((vrrp_t *)ELEMENT_DATA(e1))->evip;
 			nextstate = HEADER_STATE_VIRTUAL_ADDRESS;
 			break;
@@ -900,6 +1061,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 {
 	ip_route_t *route;
 	int state = HEADER_STATE_STATIC_ROUTE;
+	nexthop_t *gw2;
 
 	if ((route = (ip_route_t *)
 	     vrrp_header_ar_table(vp, name, length, exact,
@@ -947,7 +1109,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_SECONDARYGATEWAY:
 		if (LIST_ISEMPTY(route->nhs) || LIST_SIZE(route->nhs) != 1)
 			break;
-		nexthop_t *gw2 = LIST_HEAD(route->nhs)->data;
+		gw2 = LIST_HEAD(route->nhs)->data;
 #if HAVE_DECL_RTA_ENCAP
 		if (gw2->encap.type != LWTUNNEL_ENCAP_NONE)
 			break;
@@ -1401,7 +1563,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_RULE_DIRECTION:	/* obsolete */
 		str = rule->to_addr ? rule->from_addr ? "both" : "to" : rule->from_addr ? "from" : "";
 		*var_len = strlen(str);
-		return (u_char *)str;
+		return (u_char *)no_const_char_p(str);
 	case VRRP_SNMP_RULE_ADDRESSTYPE:	/* obsolete */
 		addr = rule->to_addr ? rule->to_addr : rule->from_addr;
 		if (!addr)
@@ -1539,12 +1701,14 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 #if HAVE_DECL_FRA_SUPPRESS_IFGROUP
 	case VRRP_SNMP_RULE_SUPPRESSGROUP:
 		if (rule->mask & IPRULE_BIT_SUP_GROUP) {
-			str = get_rttables_group(rule->suppress_group);
+RELAX_CAST_QUAL_START
+			str = (char *)get_rttables_group(rule->suppress_group);
+RELAX_CAST_QUAL_END
 			*var_len = strlen(str);
 		}
 		else
 			break;
-		return (u_char *)str;
+		return (u_char *)no_const_char_p(str);
 #endif
 #if HAVE_DECL_FRA_TUN_ID
 	case VRRP_SNMP_RULE_TUNNELID_HIGH:
@@ -1647,6 +1811,7 @@ vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_sgroup_t *group;
+	snmp_ret_t ret;
 
 	if ((group = (vrrp_sgroup_t *)
 	     snmp_header_list_table(vp, name, length, exact,
@@ -1657,7 +1822,8 @@ vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case VRRP_SNMP_SYNCGROUP_NAME:
 		*var_len = strlen(group->gname);
-		return (u_char *)group->gname;
+		ret.cp = group->gname;
+		return ret.p;
 	case VRRP_SNMP_SYNCGROUP_STATE:
 		long_ret.s = vrrp_snmp_state(group->state);
 		return (u_char *)&long_ret;
@@ -1720,79 +1886,18 @@ static u_char*
 vrrp_snmp_syncgroupmember(struct variable *vp, oid *name, size_t *length,
 			  int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curgroup, curinstance;
-	char *binstance = NULL;
-	element e, e1;
-	vrrp_sgroup_t *group;
+	snmp_ret_t ret;
 	vrrp_t *vrrp;
+	element e;
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp_sync_group))
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, vrrp_instances));
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curgroup = 0;
-	for (e = LIST_HEAD(vrrp_data->vrrp_sync_group); e; ELEMENT_NEXT(e)) {
-		group = ELEMENT_DATA(e);
-		curgroup++;
-		if (target_len && (curgroup < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (binstance)
-			break; /* Optimization: cannot be the lower
-				  anymore, see break below */
-		for (e1 = LIST_HEAD(group->vrrp_instances), curinstance = 0; e1; ELEMENT_NEXT(e1), curinstance++) {
-			/* We build our current match */
-			current[0] = curgroup;
-			current[1] = curinstance + 1;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			vrrp = ELEMENT_DATA(e1);
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				*var_len = strlen(vrrp->iname);
-				return (u_char *)vrrp->iname;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				binstance = vrrp->iname;
-				/* (current[0],current[1]) are
-				   strictly increasing, this is our
-				   lower element of our set */
-				break;
-			}
-		}
-	}
-	if (binstance == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
-	*var_len = strlen(binstance);
-	return (u_char*)binstance;
+	vrrp = ELEMENT_DATA(e);
+	ret.cp = vrrp->iname;
+	*var_len = strlen(ret.cp);
+	return ret.p;
 }
 
 static vrrp_t *
@@ -1804,9 +1909,8 @@ _get_instance(oid *name, size_t name_len)
 
 	if (name_len < 1) return NULL;
 	instance = name[name_len - 1];
-	if (LIST_ISEMPTY(vrrp_data->vrrp)) return NULL;
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
+
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
 		if (--instance == 0) break;
 	}
 	return vrrp;
@@ -1814,12 +1918,21 @@ _get_instance(oid *name, size_t name_len)
 
 #ifdef _WITH_FIREWALL_
 static int
+#ifndef ALLOW_SNMP_SET_ACCEPT
+vrrp_snmp_instance_accept(__attribute__((unused)) int action,
+			  __attribute__((unused)) u_char *var_val, __attribute__((unused)) u_char var_val_type,
+			  __attribute__((unused)) size_t var_val_len, __attribute__((unused)) u_char *statP,
+			  __attribute__((unused)) oid *name, __attribute__((unused)) size_t name_len)
+{
+	return SNMP_ERR_NOACCESS;
+}
+
+#else
 vrrp_snmp_instance_accept(int action,
 			  u_char *var_val, u_char var_val_type,
 			  size_t var_val_len, __attribute__((unused)) u_char *statP,
 			  oid *name, size_t name_len)
 {
-	return SNMP_ERR_NOACCESS;
 	vrrp_t *vrrp = NULL;
 
 	switch (action) {
@@ -1867,6 +1980,7 @@ vrrp_snmp_instance_accept(int action,
 		}
 	return SNMP_ERR_NOERROR;
 }
+#endif
 #endif
 
 static int
@@ -1961,6 +2075,7 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		   int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_t *rt;
+	snmp_ret_t ret;
 
 	if ((rt = (vrrp_t *)snmp_header_list_table(vp, name, length, exact,
 						    var_len, write_method,
@@ -1970,7 +2085,8 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case VRRP_SNMP_INSTANCE_NAME:
 		*var_len = strlen(rt->iname);
-		return (u_char *)rt->iname;
+		ret.cp = rt->iname;
+		return ret.p;
 	case VRRP_SNMP_INSTANCE_VIRTUALROUTERID:
 		long_ret.u = rt->vrid;
 		return (u_char *)&long_ret;
@@ -2026,14 +2142,16 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_INSTANCE_LVSSYNCINTERFACE:
 		if (global_data->lvs_syncd.vrrp == rt) {
 			*var_len = strlen(global_data->lvs_syncd.ifname);
-			return (u_char *)global_data->lvs_syncd.ifname;
+			ret.cp = global_data->lvs_syncd.ifname;
+			return ret.p;
 		}
 		break;
 #endif
 	case VRRP_SNMP_INSTANCE_SYNCGROUP:
 		if (rt->sync) {
 			*var_len = strlen(rt->sync->gname);
-			return (u_char *)rt->sync->gname;
+			ret.cp = rt->sync->gname;
+			return ret.p;
 		}
 		break;
 	case VRRP_SNMP_INSTANCE_GARPDELAY:
@@ -2120,82 +2238,25 @@ static u_char*
 vrrp_snmp_trackedinterface(struct variable *vp, oid *name, size_t *length,
 			   int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curif;
-	element e1, e2;
-	vrrp_t *instance;
-	tracked_if_t *ifp, *bifp = NULL;
+	const tracked_if_t *bifp;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_ifp));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp); e1; ELEMENT_NEXT(e1)) {
-		instance = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (target_len && bifp && (curinstance > target[0] + 1))
-			break; /* Optimization: cannot be the lower anymore */
-		if (LIST_ISEMPTY(instance->track_ifp))
-			continue;
-		curif = 0;
-		for (e2 = LIST_HEAD(instance->track_ifp); e2; ELEMENT_NEXT(e2)) {
-			ifp = ELEMENT_DATA(e2);
-			curif++;
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curif;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bifp = ifp;
-				goto trackedinterface_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bifp = ifp;
-			}
-		}
-	}
-	if (bifp == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- trackedinterface_found:
+	bifp = ELEMENT_DATA(e);
+
 	switch (vp->magic) {
 	case VRRP_SNMP_TRACKEDINTERFACE_NAME:
-		*var_len = strlen(bifp->ifp->ifname);
-		return (u_char *)bifp->ifp->ifname;
+		ret.cp = bifp->ifp->ifname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_TRACKEDINTERFACE_WEIGHT:
 		long_ret.s = bifp->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE:
+		long_ret.s = bifp->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 	return NULL;
@@ -2205,86 +2266,25 @@ static u_char*
 vrrp_snmp_trackedscript(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curscr;
-	element e1, e2;
-	vrrp_t *instance;
-	tracked_sc_t *scr, *bscr = NULL;
+	const tracked_sc_t *bscr;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_script));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp); e1; ELEMENT_NEXT(e1)) {
-		instance = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (bscr)
-			break; /* Optimization, see below */
-		if (LIST_ISEMPTY(instance->track_script))
-			continue;
-		curscr = 0;
-		for (e2 = LIST_HEAD(instance->track_script); e2; ELEMENT_NEXT(e2)) {
-			scr = ELEMENT_DATA(e2);
-			curscr++;
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curscr;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bscr = scr;
-				goto trackedscript_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bscr = scr;
-				/* (current[0],current[1]) are
-				   strictly increasing, this is our
-				   lower element of our set */
-				break;
-			}
-		}
-	}
-	if (bscr == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- trackedscript_found:
+	bscr = ELEMENT_DATA(e);
+
 	switch (vp->magic) {
 	case VRRP_SNMP_TRACKEDSCRIPT_NAME:
-		*var_len = strlen(bscr->scr->sname);
-		return (u_char *)bscr->scr->sname;
+		ret.cp = bscr->scr->sname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_TRACKEDSCRIPT_WEIGHT:
 		long_ret.s = bscr->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_TRACKEDSCRIPT_WEIGHT_REVERSE:
+		long_ret.s = bscr->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 	return NULL;
@@ -2294,173 +2294,116 @@ static u_char*
 vrrp_snmp_trackedfile(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curfile;
-	element e1, e2;
-	vrrp_t *instance;
-	tracked_file_t *file, *bfile = NULL;
+	const tracked_file_t *bfile;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_file));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp); e1; ELEMENT_NEXT(e1)) {
-		instance = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (bfile)
-			break; /* Optimization, see below */
-		if (LIST_ISEMPTY(instance->track_file))
-			continue;
-		curfile = 0;
-		for (e2 = LIST_HEAD(instance->track_file); e2; ELEMENT_NEXT(e2)) {
-			file = ELEMENT_DATA(e2);
-			curfile++;
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curfile;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bfile = file;
-				goto trackedfile_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bfile = file;
-				/* (current[0],current[1]) are
-				   strictly increasing, this is our
-				   lower element of our set */
-				break;
-			}
-		}
-	}
-	if (bfile == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- trackedfile_found:
+	bfile = ELEMENT_DATA(e);
+
 	switch(vp->magic) {
 	case VRRP_SNMP_TRACKEDFILE_NAME:
-		*var_len = strlen(bfile->file->fname);
-		return (u_char *)bfile->file->fname;
+		ret.cp = bfile->file->fname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_TRACKEDFILE_WEIGHT:
 		long_ret.s = bfile->file->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_TRACKEDFILE_WEIGHT_REVERSE:
+		long_ret.s = bfile->file->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 
 	return NULL;
 }
 
+#ifdef _WITH_BFD_
+static u_char*
+vrrp_snmp_trackedbfd(struct variable *vp, oid *name, size_t *length,
+			int exact, size_t *var_len, WriteMethod **write_method)
+{
+	const tracked_bfd_t *bbfd;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_bfd));
+
+	if (!e)
+		return NULL;
+
+	bbfd = ELEMENT_DATA(e);
+
+	switch(vp->magic) {
+	case VRRP_SNMP_TRACKEDBFD_NAME:
+		ret.cp = bbfd->bfd->bname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
+	case VRRP_SNMP_TRACKEDBFD_WEIGHT:
+		long_ret.s = bbfd->bfd->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_TRACKEDBFD_WEIGHT_REVERSE:
+		long_ret.s = bbfd->bfd->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	}
+
+	return NULL;
+}
+#endif
+
+#ifdef _WITH_CN_PROC_
+static u_char*
+vrrp_snmp_trackedprocess(struct variable *vp, oid *name, size_t *length,
+			int exact, size_t *var_len, WriteMethod **write_method)
+{
+	const tracked_process_t *bproc;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_process));
+
+	if (!e)
+		return NULL;
+
+	bproc = ELEMENT_DATA(e);
+
+	switch(vp->magic) {
+	case VRRP_SNMP_TRACKEDPROCESS_NAME:
+		ret.cp = bproc->process->pname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
+	case VRRP_SNMP_TRACKEDPROCESS_WEIGHT:
+		long_ret.s = bproc->process->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_TRACKEDPROCESS_WEIGHT_REVERSE:
+		long_ret.s = bproc->process->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	}
+
+	return NULL;
+}
+#endif
+
 static u_char*
 vrrp_snmp_group_trackedinterface(struct variable *vp, oid *name, size_t *length,
 			   int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curif;
-	element e1, e2;
-	vrrp_sgroup_t *sgroup;
-	tracked_if_t *ifp, *bifp = NULL;
+	const tracked_if_t *bifp;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_ifp));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp_sync_group))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp_sync_group); e1; ELEMENT_NEXT(e1)) {
-		sgroup = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (target_len && bifp && (curinstance > target[0] + 1))
-			break; /* Optimization: cannot be the lower anymore */
-		if (LIST_ISEMPTY(sgroup->track_ifp))
-			continue;
-		curif = 0;
-		for (e2 = LIST_HEAD(sgroup->track_ifp); e2; ELEMENT_NEXT(e2)) {
-			ifp = ELEMENT_DATA(e2);
-			curif++;
+	bifp = ELEMENT_DATA(e);
 
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curif;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bifp = ifp;
-				goto group_trackedinterface_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bifp = ifp;
-			}
-		}
-	}
-	if (bifp == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- group_trackedinterface_found:
 	switch (vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDINTERFACE_NAME:
-		*var_len = strlen(bifp->ifp->ifname);
-		return (u_char *)bifp->ifp->ifname;
+		ret.cp = bifp->ifp->ifname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT:
 		long_ret.s = bifp->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT_REVERSE:
+		long_ret.s = bifp->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 	return NULL;
@@ -2470,86 +2413,25 @@ static u_char*
 vrrp_snmp_group_trackedscript(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curscr;
-	element e1, e2;
-	vrrp_sgroup_t *sgroup;
-	tracked_sc_t *scr, *bscr = NULL;
+	const tracked_sc_t *bscr;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_script));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp_sync_group))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp_sync_group); e1; ELEMENT_NEXT(e1)) {
-		sgroup = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (bscr)
-			break; /* Optimization, see below */
-		if (LIST_ISEMPTY(sgroup->track_script))
-			continue;
-		curscr = 0;
-		for (e2 = LIST_HEAD(sgroup->track_script); e2; ELEMENT_NEXT(e2)) {
-			scr = ELEMENT_DATA(e2);
-			curscr++;
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curscr;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bscr = scr;
-				goto group_trackedscript_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bscr = scr;
-				/* (current[0],current[1]) are
-				   strictly increasing, this is our
-				   lower element of our set */
-				break;
-			}
-		}
-	}
-	if (bscr == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- group_trackedscript_found:
+	bscr = ELEMENT_DATA(e);
+
 	switch (vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDSCRIPT_NAME:
-		*var_len = strlen(bscr->scr->sname);
-		return (u_char *)bscr->scr->sname;
+		ret.cp = bscr->scr->sname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT:
 		long_ret.s = bscr->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT_REVERSE:
+		long_ret.s = bscr->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 	return NULL;
@@ -2559,91 +2441,92 @@ static u_char*
 vrrp_snmp_group_trackedfile(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	oid *target, current[2], best[2];
-	int result;
-	size_t target_len;
-	unsigned curinstance, curfile;
-	element e1, e2;
-	vrrp_sgroup_t *sgroup;
-	tracked_file_t *file, *bfile = NULL;
+	const tracked_file_t *bfile;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_file));
 
-	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
-		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
-		*length = vp->namelen;
-	}
-
-	*write_method = 0;
-	*var_len = sizeof(long);
-
-	if (LIST_ISEMPTY(vrrp_data->vrrp_sync_group))
+	if (!e)
 		return NULL;
 
-	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
-	target = &name[vp->namelen];   /* Our target match */
-	target_len = *length - vp->namelen;
-	curinstance = 0;
-	for (e1 = LIST_HEAD(vrrp_data->vrrp_sync_group); e1; ELEMENT_NEXT(e1)) {
-		sgroup = ELEMENT_DATA(e1);
-		curinstance++;
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (bfile)
-			break; /* Optimization, see below */
-		if (LIST_ISEMPTY(sgroup->track_file))
-			continue;
-		curfile = 0;
-		for (e2 = LIST_HEAD(sgroup->track_file); e2; ELEMENT_NEXT(e2)) {
-			file = ELEMENT_DATA(e2);
-			curfile++;
-			/* We build our current match */
-			current[0] = curinstance;
-			current[1] = curfile;
-			/* And compare it to our target match */
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
-				continue;
-			if (result == 0) {
-				/* Got an exact match and asked for it */
-				bfile = file;
-				goto group_trackedfile_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bfile = file;
-				/* (current[0],current[1]) are
-				   strictly increasing, this is our
-				   lower element of our set */
-				break;
-			}
-		}
-	}
-	if (bfile == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
- group_trackedfile_found:
+	bfile = ELEMENT_DATA(e);
+
 	switch(vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDFILE_NAME:
-		*var_len = strlen(bfile->file->fname);
-		return (u_char *)bfile->file->fname;
+		ret.cp = bfile->file->fname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
 	case VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT:
 		long_ret.s = bfile->file->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT_REVERSE:
+		long_ret.s = bfile->file->weight_reverse ? 1 : 2;
 		return (u_char *)&long_ret;
 	}
 
 	return NULL;
 }
+
+#ifdef _WITH_BFD_
+static u_char*
+vrrp_snmp_group_trackedbfd(struct variable *vp, oid *name, size_t *length,
+			int exact, size_t *var_len, WriteMethod **write_method)
+{
+	const tracked_bfd_t *bbfd;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_bfd));
+
+	if (!e)
+		return NULL;
+
+	bbfd = ELEMENT_DATA(e);
+
+	switch(vp->magic) {
+	case VRRP_SNMP_SGROUPTRACKEDBFD_NAME:
+		ret.cp = bbfd->bfd->bname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
+	case VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT:
+		long_ret.s = bbfd->bfd->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT_REVERSE:
+		long_ret.s = bbfd->bfd->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	}
+
+	return NULL;
+}
+#endif
+
+#ifdef _WITH_CN_PROC_
+static u_char*
+vrrp_snmp_group_trackedprocess(struct variable *vp, oid *name, size_t *length,
+			int exact, size_t *var_len, WriteMethod **write_method)
+{
+	const tracked_process_t *bproc;
+	snmp_ret_t ret;
+	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_process));
+
+	if (!e)
+		return NULL;
+
+	bproc = ELEMENT_DATA(e);
+
+	switch(vp->magic) {
+	case VRRP_SNMP_SGROUPTRACKEDPROCESS_NAME:
+		ret.cp = bproc->process->pname;
+		*var_len = strlen(ret.cp);
+		return ret.p;
+	case VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT:
+		long_ret.s = bproc->process->weight;
+		return (u_char *)&long_ret;
+	case VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT_REVERSE:
+		long_ret.s = bproc->process->weight_reverse ? 1 : 2;
+		return (u_char *)&long_ret;
+	}
+
+	return NULL;
+}
+#endif
 
 static oid vrrp_oid[] = {VRRP_OID};
 static struct variable8 vrrp_vars[] = {
@@ -2740,12 +2623,16 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_trackedinterface, 3, {4, 1, 1}},
 	{VRRP_SNMP_TRACKEDINTERFACE_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_trackedinterface, 3, {4, 1, 2}},
+	{VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedinterface, 3, {4, 1, 3}},
 
 	/* vrrpTrackedScriptTable */
 	{VRRP_SNMP_TRACKEDSCRIPT_NAME, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_trackedscript, 3, {5, 1, 2}},
 	{VRRP_SNMP_TRACKEDSCRIPT_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_trackedscript, 3, {5, 1, 3}},
+	{VRRP_SNMP_TRACKEDSCRIPT_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedscript, 3, {5, 1, 4}},
 
 	/* vrrpAddressTable */
 	{VRRP_SNMP_ADDRESS_ADDRESSTYPE, ASN_INTEGER, RONLY,
@@ -2967,6 +2854,7 @@ static struct variable8 vrrp_vars[] = {
 	{VRRP_SNMP_SCRIPT_RESULT, ASN_INTEGER, RONLY, vrrp_snmp_script, 3, {9, 1, 6}},
 	{VRRP_SNMP_SCRIPT_RISE, ASN_UNSIGNED, RONLY, vrrp_snmp_script, 3, {9, 1, 7}},
 	{VRRP_SNMP_SCRIPT_FALL, ASN_UNSIGNED, RONLY, vrrp_snmp_script, 3, {9, 1, 8}},
+	{VRRP_SNMP_SCRIPT_WEIGHT_REVERSE, ASN_INTEGER, RONLY, vrrp_snmp_script, 3, {9, 1, 9}},
 
 #ifdef _HAVE_FIB_ROUTING_
 	/* vrrpRouteNextHopTable */
@@ -3017,30 +2905,100 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_trackedfile, 3, {12, 1, 2}},
 	{VRRP_SNMP_TRACKEDFILE_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_trackedfile, 3, {12, 1, 3}},
+	{VRRP_SNMP_TRACKEDFILE_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedfile, 3, {12, 1, 4}},
 
 	/* vrrpFileTable */
 	{VRRP_SNMP_FILE_NAME, ASN_OCTET_STR, RONLY, vrrp_snmp_file, 3, {13, 1, 2}},
 	{VRRP_SNMP_FILE_PATH, ASN_OCTET_STR, RONLY, vrrp_snmp_file, 3, {13, 1, 3}},
 	{VRRP_SNMP_FILE_RESULT, ASN_INTEGER, RONLY, vrrp_snmp_file, 3, {13, 1, 4}},
 	{VRRP_SNMP_FILE_WEIGHT, ASN_INTEGER, RONLY, vrrp_snmp_file, 3, {13, 1, 5}},
+	{VRRP_SNMP_FILE_WEIGHT_REVERSE, ASN_INTEGER, RONLY, vrrp_snmp_file, 3, {13, 1, 6}},
+
+#ifdef _WITH_BFD_
+	/* vrrpTrackedBfdTable */
+	{VRRP_SNMP_TRACKEDBFD_NAME, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_trackedbfd, 3, {17, 1, 2}},
+	{VRRP_SNMP_TRACKEDBFD_WEIGHT, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedbfd, 3, {17, 1, 3}},
+	{VRRP_SNMP_TRACKEDBFD_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedbfd, 3, {17, 1, 4}},
+
+	/* vrrpBfdTable */
+	{VRRP_SNMP_BFD_NAME, ASN_OCTET_STR, RONLY, vrrp_snmp_bfd, 3, {18, 1, 2}},
+	{VRRP_SNMP_BFD_RESULT, ASN_INTEGER, RONLY, vrrp_snmp_bfd, 3, {18, 1, 3}},
+	{VRRP_SNMP_BFD_WEIGHT, ASN_INTEGER, RONLY, vrrp_snmp_bfd, 3, {18, 1, 4}},
+	{VRRP_SNMP_BFD_WEIGHT_REVERSE, ASN_INTEGER, RONLY, vrrp_snmp_bfd, 3, {18, 1, 5}},
+#endif
+
+#ifdef _WITH_CN_PROC_
+	/* vrrpTrackedProcessTable */
+	{VRRP_SNMP_TRACKEDPROCESS_NAME, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_trackedprocess, 3, {20, 1, 2}},
+	{VRRP_SNMP_TRACKEDPROCESS_WEIGHT, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedprocess, 3, {20, 1, 3}},
+	{VRRP_SNMP_TRACKEDPROCESS_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_trackedprocess, 3, {20, 1, 4}},
+
+	/* vrrpProcessTable */
+	{VRRP_SNMP_PROCESS_NAME, ASN_OCTET_STR, RONLY, vrrp_snmp_process, 3, {21, 1, 2}},
+	{VRRP_SNMP_PROCESS_PATH, ASN_OCTET_STR, RONLY, vrrp_snmp_process, 3, {21, 1, 3}},
+	{VRRP_SNMP_PROCESS_PARAMS, ASN_OCTET_STR, RONLY, vrrp_snmp_process, 3, {21, 1, 4}},
+	{VRRP_SNMP_PROCESS_PARAM_MATCH, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 5}},
+	{VRRP_SNMP_PROCESS_WEIGHT, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 6}},
+	{VRRP_SNMP_PROCESS_WEIGHT_REVERSE, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 7}},
+	{VRRP_SNMP_PROCESS_QUORUM, ASN_UNSIGNED, RONLY, vrrp_snmp_process, 3, {21, 1, 8}},
+	{VRRP_SNMP_PROCESS_QUORUM_MAX, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 9}},
+	{VRRP_SNMP_PROCESS_FORKDELAY, ASN_UNSIGNED, RONLY, vrrp_snmp_process, 3, {21, 1, 10}},
+	{VRRP_SNMP_PROCESS_TERMINATEDELAY, ASN_UNSIGNED, RONLY, vrrp_snmp_process, 3, {21, 1, 11}},
+	{VRRP_SNMP_PROCESS_FULLCOMMAND, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 12}},
+	{VRRP_SNMP_PROCESS_CURPROC, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 13}},
+	{VRRP_SNMP_PROCESS_RESULT, ASN_INTEGER, RONLY, vrrp_snmp_process, 3, {21, 1, 14}},
+#endif
 
 	/* syncGroupTrackedInterfaceTable */
 	{VRRP_SNMP_SGROUPTRACKEDINTERFACE_NAME, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_group_trackedinterface, 3, {14, 1, 1}},
 	{VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_group_trackedinterface, 3, {14, 1, 2}},
+	{VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedinterface, 3, {14, 1, 3}},
 
 	/* syncGroupTrackedScriptTable */
 	{VRRP_SNMP_SGROUPTRACKEDSCRIPT_NAME, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_group_trackedscript, 3, {15, 1, 2}},
 	{VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_group_trackedscript, 3, {15, 1, 3}},
+	{VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedscript, 3, {15, 1, 4}},
 
 	/* syncGroupTrackedFileTable */
 	{VRRP_SNMP_SGROUPTRACKEDFILE_NAME, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_group_trackedfile, 3, {16, 1, 2}},
 	{VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT, ASN_INTEGER, RONLY,
 	 vrrp_snmp_group_trackedfile, 3, {16, 1, 3}},
+	{VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedfile, 3, {16, 1, 4}},
+
+#ifdef _WITH_BFD_
+	/* syncGroupTrackedBfdTable */
+	{VRRP_SNMP_SGROUPTRACKEDBFD_NAME, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_group_trackedbfd, 3, {19, 1, 2}},
+	{VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedbfd, 3, {19, 1, 3}},
+	{VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedbfd, 3, {19, 1, 4}},
+#endif
+
+#ifdef _WITH_CN_PROC_
+	/* syncGroupTrackedProcessTable */
+	{VRRP_SNMP_SGROUPTRACKEDPROCESS_NAME, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_group_trackedprocess, 3, {22, 1, 2}},
+	{VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedprocess, 3, {22, 1, 3}},
+	{VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT_REVERSE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_group_trackedprocess, 3, {22, 1, 4}},
+#endif
 
 };
 
@@ -3053,6 +3011,7 @@ vrrp_snmp_instance_trap(vrrp_t *vrrp)
 	/* OID for snmpTrapOID.0 */
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
+	snmp_ret_t ptr_conv;
 
 	/* Other OID */
 	oid name_oid[] = { VRRP_OID, 3, 1, 2 };
@@ -3085,10 +3044,11 @@ vrrp_snmp_instance_trap(vrrp_t *vrrp)
 				  (u_char *) notification_oid,
 				  notification_oid_len * sizeof(oid));
 	/* vrrpInstanceName */
+	ptr_conv.cp = vrrp->iname;
 	snmp_varlist_add_variable(&notification_vars,
 				  name_oid, name_oid_len,
 				  ASN_OCTET_STR,
-				  (u_char *)vrrp->iname,
+				  ptr_conv.p,
 				  strlen(vrrp->iname));
 	/* vrrpInstanceState */
 	snmp_varlist_add_variable(&notification_vars,
@@ -3104,10 +3064,11 @@ vrrp_snmp_instance_trap(vrrp_t *vrrp)
 				  sizeof(vrrp->configured_state));
 
 	/* routerId */
+	ptr_conv.cp = global_data->router_id;
 	snmp_varlist_add_variable(&notification_vars,
 				  routerId_oid, routerId_oid_len,
 				  ASN_OCTET_STR,
-				  (u_char *)global_data->router_id,
+				  ptr_conv.p,
 				  strlen(global_data->router_id));
 
 	log_message(LOG_INFO,
@@ -3126,6 +3087,7 @@ vrrp_snmp_group_trap(vrrp_sgroup_t *group)
 	/* OID for snmpTrapOID.0 */
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
+	snmp_ret_t ptr_conv;
 
 	/* Other OID */
 	oid name_oid[] = { VRRP_OID, 1, 1, 2 };
@@ -3157,10 +3119,11 @@ vrrp_snmp_group_trap(vrrp_sgroup_t *group)
 				  notification_oid_len * sizeof(oid));
 
 	/* vrrpSyncGroupName */
+	ptr_conv.cp = group->gname;
 	snmp_varlist_add_variable(&notification_vars,
 				  name_oid, name_oid_len,
 				  ASN_OCTET_STR,
-				  (u_char *)group->gname,
+				  ptr_conv.p,
 				  strlen(group->gname));
 	/* vrrpSyncGroupState */
 	snmp_varlist_add_variable(&notification_vars,
@@ -3170,10 +3133,11 @@ vrrp_snmp_group_trap(vrrp_sgroup_t *group)
 				  sizeof(state));
 
 	/* routerId */
+	ptr_conv.cp = global_data->router_id;
 	snmp_varlist_add_variable(&notification_vars,
 				  routerId_oid, routerId_oid_len,
 				  ASN_OCTET_STR,
-				  (u_char *)global_data->router_id,
+				  ptr_conv.p,
 				  strlen(global_data->router_id));
 
 	log_message(LOG_INFO,
@@ -3198,7 +3162,7 @@ vrrp_snmp_rfc_state(int state)
 
 #ifdef _WITH_SNMP_RFCV2_
 static bool
-suitable_for_rfc2787(vrrp_t* vrrp)
+suitable_for_rfc2787(const vrrp_t* vrrp)
 {
 #ifdef _WITH_SNMP_RFCV3_
 	/* We mustn't return any VRRP instances that aren't version 2 */
@@ -3260,9 +3224,7 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	else
 		target_addr.s_addr = 0;
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		scr = (vrrp_t *)ELEMENT_DATA(e);
-
+	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
 		if (!suitable_for_rfc2787(scr))
 			continue;
 
@@ -3288,9 +3250,7 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 		}
 
 		found_better = false;
-		for (e2 = LIST_HEAD(scr->vip); e2; ELEMENT_NEXT(e2)) {
-			vip = ELEMENT_DATA(e2);
-
+		LIST_FOREACH(scr->vip, vip, e2) {
 			/* We need the address to be MSB first, for numerical comparison */
 			current_addr.s_addr = htonl(vip->u.sin.sin_addr.s_addr);
 
@@ -3327,8 +3287,6 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	}
 
 	if (bel == NULL)	/* No best match */
-		return NULL;
-	if (exact && !found_exact) /* No exact match */
 		return NULL;
 
 	/* Let's use our best match */
@@ -3392,9 +3350,7 @@ snmp_rfcv2_header_list_table(struct variable *vp, oid *name, size_t *length,
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		scr = (vrrp_t *)ELEMENT_DATA(e);
-
+	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
 		if (!suitable_for_rfc2787(scr))
 			continue;
 
@@ -3444,9 +3400,6 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		return NULL;
 
 	switch (vp->magic) {
-	case VRRP_RFC_SNMP_OPER_VRID:
-		long_ret.u = rt->vrid;
-		return (u_char*)&long_ret;
 	case VRRP_RFC_SNMP_OPER_VMAC:
 		*var_len = rt->ifp->hw_addr_len;
 		return (u_char*)&rt->ifp->hw_addr;
@@ -3471,7 +3424,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		return (u_char*)&((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 	case VRRP_RFC_SNMP_OPER_PIP:
 #ifdef _HAVE_VRRP_VMAC_
-		if (rt->ifp->vmac_type)
+		if (IS_VLAN(rt->ifp))
 			ifp = rt->ifp->base_ifp;
 		else
 #endif
@@ -3537,9 +3490,6 @@ vrrp_rfcv2_snmp_assoiptable(struct variable *vp, oid *name, size_t *length,
 		return NULL;
 
 	switch (vp->magic) {
-	case VRRP_RFC_SNMP_ASSOC_IP_ADDR:
-		*var_len = sizeof addr->u.sin.sin_addr;
-		return (u_char*)&addr->u.sin.sin_addr;
 	case VRRP_RFC_SNMP_ASSOC_IP_ADDR_ROW:
 		/* If we implement write access, then this could be 2 for down */
 		long_ret.u = 1;
@@ -3670,8 +3620,6 @@ static struct variable8 vrrp_rfcv2_vars[] = {
 	{ VRRP_RFC_SNMP_NOTIF_CNTL, ASN_INTEGER, RONLY,
 	  vrrp_rfcv2_snmp_node_info, 2, {1, 2}},
 	/* vrrpOperTable */
-	{ VRRP_RFC_SNMP_OPER_VRID, ASN_INTEGER, RONLY,
-	  vrrp_rfcv2_snmp_opertable, 4, {1, 3, 1, 1}},
 	{ VRRP_RFC_SNMP_OPER_VMAC, ASN_OCTET_STR, RONLY,
 	  vrrp_rfcv2_snmp_opertable, 4, {1, 3, 1, 2}},
 	{ VRRP_RFC_SNMP_OPER_STATE, ASN_INTEGER, RONLY,
@@ -3701,8 +3649,6 @@ static struct variable8 vrrp_rfcv2_vars[] = {
 	{ VRRP_RFC_SNMP_OPER_ROW_STAT, ASN_INTEGER, RONLY,
 	  vrrp_rfcv2_snmp_opertable, 4, {1, 3, 1, 15}},
 	/* vrrpAssoIpAddrTable */
-	{ VRRP_RFC_SNMP_ASSOC_IP_ADDR, ASN_IPADDRESS, RONLY,
-	  vrrp_rfcv2_snmp_assoiptable, 4, {1, 4, 1, 1}},
 	{ VRRP_RFC_SNMP_ASSOC_IP_ADDR_ROW, ASN_INTEGER, RONLY,
 	  vrrp_rfcv2_snmp_assoiptable, 4, {1, 4, 1, 2}},
 	/* vrrpRouterStats */
@@ -3832,7 +3778,7 @@ vrrp_rfcv2_snmp_auth_err_trap(vrrp_t *vrrp, struct in_addr src, enum rfcv2_trap_
 #ifdef _WITH_SNMP_RFCV3_
 
 static bool
-suitable_for_rfc6527(vrrp_t* vrrp)
+suitable_for_rfc6527(const vrrp_t* vrrp)
 {
 #ifndef _SNMP_REPLY_V3_FOR_V2_
 	/* We mustn't return any VRRP instances that don't match version */
@@ -3901,22 +3847,20 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 	target_addr.s_addr = 0;		/* Avoid compiler uninitialised warning */
-	if (target_len == 3 + 1 + 4 ) {
+	if (target_len == 3 + sizeof(struct in_addr)) {
 		target_len = 3;
 		target_addr.s_addr = (in_addr_t)(name[*length - 4] << 24 |
 						 name[*length - 3] << 16 |
 						 name[*length - 2] << 8 |
 						 name[*length - 1]);
 	}
-	else if (target_len == 3 + 1 + 16) {
+	else if (target_len == 3 + sizeof(struct in6_addr)) {
 		target_len = 3;
-		for (i = 0; i < 16; i++)
-			target_addr6.s6_addr[i] = (uint8_t)name[*length - 16 + i];
+		for (i = 0; i < sizeof (struct in6_addr); i++)
+			target_addr6.s6_addr[i] = (uint8_t)name[*length - sizeof(struct in6_addr) + i];
 	}
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		scr = (vrrp_t *)ELEMENT_DATA(e);
-
+	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
 		if (!suitable_for_rfc6527(scr))
 			continue;
 
@@ -3943,11 +3887,9 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 		}
 
 		found_better = false;
-		for (e2 = LIST_HEAD(scr->vip); e2; ELEMENT_NEXT(e2)) {
-			vip = ELEMENT_DATA(e2);
-
+		LIST_FOREACH(scr->vip, vip, e2) {
 			if (scr->family == AF_INET) {
-				current_addr.s_addr = htons(vip->u.sin.sin_addr.s_addr);
+				current_addr.s_addr = htonl(vip->u.sin.sin_addr.s_addr);
 
 				if (exact) {
 					if (target_addr.s_addr == current_addr.s_addr) {
@@ -4010,15 +3952,11 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 
 	if (bel == NULL)	/* No best match */
 		return NULL;
-	if (exact && !found_exact) /* No exact match */
-		return NULL;
 
 	/* Let's use our best match */
 	memcpy(target, best, sizeof(best));
 	*length = (unsigned)vp->namelen + 3;
 	if (name[*length - 1] == 1) {
-		name[*length] = sizeof(struct in_addr);
-		*length += 1;
 		name[*length  ] =  best_addr.s_addr >> 24;
 		name[*length+1] = (best_addr.s_addr >> 16) & 0xff;
 		name[*length+2] = (best_addr.s_addr >>  8) & 0xff;
@@ -4026,8 +3964,6 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 		*length += sizeof(struct in_addr);
 	}
 	else {
-		name[*length] = sizeof(struct in6_addr);
-		*length += 1;
 		for (i = 0; i < sizeof(struct in6_addr); i++)
 			name[*length + i] = best_addr6.s6_addr[i];
 		*length += sizeof(struct in6_addr);
@@ -4112,19 +4048,13 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 {
 	vrrp_t *rt;
 	interface_t* ifp;
-	timeval_t uptime, time_now;
+	timeval_t uptime, cur_time;
 
 	if ((rt = snmp_rfcv3_header_list_table(vp, name, length, exact,
 					     var_len, write_method)) == NULL)
 		return NULL;
 
 	switch (vp->magic) {
-	case VRRP_RFCv3_SNMP_OPER_VRID:
-		long_ret.u = rt->vrid;
-		return (u_char*)&long_ret;
-	case VRRP_RFCv3_SNMP_OPER_INET_ADDR_TYPE:
-		long_ret.u = rt->family == AF_INET ? 1 : 2;
-		return (u_char*)&long_ret;
 	case VRRP_RFCv3_SNMP_OPER_MIP:
 		if (rt->state != VRRP_STATE_MAST) {
 			if (rt->family == AF_INET) {
@@ -4138,7 +4068,7 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		/* Falls through. */
 	case VRRP_RFCv3_SNMP_OPER_PIP:
 #ifdef _HAVE_VRRP_VMAC_
-		if (rt->ifp->vmac_type)
+		if (IS_VLAN(rt->ifp))
 			ifp = rt->ifp->base_ifp;
 		else
 #endif
@@ -4178,8 +4108,8 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 	case VRRP_RFCv3_SNMP_OPER_VR_UPTIME:
 		if (rt->state == VRRP_STATE_BACK ||
 		    rt->state == VRRP_STATE_MAST) {
-			time_now = timer_now();
-			timersub(&time_now, &rt->stats->uptime, &uptime);
+			cur_time = timer_now();
+			timersub(&cur_time, &rt->stats->uptime, &uptime);
 			long_ret.s = uptime.tv_sec * 100 + uptime.tv_usec / 10000;	// unit is centi-seconds
 		}
 		else
@@ -4215,13 +4145,6 @@ vrrp_rfcv3_snmp_assoiptable(struct variable *vp, oid *name, size_t *length,
 		return NULL;
 
 	switch (vp->magic) {
-	case VRRP_RFCv3_SNMP_ASSOC_IP_ADDR:
-		if (addr->ifa.ifa_family == AF_INET) {
-			*var_len = sizeof(struct in_addr);
-			return (u_char*)&addr->u.sin.sin_addr;
-		}
-		*var_len = sizeof(struct in6_addr);
-		return (u_char*)&addr->u.sin6_addr;
 	case VRRP_RFCv3_SNMP_ASSOC_IP_ADDR_ROW_STATUS:
 		/* If we implement write access, then this could be 2 for down */
 		long_ret.u = 1;
@@ -4371,10 +4294,6 @@ vrrp_rfcv3_snmp_statstable(struct variable *vp, oid *name, size_t *length,
 static oid vrrp_rfcv3_oid[] = {VRRP_RFCv3_OID};
 static struct variable8 vrrp_rfcv3_vars[] = {
 	/* vrrpOperTable */
-	{ VRRP_RFCv3_SNMP_OPER_VRID, ASN_INTEGER, RONLY,
-	  vrrp_rfcv3_snmp_opertable, 5, {1, 1, 1, 1, 1}},
-	{ VRRP_RFCv3_SNMP_OPER_INET_ADDR_TYPE, ASN_INTEGER, RONLY,
-	  vrrp_rfcv3_snmp_opertable, 5, {1, 1, 1, 1, 2}},
 	{ VRRP_RFCv3_SNMP_OPER_MIP, ASN_OCTET_STR, RONLY,
 	  vrrp_rfcv3_snmp_opertable, 5, {1, 1, 1, 1, 3}},
 	{ VRRP_RFCv3_SNMP_OPER_PIP, ASN_OCTET_STR, RONLY,
@@ -4398,8 +4317,6 @@ static struct variable8 vrrp_rfcv3_vars[] = {
 	{ VRRP_RFCv3_SNMP_OPER_ROW_STATUS, ASN_INTEGER, RONLY,
 	  vrrp_rfcv3_snmp_opertable, 5, {1, 1, 1, 1, 13}},
 	/* vrrpAssoIpAddrTable */
-	{ VRRP_RFCv3_SNMP_ASSOC_IP_ADDR, ASN_OCTET_STR, RONLY,
-	  vrrp_rfcv3_snmp_assoiptable, 5, {1, 1, 2, 1, 1}},
 	{ VRRP_RFCv3_SNMP_ASSOC_IP_ADDR_ROW_STATUS, ASN_INTEGER, RONLY,
 	  vrrp_rfcv3_snmp_assoiptable, 5, {1, 1, 2, 1, 2}},
 	/* vrrpRouterStats */
@@ -4490,7 +4407,7 @@ vrrp_rfcv3_snmp_new_master_notify(vrrp_t *vrrp)
 				  (u_char *)&reason,
 				  sizeof(reason));
 	log_message(LOG_INFO, "(%s) Sending SNMP notification"
-			      " vrrpv3NotifyNewMaster, reason %d"
+			      " vrrpv3NotifyNewMaster, reason %" PRIu32
 			    , vrrp->iname, reason);
 	send_v2trap(notification_vars);
 	snmp_free_varbind(notification_vars);
@@ -4559,13 +4476,13 @@ vrrp_handles_global_oid(void)
 }
 
 void
-vrrp_snmp_agent_init(const char *snmp_socket)
+vrrp_snmp_agent_init(const char *snmp_socket_name)
 {
 	if (snmp_running)
 		return;
 
 	/* We let the check process handle the global OID if it is running and with snmp */
-	snmp_agent_init(snmp_socket, vrrp_handles_global_oid());
+	snmp_agent_init(snmp_socket_name, vrrp_handles_global_oid());
 
 #ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_vrrp)
