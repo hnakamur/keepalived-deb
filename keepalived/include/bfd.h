@@ -92,11 +92,11 @@ typedef struct _bfd {
 
 	/* Internal variables */
 	int fd_out;		/* Output socket fd */
-	thread_t *thread_out;	/* Output socket thread */
+	thread_ref_t thread_out; /* Output socket thread */
 	long sands_out;		/* Output thread sands, used for suspend/resume */
-	thread_t *thread_exp;	/* Expire thread */
+	thread_ref_t thread_exp; /* Expire thread */
 	long sands_exp;		/* Expire thread sands, used for suspend/resume */
-	thread_t *thread_rst;	/* Reset thread */
+	thread_ref_t thread_rst; /* Reset thread */
 	long sands_rst;		/* Reset thread sands, used for suspend/resume */
 	bool send_error;	/* Set if last send had an error */
 
@@ -167,24 +167,22 @@ typedef struct _bfdhdr {
 /*
   Version
 */
-#define BFD_VERSION_1			1
+#define BFD_VERSION_1			1U
 
 /*
    State (Sta)
 */
 
-#define BFD_STATE_ADMINDOWN		0
-#define BFD_STATE_DOWN			1
-#define BFD_STATE_INIT			2
-#define BFD_STATE_UP			3
+#define BFD_STATE_ADMINDOWN		0U
+#define BFD_STATE_DOWN			1U
+#define BFD_STATE_INIT			2U
+#define BFD_STATE_UP			3U
 
 #define	BFD_STATE_STR(s) \
 	(BFD_STATE_ADMINDOWN == s ? "AdminDown" : \
 	(BFD_STATE_DOWN == s ? "Down" : \
 	(BFD_STATE_INIT == s ? "Init" : \
 	(BFD_STATE_UP == s ? "Up" : "Unknown"))))
-
-#define BFD_VALID_STATE(s) (s >= 0 && s <= 3)
 
 #define BFD_ISADMINDOWN(b) (b->local_state == BFD_STATE_ADMINDOWN)
 #define BFD_ISDOWN(b) (b->local_state == BFD_STATE_DOWN)
@@ -195,15 +193,15 @@ typedef struct _bfdhdr {
    Diagnostic (Diag)
 */
 
-#define BFD_DIAG_NO_DIAG		0
-#define BFD_DIAG_EXPIRED		1
-#define BFD_DIAG_ECHO_FAILED		2
-#define BFD_DIAG_NBR_SIGNALLED_DOWN	3
-#define BFD_DIAG_FWD_PLANE_RESET	4
-#define BFD_DIAG_PATH_DOWN		5
-#define BFD_DIAG_CAT_PATH_DOWN		6
-#define BFD_DIAG_ADMIN_DOWN		7
-#define BFD_DIAG_RCAT_PATH_DOWN		8
+#define BFD_DIAG_NO_DIAG		0U
+#define BFD_DIAG_EXPIRED		1U
+#define BFD_DIAG_ECHO_FAILED		2U
+#define BFD_DIAG_NBR_SIGNALLED_DOWN	3U
+#define BFD_DIAG_FWD_PLANE_RESET	4U
+#define BFD_DIAG_PATH_DOWN		5U
+#define BFD_DIAG_CAT_PATH_DOWN		6U
+#define BFD_DIAG_ADMIN_DOWN		7U
+#define BFD_DIAG_RCAT_PATH_DOWN		8U
 
 #define	BFD_DIAG_STR(d) \
 	(BFD_DIAG_NO_DIAG == d ? "No Diagnostic" : \
@@ -216,7 +214,7 @@ typedef struct _bfdhdr {
 	(BFD_DIAG_ADMIN_DOWN == d ? "Administratively Down" : \
 	(BFD_DIAG_RCAT_PATH_DOWN == d ? "Reverse Concatenated Path Down" : "Unknown")))))))))
 
-#define BFD_VALID_DIAG(d)    (d >= 0 && d <= 8)
+#define BFD_VALID_DIAG(d)    (d <= 8)
 
 /*
  * BFD Packet structure
@@ -227,7 +225,7 @@ typedef struct _bfdpkt {
 	struct sockaddr_storage dst_addr;
 	unsigned int ttl;
 	unsigned int len;
-	char *buf;
+	const char *buf;
 } bfdpkt_t;
 
 extern void bfd_update_local_tx_intv(bfd_t *);

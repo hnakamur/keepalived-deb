@@ -25,6 +25,7 @@
 
 #include <unistd.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 #include "main.h"
 #include "check_bfd.h"
@@ -44,27 +45,25 @@
 #endif
 
 /* local data */
-static thread_t *bfd_thread;
+static thread_ref_t bfd_thread;
 static checker_t *new_checker;
 
-static int bfd_check_thread(thread_t *);
-//static int bfd_check_child_thread(thread_t *);
+static int bfd_check_thread(thread_ref_t);
 
 /* Configuration stream handling */
 static void
-free_bfd_check(void *data)
+free_bfd_check(checker_t *checker)
 {
-	bfd_checker_t *bfd_checker = CHECKER_DATA(data);
+	bfd_checker_t *bfd_checker = checker->data;
 
 	FREE(bfd_checker);
-	FREE(data);
+	FREE(checker);
 }
 
 static void
-dump_bfd_check(FILE *fp, void *data)
+dump_bfd_check(FILE *fp, const checker_t *checker)
 {
-	checker_t *checker = data;
-	bfd_checker_t *bfd_checker = CHECKER_DATA(checker);
+	const bfd_checker_t *bfd_checker = checker->data;
 
 	conf_write(fp, "   Keepalive method = BFD_CHECK");
 	conf_write(fp, "   Name = %s", bfd_checker->bfd->bname);
@@ -75,17 +74,18 @@ dump_bfd_check(FILE *fp, void *data)
 
 /* Dump a real server on a BFD's list */
 static void
-dump_bfds_rs(FILE *fp, void *data)
+dump_bfds_rs(FILE *fp, const void *data)
 {
-	checker_t *checker = data;
+	const checker_t *checker = data;
+
 	conf_write(fp, "   %s", FMT_RS(checker->rs, checker->vs));
 }
 
 static bool
-bfd_check_compare(void *a, void *b)
+bfd_check_compare(const checker_t *old_c, const checker_t *new_c)
 {
-	bfd_checker_t *old = CHECKER_DATA(a);
-	bfd_checker_t *new = CHECKER_DATA(b);
+	const bfd_checker_t *old = old_c->data;
+	const bfd_checker_t *new = new_c->data;
 
 	if (strcmp(old->bfd->bname, new->bfd->bname))
 		return false;
@@ -93,7 +93,7 @@ bfd_check_compare(void *a, void *b)
 	return true;
 }
 
-checker_tracked_bfd_t *
+static checker_tracked_bfd_t * __attribute__ ((pure))
 find_checker_tracked_bfd_by_name(char *name)
 {
 	element e;
@@ -108,18 +108,18 @@ find_checker_tracked_bfd_by_name(char *name)
 }
 
 static void
-bfd_check_handler(__attribute__((unused)) vector_t *strvec)
+bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	bfd_checker_t *new_bfd_checker;
 
 	PMALLOC(new_bfd_checker);
 
 	/* queue new checker */
-	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker, NULL);
+	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker, NULL, false);
 }
 
 static void
-bfd_name_handler(vector_t *strvec)
+bfd_name_handler(const vector_t *strvec)
 {
 	checker_tracked_bfd_t *tbfd;
 	bfd_checker_t *cbfd, *bfd_c;
@@ -150,7 +150,7 @@ bfd_name_handler(vector_t *strvec)
 	if (!config_error) {
 		LIST_FOREACH(new_checker->rs->tracked_bfds, bfd_c, e) {
 			if (tbfd == bfd_c->bfd) {
-				report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - RS already monitoring %s", FMT_RS(new_checker->rs, new_checker->vs), FMT_STR_VSLOT(strvec, 1));
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - RS already monitoring %s", FMT_RS(new_checker->rs, new_checker->vs), strvec_slot(strvec, 1));
 				config_error = true;
 				break;
 			}
@@ -167,7 +167,7 @@ bfd_name_handler(vector_t *strvec)
 }
 
 static void
-bfd_alpha_handler(vector_t *strvec)
+bfd_alpha_handler(const vector_t *strvec)
 {
 	int res;
 
@@ -177,7 +177,7 @@ bfd_alpha_handler(vector_t *strvec)
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res == -1) {
-			report_config_error(CONFIG_GENERAL_ERROR, "Invalid alpha parameter %s", FMT_STR_VSLOT(strvec, 1));
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid alpha parameter %s", strvec_slot(strvec, 1));
 			return;
 		}
 	}
@@ -235,7 +235,7 @@ static void
 bfd_check_handle_event(bfd_event_t * evt)
 {
 	element e, e1;
-	struct timeval time_now;
+	struct timeval cur_time;
 	struct timeval timer_tmp;
 	uint32_t delivery_time;
 	checker_tracked_bfd_t *cbfd;
@@ -245,11 +245,11 @@ bfd_check_handle_event(bfd_event_t * evt)
 	bool rs_was_alive;
 
 	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
-		time_now = timer_now();
-		timersub(&time_now, &evt->sent_time, &timer_tmp);
+		cur_time = timer_now();
+		timersub(&cur_time, &evt->sent_time, &timer_tmp);
 		delivery_time = timer_long(timer_tmp);
 		log_message(LOG_INFO, "Received BFD event: instance %s is in"
-			    " state %s (delivered in %i usec)",
+			    " state %s (delivered in %" PRIu32 " usec)",
 			    evt->iname, BFD_STATE_STR(evt->state), delivery_time);
 	}
 
@@ -283,26 +283,26 @@ bfd_check_handle_event(bfd_event_t * evt)
 }
 
 static int
-bfd_check_thread(thread_t * thread)
+bfd_check_thread(thread_ref_t thread)
 {
 	bfd_event_t evt;
 
 	bfd_thread = thread_add_read(master, bfd_check_thread, NULL,
-				     thread->u.fd, TIMER_NEVER);
+				     thread->u.f.fd, TIMER_NEVER, false);
 
 	if (thread->type != THREAD_READY_FD)
 		return 0;
 
-	while (read(thread->u.fd, &evt, sizeof(bfd_event_t)) != -1)
+	while (read(thread->u.f.fd, &evt, sizeof(bfd_event_t)) != -1)
 		bfd_check_handle_event(&evt);
 
 	return 0;
 }
 
 void
-start_bfd_monitoring(thread_master_t *master)
+start_bfd_monitoring(thread_master_t *thread_master)
 {
-	thread_add_read(master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER);
+	thread_add_read(thread_master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER, false);
 }
 
 void

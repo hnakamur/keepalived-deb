@@ -52,9 +52,6 @@
 #include "bitops.h"
 #include "utils.h"
 
-/* #define PARSER_DEBUG */
-
-#define DUMP_KEYWORDS	0
 
 #define DEF_LINE_END	"\n"
 
@@ -63,18 +60,32 @@
 #define WHITE_SPACE_STR " \t\f\n\r\v"
 
 typedef struct _defs {
-	char *name;
+	const char *name;
 	size_t name_len;
-	char *value;
+	const char *value;
 	size_t value_len;
 	bool multiline;
-	char *(*fn)(void);
+	const char *(*fn)(const struct _defs *);
+	unsigned max_params;
+	const char *params;
+	const char *params_end;
 } def_t;
+
+typedef struct _multiline_stack_ent {
+	const char *ptr;
+	size_t seq_depth;
+} multiline_stack_ent;
 
 /* global vars */
 vector_t *keywords;
-char *config_id;
+const char *config_id;
 const char *WHITE_SPACE = WHITE_SPACE_STR;
+#ifdef _PARSER_DEBUG_
+bool do_parser_debug;
+#endif
+#ifdef _DUMP_KEYWORDS_
+bool do_dump_keywords;
+#endif
 
 /* local vars */
 static vector_t *current_keywords;
@@ -84,8 +95,11 @@ static size_t current_file_line_no;
 static int sublevel = 0;
 static int skip_sublevel = 0;
 static list multiline_stack;
+size_t multiline_seq_depth = 0;
 static char *buf_extern;
 static config_err_t config_err = CONFIG_OK; /* Highest level of config error for --config-test */
+static unsigned int random_seed;
+bool random_seed_configured;
 
 /* Parameter definitions */
 static list defs;
@@ -104,11 +118,11 @@ report_config_error(config_err_t err, const char *format, ...)
 	if (current_file_name) {
 		/* "(file_name:line_no) format" + '\0' */
 		format_buf = MALLOC(1 + strlen(current_file_name) + 1 + 10 + 1 + 1 + strlen(format) + 1);
-		sprintf(format_buf, "(%s:%zd) %s", current_file_name, current_file_line_no, format);
+		sprintf(format_buf, "(%s:%zu) %s", current_file_name, current_file_line_no, format);
 	} else if (current_file_line_no) {	/* Set while reading from config files */
 		/* "(Line line_no) format" + '\0' */
 		format_buf = MALLOC(1 + 5 + 10 + 1 + 1 + strlen(format) + 1);
-		sprintf(format_buf, "(%s %zd) %s", "Line", current_file_line_no, format);
+		sprintf(format_buf, "(%s %zu) %s", "Line", current_file_line_no, format);
 	}
 
 	va_start(args, format);
@@ -129,13 +143,13 @@ report_config_error(config_err_t err, const char *format, ...)
 		FREE(format_buf);
 }
 
-config_err_t
+config_err_t __attribute__ ((pure))
 get_config_status(void)
 {
 	return config_err;
 }
 
-static char *
+static const char * __attribute__ ((noreturn))
 null_strvec(const vector_t *strvec, size_t index)
 {
 	if (index - 1 < vector_size(strvec) && index > 0 && vector_slot(strvec, index - 1))
@@ -144,8 +158,6 @@ null_strvec(const vector_t *strvec, size_t index)
 		report_config_error(CONFIG_MISSING_PARAMETER, "*** Configuration line starting `%s` is missing a parameter at word position %zu", vector_slot(strvec, 0) ? (char *)vector_slot(strvec, 0) : "***MISSING ***", index + 1);
 
 	exit(KEEPALIVED_EXIT_CONFIG);
-
-	return NULL;
 }
 
 static bool
@@ -153,7 +165,7 @@ read_int_func(const char *number, int base, int *res, int min_val, int max_val, 
 {
 	long val;
 	char *endptr;
-	char *warn = "";
+	const char *warn = "";
 
 #ifndef _STRICT_CONFIG_
 	if (ignore_error && !__test_bit(CONFIG_TEST_BIT, &debug))
@@ -185,7 +197,7 @@ read_unsigned_func(const char *number, int base, unsigned *res, unsigned min_val
 {
 	unsigned long val;
 	char *endptr;
-	char *warn = "";
+	const char *warn = "";
 	size_t offset;
 
 #ifndef _STRICT_CONFIG_
@@ -225,7 +237,7 @@ read_unsigned64_func(const char *number, int base, uint64_t *res, uint64_t min_v
 {
 	unsigned long long val;
 	char *endptr;
-	char *warn = "";
+	const char *warn = "";
 	size_t offset;
 
 #ifndef _STRICT_CONFIG_
@@ -265,7 +277,8 @@ read_double_func(const char *number, double *res, double min_val, double max_val
 {
 	double val;
 	char *endptr;
-	char *warn = "";
+	const char *warn = "";
+	int ftype;
 
 #ifndef _STRICT_CONFIG_
 	if (ignore_error && !__test_bit(CONFIG_TEST_BIT, &debug))
@@ -280,14 +293,21 @@ read_double_func(const char *number, double *res, double min_val, double max_val
 		report_config_error(CONFIG_INVALID_NUMBER, "%sinvalid number '%s'", warn, number);
 	else if (errno == ERANGE)
 		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' out of range", warn, number);
-	else if (val == -HUGE_VAL || val == HUGE_VAL)	/* +/- Inf */
-		report_config_error(CONFIG_INVALID_NUMBER, "infinite number '%s'", number);
-	else if (!(val <= 0 || val >= 0))	/* NaN */
-		report_config_error(CONFIG_INVALID_NUMBER, "not a number '%s'", number);
-	else if (val < min_val || val > max_val)
-		report_config_error(CONFIG_INVALID_NUMBER, "number '%s' outside range [%g, %g]", number, min_val, max_val);
-	else
-		return true;
+	else {
+		ftype = fpclassify(val);
+		if (ftype == FP_INFINITE)	/* +/- Inf */
+			report_config_error(CONFIG_INVALID_NUMBER, "infinite number '%s'", number);
+		else if (ftype == FP_NAN)	/* NaN */
+			report_config_error(CONFIG_INVALID_NUMBER, "not a number '%s'", number);
+		else if (ftype == FP_SUBNORMAL)	{ /* to small */
+			*res = 0.0F;
+			return true;
+		}
+		else if (val < min_val || val > max_val)
+			report_config_error(CONFIG_INVALID_NUMBER, "number '%s' outside range [%g, %g]", number, min_val, max_val);
+		else /* FP_NORMAL or FP_ZERO */
+			return true;
+	}
 
 #ifdef _STRICT_CONFIG_
 	return false;
@@ -350,8 +370,15 @@ read_unsigned_base_strvec(const vector_t *strvec, size_t index, int base, unsign
 	return read_unsigned_func(strvec_slot(strvec, index), base, res, min_val, max_val, ignore_error);
 }
 
+void
+set_random_seed(unsigned int seed)
+{
+	random_seed = seed;
+	random_seed_configured = true;
+}
+
 static void
-keyword_alloc(vector_t *keywords_vec, const char *string, void (*handler) (vector_t *), bool active)
+keyword_alloc(vector_t *keywords_vec, const char *string, void (*handler) (const vector_t *), bool active)
 {
 	keyword_t *keyword;
 
@@ -366,7 +393,7 @@ keyword_alloc(vector_t *keywords_vec, const char *string, void (*handler) (vecto
 }
 
 static void
-keyword_alloc_sub(vector_t *keywords_vec, const char *string, void (*handler) (vector_t *))
+keyword_alloc_sub(vector_t *keywords_vec, const char *string, void (*handler) (const vector_t *))
 {
 	int i = 0;
 	keyword_t *keyword;
@@ -404,7 +431,7 @@ install_sublevel_end(void)
 }
 
 void
-install_keyword_root(const char *string, void (*handler) (vector_t *), bool active)
+install_keyword_root(const char *string, void (*handler) (const vector_t *), bool active)
 {
 	/* If the root keyword is inactive, the handler will still be called,
 	 * but with a NULL strvec */
@@ -426,7 +453,7 @@ install_root_end_handler(void (*handler) (void))
 }
 
 void
-install_keyword(const char *string, void (*handler) (vector_t *))
+install_keyword(const char *string, void (*handler) (const vector_t *))
 {
 	keyword_alloc_sub(keywords, string, handler);
 }
@@ -449,7 +476,7 @@ install_sublevel_end_handler(void (*handler) (void))
 	keyword->sub_close_handler = handler;
 }
 
-#if DUMP_KEYWORDS
+#ifdef _DUMP_KEYWORDS_
 static void
 dump_keywords(vector_t *keydump, int level, FILE *fp)
 {
@@ -492,8 +519,8 @@ free_keywords(vector_t *keywords_vec)
 }
 
 /* Functions used for standard definitions */
-static char *
-get_cwd(void)
+static const char *
+get_cwd(__attribute__((unused))const def_t *def)
 {
 	char *dir = MALLOC(PATH_MAX);
 
@@ -502,25 +529,54 @@ get_cwd(void)
 	return getcwd(dir, PATH_MAX);
 }
 
-static char *
-get_instance(void)
+static const char *
+get_instance(__attribute__((unused))const def_t *def)
 {
-	char *conf_id = MALLOC(strlen(config_id) + 1);
-
-	strcpy(conf_id, config_id);
-
-	return conf_id;
+	return STRDUP(config_id);
 }
 
-vector_t *
-alloc_strvec_quoted_escaped(char *src)
+static const char *
+get_random(const def_t *def)
 {
-	char *token;
+	unsigned long min = 0;
+	unsigned long max = 32767;
+	long val;
+	char *endp;
+	char *rand_str;
+	size_t rand_str_len = 0;
+
+	/* We have already checked that the parameter string comprises
+	 * only spaces and decimal digits */
+	if (def->params) {
+		min = strtoul(def->params, &endp, 10);
+		if (endp < def->params_end) {
+			max = strtoul(endp, &endp, 10);
+			if (endp != def->params_end + 1)
+				log_message(LOG_INFO, "Too many parameters or extra text for ${_RANDOM %.*s}", (int)(def->params_end - def->params + 1), def->params);
+		}
+	}
+
+	val = max;
+	do {
+		rand_str_len++;
+	} while (val /= 10);
+	rand_str = MALLOC(rand_str_len + 1);
+
+	/* coverity[dont_call] */
+	val = random() % (max - min + 1) + min;
+	snprintf(rand_str, rand_str_len + 1, "%ld", val);
+
+	return rand_str;
+}
+
+const vector_t *
+alloc_strvec_quoted_escaped(const char *src)
+{
 	vector_t *strvec;
 	char cur_quote = 0;
 	char *ofs_op;
 	char *op_buf;
-	char *ofs, *ofs1;
+	const char *ofs, *ofs1;
 	char op_char;
 
 	if (!src) {
@@ -648,13 +704,9 @@ alloc_strvec_quoted_escaped(char *src)
 			break;
 		}
 
-		token = MALLOC(ofs_op - op_buf + 1);
-		memcpy(token, op_buf, ofs_op - op_buf);
-		token[ofs_op - op_buf] = '\0';
-
 		/* Alloc & set the slot */
 		vector_alloc_slot(strvec);
-		vector_set_slot(strvec, token);
+		vector_set_slot(strvec, STRNDUP(op_buf, ofs_op - op_buf));
 	}
 
 	FREE(op_buf);
@@ -673,9 +725,9 @@ err_exit:
 }
 
 vector_t *
-alloc_strvec_r(char *string)
+alloc_strvec_r(const char *string)
 {
-	char *cp, *start, *token;
+	const char *cp, *start;
 	size_t str_len;
 	vector_t *strvec;
 
@@ -706,13 +758,10 @@ alloc_strvec_r(char *string)
 			cp += strcspn(start, WHITE_SPACE_STR "\"");
 			str_len = (size_t)(cp - start);
 		}
-		token = MALLOC(str_len + 1);
-		memcpy(token, start, str_len);
-		token[str_len] = '\0';
 
 		/* Alloc & set the slot */
 		vector_alloc_slot(strvec);
-		vector_set_slot(strvec, token);
+		vector_set_slot(strvec, STRNDUP(start, str_len));
 	}
 
 	if (!vector_size(strvec)) {
@@ -724,16 +773,16 @@ alloc_strvec_r(char *string)
 }
 
 typedef struct _seq {
-	char *var;
+	const char *var;
 	int next;
 	int last;
 	int step;
-	char *text;
+	const char *text;
 } seq_t;
 
 static list seq_list;	/* List of seq_t */
 
-#ifdef PARSER_DEBUG
+#ifdef _PARSER_DEBUG_
 static void
 dump_seqs(void)
 {
@@ -751,20 +800,20 @@ free_seq(void *s)
 {
 	seq_t *seq = s;
 
-	FREE(seq->var);
-	FREE(seq->text);
+	FREE_CONST(seq->var);
+	FREE_CONST(seq->text);
 	FREE(seq);
 }
 
 static bool
 add_seq(char *buf)
 {
-	char *p = buf + 4;		/* Skip ~SEQ */
+	char *p = buf + 4;	/* Skip ~SEQ */
 	long one, two, three;
 	long start, step, end;
 	seq_t *seq_ent;
-	char *var;
-	char *var_end;
+	const char *var;
+	const char *var_end;
 
 	p += strspn(p, " \t");
 	if (*p++ != '(')
@@ -837,13 +886,11 @@ add_seq(char *buf)
 	p += strspn(p + 1, " \t") + 1;
 
 	PMALLOC(seq_ent);
-	seq_ent->var = MALLOC(var_end - var + 1);
-	strncpy(seq_ent->var, var, var_end - var);
+	seq_ent->var = STRNDUP(var, var_end - var);
 	seq_ent->next = start;
 	seq_ent->step = step;
 	seq_ent->last = end;
-	seq_ent->text = MALLOC(strlen(p) + 1);
-	strcpy(seq_ent->text, p);
+	seq_ent->text = STRDUP(p);
 
 	if (!seq_list)
 		seq_list = alloc_list(free_seq, NULL);
@@ -852,11 +899,11 @@ add_seq(char *buf)
 	return true;
 }
 
-#ifdef PARSER_DEBUG
+#ifdef _PARSER_DEBUG_
 static void
 dump_definitions(void)
 {
-	def_t *def;
+	const def_t *def;
 	element e;
 
 	LIST_FOREACH(defs, def, e)
@@ -874,7 +921,7 @@ process_stream(vector_t *keywords_vec, int need_bob)
 {
 	unsigned int i;
 	keyword_t *keyword_vec;
-	char *str;
+	const char *str;
 	char *buf;
 	vector_t *strvec;
 	vector_t *prev_keywords = current_keywords;
@@ -953,9 +1000,11 @@ process_stream(vector_t *keywords_vec, int need_bob)
 			if (!add_seq(buf))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid ~SEQ specification '%s'", buf);
 			free_strvec(strvec);
-#ifdef PARSER_DEBUG
-			dump_definitions();
-			dump_seqs();
+#ifdef _PARSER_DEBUG_
+			if (do_parser_debug) {
+				dump_definitions();
+				dump_seqs();
+			}
 #endif
 			continue;
 		}
@@ -1180,9 +1229,9 @@ bool check_conf_file(const char *conf_file)
 }
 
 static bool
-check_include(char *buf)
+check_include(const char *buf)
 {
-	vector_t *strvec;
+	const vector_t *strvec;
 	bool ret = false;
 	FILE *prev_stream;
 	const char *prev_file_name;
@@ -1215,7 +1264,7 @@ check_include(char *buf)
 	return ret;
 }
 
-static def_t *
+static def_t * __attribute__ ((pure))
 find_definition(const char *name, size_t len, bool definition)
 {
 	element e;
@@ -1223,6 +1272,8 @@ find_definition(const char *name, size_t len, bool definition)
 	const char *p;
 	bool using_braces = false;
 	bool allow_multiline;
+	const char *param_start = NULL;
+	const char *param_end = NULL;
 
 	if (LIST_ISEMPTY(defs))
 		return NULL;
@@ -1239,11 +1290,24 @@ find_definition(const char *name, size_t len, bool definition)
 		for (len = 1, p = name + 1; *p != '\0' && (isalnum(*p) || *p == '_'); len++, p++);
 
 		/* Check we have a suitable end character */
-		if (using_braces && *p != EOB[0])
-			return NULL;
-
-		if (!using_braces && !definition &&
-		     *p != ' ' && *p != '\t' && *p != '\0')
+		if (using_braces) {
+			if (!definition) {
+				/* Allow for parameters to the definition */
+				while (*p && (*p == ' ' || isdigit (*p))) {
+					if (*p != ' ') {
+					       if (!param_start)
+						       param_start = p;
+					       param_end = p;
+					}
+					p++;
+				}
+				/* Ensure don't end with a space */
+				if (param_start && param_end + 1 != p)
+					return NULL;
+			}
+			if (*p != EOB[0])
+				return NULL;
+		} else if (!definition && *p != ' ' && *p != '\t' && *p != '\0')
 			return NULL;
 	}
 
@@ -1254,30 +1318,73 @@ find_definition(const char *name, size_t len, bool definition)
 	else
 		allow_multiline = false;
 
-	for (e = LIST_HEAD(defs); e; ELEMENT_NEXT(e)) {
-		def = ELEMENT_DATA(e);
+	LIST_FOREACH(defs, def, e) {
 		if (def->name_len == len &&
 		    (allow_multiline || !def->multiline) &&
-		    !strncmp(def->name, name, len))
+		    !strncmp(def->name, name, len)) {
+			if (param_start && !def->max_params)
+				return NULL;
+			if (param_start) {
+				def->params = param_start;
+				def->params_end = param_end;
+			}
+			else
+				def->params = NULL;
 			return def;
+		}
 	}
 
 	return NULL;
 }
 
+static void
+multiline_stack_push(const char *ptr)
+{
+	multiline_stack_ent *stack_ent;
+
+	if (!LIST_EXISTS(multiline_stack))
+		multiline_stack = alloc_list(free_list_element_simple, NULL);
+
+	PMALLOC(stack_ent);
+	stack_ent->ptr = ptr;
+	stack_ent->seq_depth = multiline_seq_depth;
+
+	list_add(multiline_stack, stack_ent);
+}
+
+static const char *
+multiline_stack_pop(void)
+{
+	multiline_stack_ent *stack_ent;
+	const char *next_ptr;
+
+	if (!LIST_EXISTS(multiline_stack) || LIST_ISEMPTY(multiline_stack))
+		return NULL;
+
+	stack_ent = LIST_TAIL_DATA(multiline_stack);
+	next_ptr = stack_ent->ptr;
+	multiline_seq_depth = stack_ent->seq_depth;
+
+	list_remove(multiline_stack, multiline_stack->tail);
+
+	return next_ptr;
+}
+
 static bool
-replace_param(char *buf, size_t max_len, char **multiline_ptr_ptr)
+replace_param(char *buf, size_t max_len, char const **multiline_ptr_ptr)
 {
 	char *cur_pos = buf;
 	size_t len_used = strlen(buf);
 	def_t *def;
-	char *s, *d, *e;
+	char *s, *d;
+	const char *e;
 	ssize_t i;
 	size_t extra_braces;
 	size_t replacing_len;
-	char *next_ptr = NULL;
+	size_t replaced_len;
+	const char *next_ptr = NULL;
 	bool found_defn = false;
-	char *multiline_ptr = *multiline_ptr_ptr;
+	const char *multiline_ptr = *multiline_ptr_ptr;
 
 	while ((cur_pos = strchr(cur_pos, '$')) && cur_pos[1] != '\0') {
 		if ((def = find_definition(cur_pos + 1, 0, false))) {
@@ -1287,50 +1394,56 @@ replace_param(char *buf, size_t max_len, char **multiline_ptr_ptr)
 
 			/* We are in a multiline expansion, and now have another
 			 * one, so save the previous state on the multiline stack */
-			if (def->multiline && multiline_ptr) {
-				if (!LIST_EXISTS(multiline_stack))
-					multiline_stack = alloc_list(NULL, NULL);
-				list_add(multiline_stack, multiline_ptr);
-			}
+			if (def->multiline && multiline_ptr)
+				multiline_stack_push(multiline_ptr);
+
+			if (def->multiline)
+				multiline_seq_depth = LIST_EXISTS(seq_list) ? seq_list->count : 0;
 
 			if (def->fn) {
 				/* This is a standard definition that uses a function for the replacement text */
 				if (def->value)
-					FREE(def->value);
-				def->value = (*def->fn)();
+					FREE_CONST(def->value);
+				def->value = (*def->fn)(def);
 				def->value_len = strlen(def->value);
 			}
 
 			/* Ensure there is enough room to replace $PARAM or ${PARAM} with value */
+			replaced_len = def->name_len;
 			if (def->multiline) {
 				replacing_len = strcspn(def->value, DEF_LINE_END);
 				next_ptr = def->value + replacing_len + 1;
 				multiline_ptr = next_ptr;
 			}
-			else
+			else {
+				if (def->params)
+					replaced_len = def->params_end - (cur_pos + 1 )+ (extra_braces ? 0 : 1);
 				replacing_len = def->value_len;
+			}
 
-			if (len_used + replacing_len - (def->name_len + 1 + extra_braces) >= max_len) {
+			if (len_used + replacing_len - (replaced_len + 1 + extra_braces) >= max_len) {
 				log_message(LOG_INFO, "Parameter substitution on line '%s' would exceed maximum line length", buf);
 				return NULL;
 			}
 
-			if (def->name_len + 1 + extra_braces != replacing_len) {
+			if (replaced_len + 1 + extra_braces != replacing_len) {
 				/* We need to move the existing text */
-				if (def->name_len + 1 + extra_braces < replacing_len) {
+				if (replaced_len + 1 + extra_braces < replacing_len) {
 					/* We are lengthening the buf text */
 					s = cur_pos + strlen(cur_pos);
-					d = s - (def->name_len + 1 + extra_braces) + replacing_len;
+					d = s - (replaced_len + 1 + extra_braces) + replacing_len;
 					e = cur_pos;
 					i = -1;
 				} else {
 					/* We are shortening the buf text */
-					s = cur_pos + (def->name_len + 1 + extra_braces) - replacing_len;
+					s = cur_pos + (replaced_len + 1 + extra_braces) - replacing_len;
 					d = cur_pos;
-					e = cur_pos + strlen(cur_pos);
+					if (def->params)
+						e = def->params_end + (extra_braces ? 2 : 1);
+					else
+						e = cur_pos + strlen(cur_pos);
 					i = 1;
 				}
-
 				do {
 					*d = *s;
 					if (s == e)
@@ -1339,7 +1452,7 @@ replace_param(char *buf, size_t max_len, char **multiline_ptr_ptr)
 					s += i;
 				} while (true);
 
-				len_used = len_used + replacing_len - (def->name_len + 1 + extra_braces);
+				len_used = len_used + replacing_len - (replaced_len + 1 + extra_braces);
 			}
 
 			/* Now copy the replacement text */
@@ -1364,8 +1477,8 @@ free_definition(void *d)
 {
 	def_t *def = d;
 
-	FREE(def->name);
-	FREE_PTR(def->value);
+	FREE_CONST(def->name);
+	FREE_CONST_PTR(def->value);
 	FREE(def);
 }
 
@@ -1376,25 +1489,24 @@ set_definition(const char *name, const char *value)
 	size_t name_len = strlen(name);
 
 	if ((def = find_definition(name, name_len, false))) {
-		FREE(def->value);
+		FREE_CONST(def->value);
 		def->fn = NULL;		/* Allow a standard definition to be overridden */
 	}
 	else {
 		def = MALLOC(sizeof(*def));
 		def->name_len = name_len;
-		def->name = MALLOC(name_len + 1);
-		strcpy(def->name, name);
+		def->name = STRNDUP(name, def->name_len);
 
 		if (!LIST_EXISTS(defs))
 			defs = alloc_list(free_definition, NULL);
 		list_add(defs, def);
 	}
 	def->value_len = strlen(value);
-	def->value = MALLOC(def->value_len + 1);
-	strcpy(def->value, value);
+	def->value = STRNDUP(value, def->value_len);
 
-#ifdef PARSER_DEBUG
-	log_message(LOG_INFO, "Definition %s now '%s'", def->name, def->value);
+#ifdef _PARSER_DEBUG_
+	if (do_parser_debug)
+		log_message(LOG_INFO, "Definition %s now '%s'", def->name, def->value);
 #endif
 
 	return def;
@@ -1431,16 +1543,13 @@ check_definition(const char *buf)
 		return NULL;
 
 	if ((def = find_definition(&buf[1], def_name_len, true))) {
-		FREE(def->value);
+		FREE_CONST(def->value);
 		def->fn = NULL;		/* Allow a standard definition to be overridden */
 	}
 	else {
 		def = MALLOC(sizeof(*def));
 		def->name_len = def_name_len;
-		str = MALLOC(def->name_len + 1);
-		strncpy(str, &buf[1], def->name_len);
-		str[def->name_len] = '\0';
-		def->name = str;
+		def->name = STRNDUP(buf + 1, def->name_len);
 
 		if (!LIST_EXISTS(defs))
 			defs = alloc_list(free_definition, NULL);
@@ -1466,33 +1575,32 @@ check_definition(const char *buf)
 	} else
 		def->multiline = false;
 
-	str = MALLOC(def->value_len + 1);
-	strcpy(str, p);
-	def->value = str;
+	str = STRNDUP(p, def->value_len);
 
 	/* If it a multiline definition, we need to mark the end of the first line
 	 * by overwriting the '\' with the line end marker. */
 	if (def->value_len >= 2 && def->multiline)
-		def->value[def->value_len - 1] = DEF_LINE_END[0];
+		str[def->value_len - 1] = DEF_LINE_END[0];
+
+	def->value = str;
 
 	return def;
 }
 
 static void
-add_std_definition(const char *name, const char *value, char *(*fn)(void))
+add_std_definition(const char *name, const char *value, const char *(*fn)(const def_t *), unsigned max_params)
 {
 	def_t* def;
 
 	def = MALLOC(sizeof(*def));
 	def->name_len = strlen(name);
-	def->name = MALLOC(def->name_len + 1);
-	strcpy(def->name, name);
+	def->name = STRNDUP(name, def->name_len);
 	if (value) {
 		def->value_len = strlen(value);
-		def->value = MALLOC(def->value_len + 1);
-		strcpy(def->value, value);
+		def->value = STRNDUP(value, def->value_len);
 	}
 	def->fn = fn;
+	def->max_params = max_params;
 
 	if (!LIST_EXISTS(defs))
 		defs = alloc_list(free_definition, NULL);
@@ -1502,8 +1610,19 @@ add_std_definition(const char *name, const char *value, char *(*fn)(void))
 static void
 set_std_definitions(void)
 {
-	add_std_definition("_PWD", NULL, get_cwd);
-	add_std_definition("_INSTANCE", NULL, get_instance);
+	time_t tim;
+
+	add_std_definition("_PWD", NULL, get_cwd, 0);
+	add_std_definition("_INSTANCE", NULL, get_instance, 0);
+	add_std_definition("_RANDOM", NULL, get_random, 2);
+
+	/* In case $_RANDOM is used, seed the pseudo RNG */
+	if (random_seed_configured)
+		srandom(random_seed);
+	else {
+		time(&tim);
+		srandom((unsigned int)tim);
+	}
 }
 
 static void
@@ -1566,7 +1685,7 @@ decomment(char *str)
 
 	/* Remove trailing whitespace */
 	p = str + strlen(str) - 1;
-	while (p >= str && isblank(*p))
+	while (p >= str && isblank(*p))		// This line causes a strict-overflow=4 warning in gcc 5.4.0
 		*p-- = '\0';
 	if (cont) {
 		*++p = '\\';
@@ -1577,6 +1696,10 @@ decomment(char *str)
 static bool
 read_line(char *buf, size_t size)
 {
+	static def_t *def = NULL;
+	static const char *next_ptr = NULL;
+	static char *line_residue = NULL;
+
 	size_t len ;
 	bool eof = false;
 	size_t config_id_len;
@@ -1584,11 +1707,8 @@ read_line(char *buf, size_t size)
 	bool rev_cmp;
 	size_t ofs;
 	bool recheck;
-	static def_t *def = NULL;
-	static char *next_ptr = NULL;
 	bool multiline_param_def = false;
 	char *end;
-	static char *line_residue = NULL;
 	size_t skip;
 	char *p;
 
@@ -1599,66 +1719,77 @@ read_line(char *buf, size_t size)
 			FREE(line_residue);
 			line_residue = NULL;
 		}
-		else if (next_ptr) {
-			/* We are expanding a multiline parameter, so copy next line */
-			end = strchr(next_ptr, DEF_LINE_END[0]);
-			if (!end) {
-				strcpy(buf, next_ptr);
-				if (!LIST_ISEMPTY(multiline_stack)) {
-					next_ptr = LIST_TAIL_DATA(multiline_stack);
-					list_remove(multiline_stack, multiline_stack->tail);
-				}
-				else
-					next_ptr = NULL;
-			} else {
-				strncpy(buf, next_ptr, (size_t)(end - next_ptr));
-				buf[end - next_ptr] = '\0';
-				next_ptr = end + 1;
-			}
-		}
-		else if (!LIST_ISEMPTY(seq_list)) {
+		else if (!LIST_ISEMPTY(seq_list) &&
+			 seq_list->count > multiline_seq_depth) {
 			seq_t *seq = LIST_TAIL_DATA(seq_list);
 			char val[12];
 			snprintf(val, sizeof(val), "%d", seq->next);
-#ifdef PARSER_DEBUG
-			log_message(LOG_INFO, "Processing seq %d of %s for '%s'",  seq->next, seq->var, seq->text);
+#ifdef _PARSER_DEBUG_
+			if (do_parser_debug)
+				log_message(LOG_INFO, "Processing seq %d of %s for '%s'",  seq->next, seq->var, seq->text);
 #endif
 			set_definition(seq->var, val);
 			strcpy(buf, seq->text);
 			seq->next += seq->step;
 			if ((seq->step > 0 && seq->next > seq->last) ||
 			    (seq->step < 0 && seq->next < seq->last)) {
-#ifdef PARSER_DEBUG
-				log_message(LOG_INFO, "Removing seq %s for '%s'", seq->var, seq->text);
+#ifdef _PARSER_DEBUG_
+				if (do_parser_debug)
+					log_message(LOG_INFO, "Removing seq %s for '%s'", seq->var, seq->text);
 #endif
 				list_remove(seq_list, seq_list->tail);
 			}
 		}
-		else {
-retry:
-			if (!fgets(buf, (int)size, current_stream))
-			{
-				eof = true;
-				buf[0] = '\0';
-				break;
+		else if (next_ptr) {
+			/* We are expanding a multiline parameter, so copy next line */
+			end = strchr(next_ptr, DEF_LINE_END[0]);
+			if (!end) {
+				strcpy(buf, next_ptr);
+				if (!LIST_ISEMPTY(multiline_stack))
+					next_ptr = multiline_stack_pop();
+				else {
+					next_ptr = NULL;
+					multiline_seq_depth = 0;
+				}
+			} else {
+				strncpy(buf, next_ptr, (size_t)(end - next_ptr));
+				buf[end - next_ptr] = '\0';
+				next_ptr = end + 1;
 			}
+		}
+		else {
+			/* Get the next non-blank line */
+			do {
+				if (!fgets(buf, (int)size, current_stream))
+				{
+					eof = true;
+					len = 0;
+					break;
+				}
 
-			/* Check if we have read the end of a line */
-			len = strlen(buf);
-			if (buf[0] && buf[len-1] == '\n')
-				current_file_line_no++;
+				/* Check if we have read the end of a line */
+				len = strlen(buf);
+				if (buf[0] && buf[len-1] == '\n')
+					current_file_line_no++;
 
-			/* Remove end of line chars */
-			while (len && (buf[len-1] == '\n' || buf[len-1] == '\r'))
-				len--;
+				/* Remove end of line chars */
+				while (len && (buf[len-1] == '\n' || buf[len-1] == '\r'))
+					len--;
 
-			/* Skip blank lines */
-			if (!len)
-				goto retry;
+				if (!len && multiline_param_def) {
+					multiline_param_def = false;
+					if (!def->value_len)
+						def->multiline = false;
+				}
+			} while (!len);
 
 			buf[len] = '\0';
 
-			decomment(buf);
+			if (len)
+				decomment(buf);
+
+			if (!buf[0])
+				break;
 		}
 
 		len = strlen(buf);
@@ -1681,10 +1812,11 @@ retry:
 			if (len >= 2 ||
 			    (len && !multiline_param_def)) {
 				/* Add the line to the definition */
-				def->value = REALLOC(def->value, def->value_len + len + 1);
-				strncpy(def->value + def->value_len, buf, len);
+				char *str = REALLOC_CONST(def->value, def->value_len + len + 1);
+				strncpy(str + def->value_len, buf, len);
 				def->value_len += len;
-				def->value[def->value_len] = '\0';
+				str[def->value_len] = '\0';
+				def->value = str;
 			}
 
 			buf[0] = '\0';
@@ -1796,26 +1928,27 @@ retry:
 		if (!strcmp(buf, BOB))
 			block_depth++;
 		else if (!strcmp(buf, EOB)) {
-			if (--block_depth < 0) {
+			if (block_depth-- < 1) {
 				report_config_error(CONFIG_UNEXPECTED_EOB, "Extra '}' found");
 				block_depth = 0;
 			}
 		}
 	}
 
-#ifdef PARSER_DEBUG
-	log_message(LOG_INFO, "read_line(%d): '%s'", block_depth, buf);
+#ifdef _PARSER_DEBUG_
+	if (do_parser_debug)
+		log_message(LOG_INFO, "read_line(%d): '%s'", block_depth, buf);
 #endif
 
 	return !eof;
 }
 
 void
-alloc_value_block(void (*alloc_func) (vector_t *), const char *block_type)
+alloc_value_block(void (*alloc_func) (const vector_t *), const char *block_type)
 {
 	char *buf;
-	char *str = NULL;
-	vector_t *vec = NULL;
+	const char *str = NULL;
+	const vector_t *vec = NULL;
 	bool first_line = true;
 
 	buf = (char *) MALLOC(MAXBUF);
@@ -1850,25 +1983,22 @@ alloc_value_block(void (*alloc_func) (vector_t *), const char *block_type)
 
 static vector_t *read_value_block_vec;
 static void
-read_value_block_line(vector_t *strvec)
+read_value_block_line(const vector_t *strvec)
 {
 	size_t word;
-	char *str;
-	char *dup;
+	const char *str;
 
 	if (!read_value_block_vec)
 		read_value_block_vec = vector_alloc();
 
 	vector_foreach_slot(strvec, str, word) {
-		dup = (char *) MALLOC(strlen(str) + 1);
-		strcpy(dup, str);
 		vector_alloc_slot(read_value_block_vec);
-		vector_set_slot(read_value_block_vec, dup);
+		vector_set_slot(read_value_block_vec, STRDUP(str));
 	}
 }
 
-vector_t *
-read_value_block(vector_t *strvec)
+const vector_t *
+read_value_block(const vector_t *strvec)
 {
 	vector_t *ret_vec;
 
@@ -1880,31 +2010,9 @@ read_value_block(vector_t *strvec)
 	return ret_vec;
 }
 
-void *
-set_value(vector_t *strvec)
-{
-	char *str;
-	size_t size;
-	char *alloc;
-
-	if (vector_size(strvec) < 2)
-		return NULL;
-
-	str = vector_slot(strvec, 1);
-	size = strlen(str);
-
-	alloc = (char *) MALLOC(size + 1);
-	if (!alloc)
-		return NULL;
-
-	memcpy(alloc, str, size);
-
-	return alloc;
-}
-
 /* min_time and max_time are in micro-seconds. The returned value is also in micro-seconds */
 bool
-read_timer(vector_t *strvec, size_t index, unsigned long *res, unsigned long min_time, unsigned long max_time, bool ignore_error)
+read_timer(const vector_t *strvec, size_t index, unsigned long *res, unsigned long min_time, unsigned long max_time, bool ignore_error)
 {
 	double timer;
 	bool ret;
@@ -1914,14 +2022,14 @@ read_timer(vector_t *strvec, size_t index, unsigned long *res, unsigned long min
 	fmax_time = (double)((max_time) ? max_time : TIMER_MAXIMUM) / TIMER_HZ;
 
 	ret = read_double_strvec(strvec, index, &timer, fmin_time, fmax_time, ignore_error);
-	*res = timer * TIMER_HZ > TIMER_MAXIMUM ? TIMER_MAXIMUM : timer * TIMER_HZ;
+	*res = timer * TIMER_HZ > TIMER_MAXIMUM ? TIMER_MAXIMUM : (unsigned long)(timer * TIMER_HZ);
 
 	return ret;
 }
 
 /* Checks for on/true/yes or off/false/no */
-int
-check_true_false(char *str)
+int __attribute__ ((pure))
+check_true_false(const char *str)
 {
 	if (!strcmp(str, "true") || !strcmp(str, "on") || !strcmp(str, "yes"))
 		return true;
@@ -1942,7 +2050,7 @@ void skip_block(bool need_block_start)
 
 /* Data initialization */
 void
-init_data(const char *conf_file, vector_t * (*init_keywords) (void))
+init_data(const char *conf_file, const vector_t * (*init_keywords) (void))
 {
 	/* Init Keywords structure */
 	keywords = vector_alloc();
@@ -1952,9 +2060,10 @@ init_data(const char *conf_file, vector_t * (*init_keywords) (void))
 	/* Add out standard definitions */
 	set_std_definitions();
 
-#if DUMP_KEYWORDS
+#ifdef _DUMP_KEYWORDS_
 	/* Dump configuration */
-	dump_keywords(keywords, 0, NULL);
+	if (do_dump_keywords)
+		dump_keywords(keywords, 0, NULL);
 #endif
 
 	/* Stream handling */

@@ -32,9 +32,7 @@
 /* genhash includes */
 #include "include/ssl.h"
 #include "include/main.h"
-
-/* extern variables */
-extern REQ *req;
+#include "include/layer4.h"
 
 /*
  * Initialize the SSL context, with or without specific
@@ -44,16 +42,22 @@ void
 init_ssl(void)
 {
 	/* Library initialization */
-#if HAVE_OPENSSL_INIT_CRYPTO
+#ifdef HAVE_OPENSSL_INIT_CRYPTO
+#ifndef HAVE_OPENSSL_INIT_NO_LOAD_CONFIG_BUG
+	/* In OpenSSL v1.1.1 if the following is called, SSL_CTX_new() below fails.
+	 * It works in v1.1.0h and v1.1.1b.
+	 * It transpires that it works without setting NO_LOAD_CONFIG, but it is
+	 * presumably more efficient not to load it. */
 	if (!OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL))
 		fprintf(stderr, "OPENSSL_init_crypto failed\n");
+#endif
 #else
 	SSL_library_init();
 	SSL_load_error_strings();
 #endif
 
 	/* Initialize SSL context */
-#if HAVE_TLS_METHOD
+#ifdef HAVE_TLS_METHOD
 	req->meth = TLS_method();
 #else
 	req->meth = SSLv23_method();
@@ -69,7 +73,7 @@ init_ssl(void)
 }
 
 /* Display SSL error to readable string */
-int
+static int
 ssl_printerr(int err)
 {
 	switch (err) {
@@ -98,11 +102,60 @@ ssl_printerr(int err)
 	return 0;
 }
 
-bool
-ssl_connect(thread_t * thread)
+static void
+ssl_connection_done(thread_ref_t thread)
+{
+	SOCK *sock_obj = THREAD_ARG(thread);
+
+	sock_obj->lock = 0;
+	thread_add_event(thread->master,
+			 http_request_thread, sock_obj, 0);
+	thread_del_write(thread);
+}
+
+static int
+ssl_connect_complete_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
 	int ret;
+	int error;
+
+	if (thread->type == THREAD_READ_TIMEOUT ||
+	    thread->type == THREAD_WRITE_TIMEOUT) {
+		exit_code = 1;
+		return epilog(thread);
+	}
+
+	ret = SSL_connect(sock_obj->ssl);
+	if (ret > 0) {
+		ssl_connection_done(thread);
+		return 0;
+	}
+
+	error = SSL_get_error(sock_obj->ssl, ret);
+	if (ret == -1 && error == SSL_ERROR_WANT_READ) {
+		thread_add_read(thread->master, ssl_connect_complete_thread, sock_obj,
+				sock_obj->fd, req->timeout, true);
+	}
+	else if (ret == -1 && error == SSL_ERROR_WANT_WRITE) {
+		thread_add_write(thread->master, ssl_connect_complete_thread, sock_obj,
+				sock_obj->fd, req->timeout, true);
+	} else {
+		DBG("  SSL_connect return code = %d on fd:%d\n", ret, thread->u.fd);
+		ssl_printerr(error);
+		sock_obj->status = connect_error;
+		thread_add_terminate_event(thread->master);
+	}
+
+	return 0;
+}
+
+bool
+ssl_connect(thread_ref_t thread)
+{
+	SOCK *sock_obj = THREAD_ARG(thread);
+	int ret;
+	int error;
 
 	sock_obj->ssl = SSL_new(req->ctx);
 	if (!sock_obj->ssl) {
@@ -117,7 +170,7 @@ ssl_connect(thread_t * thread)
 	}
 
 	BIO_set_nbio(sock_obj->bio, 1);	/* Set the Non-Blocking flag */
-#if HAVE_SSL_SET0_RBIO
+#ifdef HAVE_SSL_SET0_RBIO
 	BIO_up_ref(sock_obj->bio);
 	SSL_set0_rbio(sock_obj->ssl, sock_obj->bio);
 	SSL_set0_wbio(sock_obj->ssl, sock_obj->bio);
@@ -125,21 +178,37 @@ ssl_connect(thread_t * thread)
 	SSL_set_bio(sock_obj->ssl, sock_obj->bio, sock_obj->bio);
 #endif
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
-		if (req->vhost != NULL && req->sni) {
-			SSL_set_tlsext_host_name(sock_obj->ssl, req->vhost);
-		}
+	if (req->vhost != NULL && req->sni) {
+		SSL_set_tlsext_host_name(sock_obj->ssl, req->vhost);
+	}
 #endif
 
 	ret = SSL_connect(sock_obj->ssl);
+	if (ret > 0) {
+		ssl_connection_done(thread);
+		return 1;
+	}
+
+	error = SSL_get_error(sock_obj->ssl, ret);
+	if (ret == -1 && error == SSL_ERROR_WANT_READ) {
+		thread_add_read(thread->master, ssl_connect_complete_thread, sock_obj,
+				sock_obj->fd, req->timeout, true);
+		return 1;
+	}
+	else if (ret == -1 && error == SSL_ERROR_WANT_WRITE) {
+		thread_add_write(thread->master, ssl_connect_complete_thread, sock_obj,
+				sock_obj->fd, req->timeout, true);
+		return 1;
+	}
 
 	DBG("  SSL_connect return code = %d on fd:%d\n", ret, thread->u.fd);
-	ssl_printerr(SSL_get_error(sock_obj->ssl, ret));
+	ssl_printerr(error);
 
 	return (ret > 0);
 }
 
 int
-ssl_send_request(SSL * ssl, char *str_request, int request_len)
+ssl_send_request(SSL *ssl, const char *str_request, int request_len)
 {
 	int err, r = 0;
 
@@ -160,7 +229,7 @@ ssl_send_request(SSL * ssl, char *str_request, int request_len)
 
 /* Asynchronous SSL stream reader */
 int
-ssl_read_thread(thread_t * thread)
+ssl_read_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
 	int r = 0;
@@ -188,37 +257,41 @@ ssl_read_thread(thread_t * thread)
 	 * and sometime not...
 	 */
 
-      read_stream:
+	do {
+		/* read the SSL stream */
+		r = MAX_BUFFER_LENGTH - sock_obj->size;
+		if (r <= 0) {
+			/* defensive check, should not occur */
+			fprintf(stderr, "SSL socket buffer overflow (not consumed)\n");
+			r = MAX_BUFFER_LENGTH;
+		}
+		memset(sock_obj->buffer + sock_obj->size, 0, (size_t)r);
+		r = SSL_read(sock_obj->ssl, sock_obj->buffer + sock_obj->size, r);
+		error = SSL_get_error(sock_obj->ssl, r);
+		if (r == -1 && error == SSL_ERROR_WANT_READ) {
+			thread_add_read(thread->master, ssl_read_thread, sock_obj,
+					sock_obj->fd, req->timeout, true);
 
-	/* read the SSL stream */
-	r = MAX_BUFFER_LENGTH - sock_obj->size;
-	if (r <= 0) {
-		/* defensive check, should not occur */
-		fprintf(stderr, "SSL socket buffer overflow (not consumed)\n");
-		r = MAX_BUFFER_LENGTH;
-	}
-	memset(sock_obj->buffer + sock_obj->size, 0, (size_t)r);
-	r = SSL_read(sock_obj->ssl, sock_obj->buffer + sock_obj->size, r);
-	error = SSL_get_error(sock_obj->ssl, r);
+			return 0;
+		} else if (r == -1 && error == SSL_ERROR_WANT_WRITE) {
+			thread_add_write(thread->master, ssl_read_thread, sock_obj,
+					sock_obj->fd, req->timeout, true);
 
-	DBG(" [l:%d,fd:%d]\n", r, sock_obj->fd);
+			return 0;
+		}
+		DBG(" [l:%d,fd:%d]\n", r, sock_obj->fd);
 
-	if (error) {
-		/* All the SSL streal has been parsed */
-		/* Handle response stream */
-		if (error != SSL_ERROR_NONE)
+		if (error != SSL_ERROR_NONE) {
+			/* All the SSL stream has been parsed */
+			/* Handle response stream */
 			return finalize(thread);
-	} else if (r > 0 && error == 0) {
+		} else if (r <= 0)
+			return 0;
 
 		/* Handle the response stream */
 		http_process_stream(sock_obj, r);
+	} while (true);
 
-		/*
-		 * Register next ssl stream reader.
-		 * Register itself to not perturbe global I/O multiplexer.
-		 */
-		goto read_stream;
-	}
-
+	/* Unreachable */
 	return 0;
 }

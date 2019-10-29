@@ -30,6 +30,7 @@
 #endif
 #include <stdint.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 #include "vrrp_scheduler.h"
 #include "vrrp_track.h"
@@ -67,7 +68,7 @@
 
 /* global vars */
 timeval_t garp_next_time;
-thread_t *garp_thread;
+thread_ref_t garp_thread;
 bool vrrp_initialised;
 
 #ifdef _TSM_DEBUG_
@@ -76,7 +77,7 @@ bool do_tsm_debug;
 
 /* local variables */
 #ifdef _WITH_BFD_
-static thread_t *bfd_thread;		 /* BFD control pipe read thread */
+static thread_ref_t bfd_thread;		 /* BFD control pipe read thread */
 #endif
 
 /* VRRP FSM (Finite State Machine) design.
@@ -104,13 +105,13 @@ static thread_t *bfd_thread;		 /* BFD control pipe read thread */
  *     +---------------+                       +---------------+
  */
 
-static int vrrp_script_child_thread(thread_t *);
-static int vrrp_script_thread(thread_t *);
+static int vrrp_script_child_thread(thread_ref_t);
+static int vrrp_script_thread(thread_ref_t);
 #ifdef _WITH_BFD_
-static int vrrp_bfd_thread(thread_t *);
+static int vrrp_bfd_thread(thread_ref_t);
 #endif
 
-static int vrrp_read_dispatcher_thread(thread_t *);
+static int vrrp_read_dispatcher_thread(thread_ref_t);
 
 /* VRRP TSM (Transition State Matrix) design.
  *
@@ -178,17 +179,16 @@ vrrp_init_state(list l)
 	/* We can send SMTP messages from this point, so set the time */
 	set_time_now();
 
-	/* Do notifications for any sync groups in fault state */
-	for (e = LIST_HEAD(vrrp_data->vrrp_sync_group); e; ELEMENT_NEXT(e)) {
+	/* Do notifications for any sync groups in fault or backup state */
+	LIST_FOREACH(vrrp_data->vrrp_sync_group, vgroup, e) {
 		/* Init group if needed  */
-		vgroup = ELEMENT_DATA(e);
-
-		if (vgroup->state == VRRP_STATE_FAULT)
+		if (vgroup->state == VRRP_STATE_FAULT ||
+		    vgroup->state == VRRP_STATE_BACK)
 			send_group_notifies(vgroup);
 	}
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
+	LIST_FOREACH(l, vrrp, e) {
+		int vrrp_begin_state = vrrp->state;
 
 		/* wantstate is the state we would be in disregarding any sync group */
 		if (vrrp->state == VRRP_STATE_FAULT)
@@ -251,17 +251,22 @@ vrrp_init_state(list l)
 			/* Set interface state */
 			vrrp_restore_interface(vrrp, false, false);
 			if (is_up && new_state != VRRP_STATE_FAULT && !vrrp->num_script_init && (!vrrp->sync || !vrrp->sync->num_member_init)) {
-				if (is_up) {
-					vrrp->state = VRRP_STATE_BACK;
+				if (vrrp->state != VRRP_STATE_BACK) {
 					log_message(LOG_INFO, "(%s) Entering BACKUP STATE (init)", vrrp->iname);
+					vrrp->state = VRRP_STATE_BACK;
 				}
-				else {
-					vrrp->state = VRRP_STATE_FAULT;
+			} else {
+				/* Note: if we have alpha mode scripts, we enter fault state, but don't want
+				 * to log it here */
+				if (vrrp_begin_state != vrrp->state)
 					log_message(LOG_INFO, "(%s) Entering FAULT STATE (init)", vrrp->iname);
-				}
-				send_instance_notifies(vrrp);
+				vrrp->state = VRRP_STATE_FAULT;
 			}
-			vrrp->last_transition = timer_now();
+			if (vrrp_begin_state != vrrp->state) {
+				if (vrrp->state != VRRP_STATE_FAULT || vrrp->num_script_if_fault)
+					send_instance_notifies(vrrp);
+				vrrp->last_transition = timer_now();
+			}
 		}
 #ifdef _WITH_SNMP_RFC_
 		vrrp->stats->uptime = timer_now();
@@ -333,15 +338,11 @@ static timeval_t *
 vrrp_compute_timer(const sock_t *sock)
 {
 	vrrp_t *vrrp;
-	static timeval_t timer = { .tv_sec = TIMER_DISABLED };
 
 	/* The sock won't exist if there isn't a vrrp instance on it,
 	 * so rb_first will always exist. */
 	vrrp = rb_entry(rb_first_cached(&sock->rb_sands), vrrp_t, rb_sands);
-	if (vrrp)
-		return &vrrp->sands;
-
-	return &timer;
+	return &vrrp->sands;
 }
 
 void
@@ -376,7 +377,7 @@ vrrp_register_workers(list l)
 // TODO - should we only do this if we have track_bfd? Probably not
 		/* Init BFD tracking thread */
 		bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-					     bfd_vrrp_event_pipe[0], TIMER_NEVER);
+					     bfd_vrrp_event_pipe[0], TIMER_NEVER, false);
 	}
 #endif
 
@@ -385,7 +386,7 @@ vrrp_register_workers(list l)
 		/* Register a timer thread if interface exists */
 		if (sock->fd_in != -1)
 			sock->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
-						       sock, sock->fd_in, vrrp_compute_timer(sock));
+						       sock, sock->fd_in, vrrp_compute_timer(sock), false);
 	}
 }
 
@@ -393,11 +394,11 @@ void
 vrrp_thread_add_read(vrrp_t *vrrp)
 {
 	vrrp->sockets->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
-						vrrp->sockets, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets));
+						vrrp->sockets, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets), false);
 }
 
 /* VRRP dispatcher functions */
-static sock_t *
+static sock_t * __attribute__ ((pure))
 already_exist_sock(list l, sa_family_t family, int proto, interface_t *ifp, bool unicast)
 {
 	sock_t *sock;
@@ -455,12 +456,11 @@ vrrp_create_sockpool(list l)
 #endif
 										    vrrp->ifp;
 		unicast = !LIST_ISEMPTY(vrrp->unicast_peer);
+		proto = IPPROTO_VRRP;
 #if defined _WITH_VRRP_AUTH_
 		if (vrrp->auth_type == VRRP_AUTH_AH)
 			proto = IPPROTO_AH;
-		else
 #endif
-			proto = IPPROTO_VRRP;
 
 		/* add the vrrp element if not exist */
 		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifp, unicast)))
@@ -530,7 +530,7 @@ vrrp_set_fds(list l)
  * multiplexing points.
  */
 int
-vrrp_dispatcher_init(__attribute__((unused)) thread_t * thread)
+vrrp_dispatcher_init(__attribute__((unused)) thread_ref_t thread)
 {
 	vrrp_create_sockpool(vrrp_data->vrrp_socket_pool);
 
@@ -553,13 +553,24 @@ vrrp_dispatcher_init(__attribute__((unused)) thread_t * thread)
 	return 1;
 }
 
+#ifdef _WITH_BFD_
+void
+cancel_vrrp_threads(void)
+{
+	if (bfd_thread) {
+		thread_cancel(bfd_thread);
+		bfd_thread = NULL;
+	}
+}
+#endif
+
 void
 vrrp_dispatcher_release(vrrp_data_t *data)
 {
 	free_list(&data->vrrp_socket_pool);
+
 #ifdef _WITH_BFD_
-	thread_cancel(bfd_thread);
-	bfd_thread = NULL;
+	cancel_vrrp_threads();
 #endif
 }
 
@@ -573,7 +584,7 @@ vrrp_goto_master(vrrp_t * vrrp)
 
 /* Delayed gratuitous ARP thread */
 int
-vrrp_gratuitous_arp_thread(thread_t * thread)
+vrrp_gratuitous_arp_thread(thread_ref_t thread)
 {
 	vrrp_t *vrrp = THREAD_ARG(thread);
 
@@ -585,7 +596,7 @@ vrrp_gratuitous_arp_thread(thread_t * thread)
 
 /* Delayed gratuitous ARP thread after receiving a lower priority advert */
 int
-vrrp_lower_prio_gratuitous_arp_thread(thread_t * thread)
+vrrp_lower_prio_gratuitous_arp_thread(thread_ref_t thread)
 {
 	vrrp_t *vrrp = THREAD_ARG(thread);
 
@@ -606,6 +617,7 @@ void
 try_up_instance(vrrp_t *vrrp, bool leaving_init)
 {
 	int wantstate;
+	ip_address_t ipaddress = {};
 
 	if (leaving_init) {
 		if (vrrp->num_script_if_fault)
@@ -649,6 +661,29 @@ try_up_instance(vrrp_t *vrrp, bool leaving_init)
 	/* We can come up */
 	vrrp_state_leave_fault(vrrp);
 
+	/* If we are using unicast, the master may have lost us from its ARP cache.
+	 * We want to renew the ARP cache on the master, so that it can send adverts
+	 * to us straight away, without a delay before it sends an ARP request message
+	 * and we respond. If we don't do this, we can time out and transition to master
+	 * before the master renews its ARP entry, since the master cannot send us adverts
+	 * until it has done so. */
+	if (!LIST_ISEMPTY(vrrp->unicast_peer) &&
+	    vrrp->saddr.ss_family != AF_UNSPEC) {
+		if (__test_bit(LOG_DETAIL_BIT, &debug))
+			log_message(LOG_INFO, "%s: sending gratuitous %s for %s", vrrp->iname, vrrp->family == AF_INET ? "ARP" : "NA", inet_sockaddrtos(&vrrp->saddr));
+
+		ipaddress.ifp = IF_BASE_IFP(vrrp->ifp);
+
+		if (vrrp->saddr.ss_family == AF_INET) {
+			ipaddress.u.sin.sin_addr.s_addr = ((struct sockaddr_in *)&vrrp->saddr)->sin_addr.s_addr;
+			send_gratuitous_arp_immediate(ipaddress.ifp, &ipaddress);
+		} else {
+			/* IPv6 */
+			ipaddress.u.sin6_addr = ((struct sockaddr_in6 *)&vrrp->saddr)->sin6_addr;
+			ndisc_send_unsolicited_na_immediate(ipaddress.ifp, &ipaddress);
+		}
+	}
+
 	vrrp_init_instance_sands(vrrp);
 	vrrp_thread_requeue_read(vrrp);
 
@@ -670,16 +705,16 @@ vrrp_handle_bfd_event(bfd_event_t * evt)
 	tracking_vrrp_t *tbfd;
 	vrrp_t * vrrp;
 	element e, e1;
-	struct timeval time_now;
+	struct timeval cur_time;
 	struct timeval timer_tmp;
 	uint32_t delivery_time;
 
 	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
-		time_now = timer_now();
-		timersub(&time_now, &evt->sent_time, &timer_tmp);
+		cur_time = timer_now();
+		timersub(&cur_time, &evt->sent_time, &timer_tmp);
 		delivery_time = timer_long(timer_tmp);
 		log_message(LOG_INFO, "Received BFD event: instance %s is in"
-			    " state %s (delivered in %i usec)",
+			    " state %s (delivered in %" PRIu32 " usec)",
 			    evt->iname, BFD_STATE_STR(evt->state), delivery_time);
 	}
 
@@ -701,15 +736,15 @@ vrrp_handle_bfd_event(bfd_event_t * evt)
 
 			if (tbfd->weight) {
 				if (vbfd->bfd_up)
-					vrrp->total_priority += abs(tbfd->weight);
+					vrrp->total_priority += abs(tbfd->weight) * tbfd->weight_multiplier;
 				else
-					vrrp->total_priority -= abs(tbfd->weight);
+					vrrp->total_priority -= abs(tbfd->weight) * tbfd->weight_multiplier;
 				vrrp_set_effective_priority(vrrp);
 
 				continue;
 			}
 
-			if (vbfd->bfd_up)
+			if (!!vbfd->bfd_up == (tbfd->weight_multiplier == 1))
 				try_up_instance(vrrp, false);
 			else
 				down_instance(vrrp);
@@ -720,17 +755,17 @@ vrrp_handle_bfd_event(bfd_event_t * evt)
 }
 
 static int
-vrrp_bfd_thread(thread_t * thread)
+vrrp_bfd_thread(thread_ref_t thread)
 {
 	bfd_event_t evt;
 
 	bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-				     thread->u.fd, TIMER_NEVER);
+				     thread->u.f.fd, TIMER_NEVER, false);
 
 	if (thread->type != THREAD_READY_FD)
 		return 0;
 
-	while (read(thread->u.fd, &evt, sizeof(bfd_event_t)) != -1)
+	while (read(thread->u.f.fd, &evt, sizeof(bfd_event_t)) != -1)
 		vrrp_handle_bfd_event(&evt);
 
 	return 0;
@@ -777,15 +812,19 @@ vrrp_dispatcher_read_timeout(sock_t *sock)
 
 /* Handle dispatcher read packet */
 static int
-vrrp_dispatcher_read(sock_t * sock)
+vrrp_dispatcher_read(sock_t *sock)
 {
 	vrrp_t *vrrp;
-	vrrphdr_t *hd;
+	const vrrphdr_t *hd;
 	ssize_t len = 0;
 	int prev_state = 0;
 	struct sockaddr_storage src_addr = { .ss_family = AF_UNSPEC };
 	vrrp_t vrrp_lookup;
+#ifdef _NETWORK_TIMESTAMP_
+	char control_buf[128];
+#else
 	char control_buf[64];
+#endif
 	struct iovec iovec = { .iov_base = vrrp_buffer, .iov_len = vrrp_buffer_len };
 	struct msghdr msghdr = { .msg_name = &src_addr, .msg_namelen = sizeof(src_addr),
 				 .msg_iov = &iovec, .msg_iovlen = 1,
@@ -847,13 +886,13 @@ vrrp_dispatcher_read(sock_t * sock)
 #endif
 
 		if (msghdr.msg_flags & MSG_TRUNC) {
-			log_message(LOG_INFO, "recvmsg(%d) message truncated from %zd to %zd bytes"
+			log_message(LOG_INFO, "recvmsg(%d) message truncated from %zd to %zu bytes"
 					    , sock->fd_in, len, vrrp_buffer_len);
 			continue;
 		}
 
 		if (msghdr.msg_flags & MSG_CTRUNC) {
-			log_message(LOG_INFO, "recvmsg(%d), control message truncated from %zd to %zd bytes"
+			log_message(LOG_INFO, "recvmsg(%d), control message truncated from %zu to %zu bytes"
 					    , sock->fd_in, sizeof(control_buf), msghdr.msg_controllen);
 			msghdr.msg_controllen = 0;
 		}
@@ -873,8 +912,12 @@ vrrp_dispatcher_read(sock_t * sock)
 		vrrp = rb_search(&sock->rb_vrid, &vrrp_lookup, rb_vrid, vrrp_vrid_cmp);
 
 		/* No instance found => ignore the advert */
-		if (!vrrp)
+		if (!vrrp) {
+			if (global_data->log_unknown_vrids)
+				log_message(LOG_INFO, "Unknown VRID(%d) received on interface(%s). ignoring..."
+						    , hd->vrid, IF_NAME(sock->ifp));
 			continue;
+		}
 
 		if (vrrp->state == VRRP_STATE_FAULT || vrrp->state == VRRP_STATE_INIT) {
 			/* We just ignore a message received when we are in fault state or
@@ -887,6 +930,7 @@ vrrp_dispatcher_read(sock_t * sock)
 		vrrp->hop_limit = -1;           /* Default to not received */
 		vrrp->multicast_pkt = false;
 		for (cmsg = CMSG_FIRSTHDR(&msghdr); cmsg; cmsg = CMSG_NXTHDR(&msghdr, cmsg)) {
+			expected_cmsg = false;
 			if (cmsg->cmsg_level == IPPROTO_IPV6) {
 				expected_cmsg = true;
 
@@ -903,11 +947,37 @@ vrrp_dispatcher_read(sock_t * sock)
 				else
 #endif
 					expected_cmsg = false;
-			} else
-				expected_cmsg = false;
+			}
+#ifdef _NETWORK_TIMESTAMP_
+			else if (do_network_timestamp && cmsg->cmsg_level == SOL_SOCKET) {
+				struct timespec *ts = (void *)CMSG_DATA(cmsg);
+				char time_buf[9];
+
+				expected_cmsg = true;
+				if (cmsg->cmsg_type == SO_TIMESTAMPNS) {
+					strftime(time_buf, sizeof time_buf, "%T", localtime(&ts->tv_sec));
+					log_message(LOG_INFO, "TIMESTAMPNS (socket %d - VRID %u) %s.%9.9ld"
+							    , sock->fd_in, hd->vrid, time_buf, ts->tv_nsec);
+				}
+#if 0
+				if (cmsg->cmsg_type == SO_TIMESTAMP) {
+					struct timeval *tv = (void *)CMSG_DATA(cmsg);
+					log_message(LOG_INFO, "TIMESTAMP message (%d - %u)  %ld.%9.9ld"
+							    , sock->fd_in, hd->vrid, tv->tv_sec, tv->tv_usec);
+				}
+				else if (cmsg->cmsg_type == SO_TIMESTAMPING) {
+					struct timespec *ts = (void *)CMSG_DATA(cmsg);
+					log_message(LOG_INFO, "TIMESTAMPING message (%d - %u)  %ld.%9.9ld, raw %ld.%9.9ld"
+							    , sock->fd_in, hd->vrid, ts->tv_sec, ts->tv_nsec, (ts+2)->tv_sec, (ts+2)->tv_nsec);
+				}
+#endif
+				else
+					expected_cmsg = false;
+			}
+#endif
 
 			if (!expected_cmsg)
-				log_message(LOG_INFO, "fd %d, unexpected control msg len %zd, level %d, type %d"
+				log_message(LOG_INFO, "fd %d, unexpected control msg len %zu, level %d, type %d"
 						    , sock->fd_in, cmsg->cmsg_len
 						    , cmsg->cmsg_level, cmsg->cmsg_type);
 		}
@@ -942,7 +1012,7 @@ vrrp_dispatcher_read(sock_t * sock)
 
 /* Our read packet dispatcher */
 static int
-vrrp_read_dispatcher_thread(thread_t * thread)
+vrrp_read_dispatcher_thread(thread_ref_t thread)
 {
 	sock_t *sock;
 	int fd;
@@ -959,13 +1029,13 @@ vrrp_read_dispatcher_thread(thread_t * thread)
 	/* register next dispatcher thread */
 	if (fd != -1)
 		sock->thread = thread_add_read_sands(thread->master, vrrp_read_dispatcher_thread,
-						     sock, fd, vrrp_compute_timer(sock));
+						     sock, fd, vrrp_compute_timer(sock), false);
 
 	return 0;
 }
 
 static int
-vrrp_script_thread(thread_t * thread)
+vrrp_script_thread(thread_ref_t thread)
 {
 	vrrp_script_t *vscript = THREAD_ARG(thread);
 	int ret;
@@ -993,16 +1063,16 @@ vrrp_script_thread(thread_t * thread)
 }
 
 static int
-vrrp_script_child_thread(thread_t * thread)
+vrrp_script_child_thread(thread_ref_t thread)
 {
 	int wait_status;
 	pid_t pid;
 	vrrp_script_t *vscript = THREAD_ARG(thread);
 	int sig_num;
 	unsigned timeout = 0;
-	char *script_exit_type = NULL;
+	const char *script_exit_type = NULL;
 	bool script_success;
-	char *reason = NULL;
+	const char *reason = NULL;
 	int reason_code;
 
 	if (thread->type == THREAD_CHILD_TIMEOUT) {
@@ -1017,7 +1087,7 @@ vrrp_script_child_thread(thread_t * thread)
 			sig_num = SIGKILL;
 			timeout = 2;
 		} else if (vscript->state == SCRIPT_STATE_FORCING_TERMINATION) {
-			log_message(LOG_INFO, "Child (PID %d) failed to terminate after kill", pid);
+			log_message(LOG_INFO, "Script %s child (PID %d) failed to terminate after kill", vscript->sname, pid);
 			sig_num = SIGKILL;
 			timeout = 10;	/* Give it longer to terminate */
 		}
@@ -1028,18 +1098,19 @@ vrrp_script_child_thread(thread_t * thread)
 			 * or we don't have permission. If we can't kill it, there is no point trying again. */
 			if (kill(-pid, sig_num)) {
 				if (errno == ESRCH) {
-					/* The process does not exist; presumably it
-					 * has just terminated. We should get
-					 * notification of it's termination, so allow
-					 * that to handle it. */
-					timeout = 1;
+					/* The process does not exist, and we should
+					 * have reaped its exit status, otherwise it
+					 * would exist as a zombie process. */
+					log_message(LOG_INFO, "Script %s child (PID %d) lost", vscript->sname, THREAD_CHILD_PID(thread));
+					vscript->state = SCRIPT_STATE_IDLE;
+					timeout = 0;
 				} else {
-					log_message(LOG_INFO, "kill -%d of process %s(%d) with new state %d failed with errno %d", sig_num, vscript->script.args[0], pid, vscript->state, errno);
+					log_message(LOG_INFO, "kill -%d of process %s(%d) with new state %u failed with errno %d", sig_num, vscript->script.args[0], pid, vscript->state, errno);
 					timeout = 1000;
 				}
 			}
 		} else if (vscript->state != SCRIPT_STATE_IDLE) {
-			log_message(LOG_INFO, "Child thread pid %d timeout with unknown script state %d", pid, vscript->state);
+			log_message(LOG_INFO, "Script %s child thread pid %d timeout with unknown script state %u", vscript->sname, pid, vscript->state);
 			timeout = 10;	/* We need some timeout */
 		}
 
@@ -1183,7 +1254,7 @@ vrrp_arpna_send(vrrp_t *vrrp, list l, timeval_t *n)
 }
 
 int
-vrrp_arp_thread(thread_t *thread)
+vrrp_arp_thread(thread_ref_t thread)
 {
 	vrrp_t *vrrp;
 	element e;
@@ -1227,7 +1298,7 @@ dump_threads(void)
 	char time_buf[26];
 	element e;
 	vrrp_t *vrrp;
-	char *file_name;
+	const char *file_name;
 
 	file_name = make_file_name("/tmp/thread_dump.dat",
 					"vrrp",
@@ -1238,7 +1309,7 @@ dump_threads(void)
 #endif
 					global_data->instance_name);
 	fp = fopen_safe(file_name, "a");
-	FREE(file_name);
+	FREE_CONST(file_name);
 
 	set_time_now();
 	ctime_r(&time_now.tv_sec, time_buf);
@@ -1257,8 +1328,7 @@ dump_threads(void)
 				vrrp->state == VRRP_STATE_BACK ? "BACKUP" :
 				vrrp->state == VRRP_STATE_MAST ? "MASTER" :
 				vrrp->state == VRRP_STATE_FAULT ? "FAULT" :
-				vrrp->state == VRRP_STATE_STOP ? "STOP" :
-				vrrp->state == VRRP_DISPATCHER ? "DISPATCHER" : "unknown");
+				vrrp->state == VRRP_STATE_STOP ? "STOP" : "unknown");
 	}
 	fclose(fp);
 }

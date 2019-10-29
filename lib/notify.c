@@ -44,6 +44,7 @@
 #include "keepalived_magic.h"
 #include "scheduler.h"
 
+
 /* Default user/group for script execution */
 uid_t default_script_uid;
 gid_t default_script_gid;
@@ -86,14 +87,14 @@ set_privileges(uid_t uid, gid_t gid)
 	if (gid) {
 		retval = setgid(gid);
 		if (retval < 0) {
-			log_message(LOG_ALERT, "Couldn't setgid: %d (%m)", gid);
+			log_message(LOG_ALERT, "Couldn't setgid: %u (%m)", gid);
 			return true;
 		}
 
 		/* Clear any extra supplementary groups */
 		retval = setgroups(1, &gid);
 		if (retval < 0) {
-			log_message(LOG_ALERT, "Couldn't setgroups: %d (%m)", gid);
+			log_message(LOG_ALERT, "Couldn't setgroups: %u (%m)", gid);
 			return true;
 		}
 	}
@@ -101,7 +102,7 @@ set_privileges(uid_t uid, gid_t gid)
 	if (uid) {
 		retval = setuid(uid);
 		if (retval < 0) {
-			log_message(LOG_ALERT, "Couldn't setuid: %d (%m)", uid);
+			log_message(LOG_ALERT, "Couldn't setuid: %u (%m)", uid);
 			return true;
 		}
 	}
@@ -113,7 +114,7 @@ set_privileges(uid_t uid, gid_t gid)
 	return false;
 }
 
-char *
+const char *
 cmd_str_r(const notify_script_t *script, char *buf, size_t len)
 {
 	char *str_p;
@@ -130,17 +131,25 @@ cmd_str_r(const notify_script_t *script, char *buf, size_t len)
 
 		if (i)
 			*str_p++ = ' ';
-		*str_p++ = '\'';
+
+		/* Allow special case of bash script which is redirection only to
+		 * test for file existence. */
+		if (i || (script->args[i][0] != '<' && script->args[i][0] != '>'))
+			*str_p++ = '\'';
+
 		strcpy(str_p, script->args[i]);
 		str_p += str_len;
-		*str_p++ = '\'';
+
+		/* Close opening ' if we added one */
+		if (i || (script->args[i][0] != '<' && script->args[i][0] != '>'))
+			*str_p++ = '\'';
 	}
 	*str_p = '\0';
 
 	return buf;
 }
 
-char *
+const char *
 cmd_str(const notify_script_t *script)
 {
 	size_t len;
@@ -157,11 +166,12 @@ cmd_str(const notify_script_t *script)
 
 /* Execute external script/program to process FIFO */
 static pid_t
-notify_fifo_exec(thread_master_t *m, int (*func) (thread_t *), void *arg, notify_script_t *script)
+notify_fifo_exec(thread_master_t *m, int (*func) (thread_ref_t), void *arg, notify_script_t *script)
 {
 	pid_t pid;
 	int retval;
-	char *scr;
+	const char *scr;
+	union non_const_args args;
 
 	pid = local_fork();
 
@@ -184,11 +194,12 @@ notify_fifo_exec(thread_master_t *m, int (*func) (thread_t *), void *arg, notify
 	setpgid(0, 0);
 	set_privileges(script->uid, script->gid);
 
-	if (script->flags | SC_EXECABLE) {
+	if (script->flags & SC_EXECABLE) {
 		/* If keepalived dies, we want the script to die */
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-		execve(script->args[0], script->args, environ);
+		args.args = script->args;	/* Note: we are casting away constness, since execve parameter type is wrong */
+		execve(script->args[0], args.execve_args, environ);
 
 		if (errno == EACCES)
 			log_message(LOG_INFO, "FIFO notify script %s is not executable", script->args[0]);
@@ -213,7 +224,7 @@ notify_fifo_exec(thread_master_t *m, int (*func) (thread_t *), void *arg, notify
 }
 
 static void
-fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_t *), const char *type)
+fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
 {
 	int ret;
 	int sav_errno;
@@ -221,9 +232,12 @@ fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_t *), const char *type)
 	if (fifo->name) {
 		sav_errno = 0;
 
-		if (!(ret = mkfifo(fifo->name, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)))
+		if (!(ret = mkfifo(fifo->name, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
 			fifo->created_fifo = true;
-		else {
+
+			if (chown(fifo->name, fifo->uid, fifo->gid))
+				log_message(LOG_INFO, "Failed to set uid:gid for fifo %s", fifo->name);
+		} else {
 			sav_errno = errno;
 
 			if (sav_errno != EEXIST)
@@ -246,14 +260,14 @@ fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_t *), const char *type)
 		}
 
 		if (fifo->fd == -1) {
-			FREE(fifo->name);
+			FREE_CONST(fifo->name);
 			fifo->name = NULL;
 		}
 	}
 }
 
 void
-notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, int (*script_exit)(thread_t *), const char *type)
+notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
 {
 	/* Open the global FIFO if specified */
 	if (global_fifo->name)
@@ -285,14 +299,13 @@ notify_fifo_close(notify_fifo_t* global_fifo, notify_fifo_t* fifo)
 }
 
 /* perform a system call */
-static void system_call(const notify_script_t *) __attribute__ ((noreturn));
-
-static void
+static void __attribute__ ((noreturn))
 system_call(const notify_script_t* script)
 {
 	char *command_line = NULL;
-	char *str;
+	const char *str;
 	int retval;
+	union non_const_args args;
 
 	if (set_privileges(script->uid, script->gid))
 		exit(0);
@@ -305,7 +318,8 @@ system_call(const notify_script_t* script)
 		/* If keepalived dies, we want the script to die */
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-		execve(script->args[0], script->args, environ);
+		args.args = script->args;	/* Note: we are casting away constness, since execve parameter type is wrong */
+		execve(script->args[0], args.execve_args, environ);
 
 		/* error */
 		log_message(LOG_ALERT, "Error exec-ing command '%s', error %d: %m", script->args[0], errno);
@@ -377,7 +391,7 @@ notify_exec(const notify_script_t *script)
 }
 
 int
-system_call_script(thread_master_t *m, int (*func) (thread_t *), void * arg, unsigned long timer, notify_script_t* script)
+system_call_script(thread_master_t *m, int (*func) (thread_ref_t), void * arg, unsigned long timer, notify_script_t* script)
 {
 	pid_t pid;
 
@@ -412,7 +426,7 @@ system_call_script(thread_master_t *m, int (*func) (thread_t *), void * arg, uns
 }
 
 int
-child_killed_thread(thread_t *thread)
+child_killed_thread(thread_ref_t thread)
 {
 	thread_master_t *m = thread->master;
 
@@ -467,7 +481,7 @@ script_killall(thread_master_t *m, int signo, bool requeue)
 }
 
 static bool
-is_executable(struct stat *buf, uid_t uid, gid_t gid)
+is_executable(const struct stat *buf, uid_t uid, gid_t gid)
 {
 	return (uid == 0 && buf->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) ||
 	       (uid == buf->st_uid && buf->st_mode & S_IXUSR) ||
@@ -477,19 +491,29 @@ is_executable(struct stat *buf, uid_t uid, gid_t gid)
 }
 
 static void
-replace_cmd_name(notify_script_t *script, char *new_path)
+replace_cmd_name(notify_script_t *script, const char *new_path)
 {
 	size_t len;
-	char **wp = &script->args[1];
+	const char * const *wp = &script->args[1];
 	size_t num_words = 1;
 	char **params;
 	char **word_ptrs;
 	char *words;
+	/* Avoid gcc warning: to be safe all intermediate pointers in cast from ‘char **’
+	 *   to ‘const char **’ must be ‘const’ qualified
+	 * What we want to assign to is a pointer (therefore non const) to an array of pointers
+	 *   which can be modified, therefore non-const, to const strings, i.e. const char **;
+	 *   but if assign a char ** to a const char ** we get the above warning
+	 */
+	union {
+		char **params;
+		const char **cparams;
+	} args;
 
 	len = strlen(new_path) + 1;
 	while (*wp)
 		len += strlen(*wp++) + 1;
-	num_words = ((char **)script->args[0] - &script->args[0]) - 1;
+	num_words = (script->args[0] - (const char *)&script->args[0]) - 1;
 
 	params = word_ptrs = MALLOC((num_words + 1) * sizeof(char *) + len);
 	words = (char *)&params[num_words + 1];
@@ -507,8 +531,9 @@ replace_cmd_name(notify_script_t *script, char *new_path)
 	}
 	*word_ptrs = NULL;
 
-	FREE(script->args);
-	script->args = params;
+	FREE_CONST(script->args);
+	args.params = params;
+	script->args = args.cparams;
 }
 
 /* The following function is essentially __execve() from glibc */
@@ -518,7 +543,7 @@ find_path(notify_script_t *script)
 	size_t filename_len;
 	size_t file_len;
 	size_t path_len;
-	char *file = script->args[0];
+	const char *file = script->args[0];
 	struct stat buf;
 	int ret;
 	int ret_val = ENOENT;
@@ -571,13 +596,18 @@ find_path(notify_script_t *script)
 	/* Set file access to the relevant uid/gid */
 	if (script->gid) {
 		if (setegid(script->gid)) {
-			log_message(LOG_INFO, "Unable to set egid to %d (%m)", script->gid);
+			log_message(LOG_INFO, "Unable to set egid to %u (%m)", script->gid);
 			ret_val = EACCES;
 			goto exit1;
 		}
 
 		/* Get our supplementary groups */
 		sgid_num = getgroups(0, NULL);
+		if (sgid_num == -1) {
+			log_message(LOG_INFO, "Unable to get number of supplementary gids (%m)");
+			ret_val = EACCES;
+			goto exit;
+		}
 		sgid_list = MALLOC(((size_t)sgid_num + 1) * sizeof(gid_t));
 		sgid_num = getgroups(sgid_num, sgid_list);
 		sgid_list[sgid_num++] = 0;
@@ -590,15 +620,13 @@ find_path(notify_script_t *script)
 		}
 	}
 	if (script->uid && seteuid(script->uid)) {
-		log_message(LOG_INFO, "Unable to set euid to %d (%m)", script->uid);
+		log_message(LOG_INFO, "Unable to set euid to %u (%m)", script->uid);
 		ret_val = EACCES;
 		goto exit;
 	}
 
 	for (p = path; ; p = subp)
 	{
-		char buffer[path_len + file_len + 1];
-
 		subp = strchrnul (p, ':');
 
 		/* PATH is larger than PATH_MAX and thus potentially larger than
@@ -615,6 +643,7 @@ find_path(notify_script_t *script)
 		}
 
 		/* Use the current path entry, plus a '/' if nonempty, plus the file to execute. */
+		char *buffer = MALLOC(path_len + file_len + 1);
 		char *pend = mempcpy (buffer, p, (size_t)(subp - p));
 		*pend = '/';
 		memcpy (pend + (p < subp), file, file_len + 1);
@@ -634,9 +663,11 @@ find_path(notify_script_t *script)
 
 				ret_val = 0;
 				got_eacces = false;
+				FREE(buffer);
 				goto exit;
 			}
 		}
+		FREE(buffer);
 
 		switch (errno)
 		{
@@ -699,14 +730,14 @@ exit1:
 }
 
 static int
-check_security(char *filename, bool script_security)
+check_security(const char *filename, bool using_script_security)
 {
-	char *next;
+	const char *next;
 	char *slash;
-	char sav;
 	int ret;
 	struct stat buf;
 	int flags = 0;
+	char *filename_copy;
 
 	next = filename;
 	while (next) {
@@ -722,15 +753,14 @@ check_security(char *filename, bool script_security)
 			/* We want to check '/' for first time around */
 			if (slash == filename)
 				slash++;
-			sav = *slash;
-			*slash = 0;
+			filename_copy = STRNDUP(filename, slash - filename);
 		}
 
-		ret = fstatat(0, filename, &buf, AT_SYMLINK_NOFOLLOW);
+		ret = fstatat(0, slash ? filename_copy : filename, &buf, AT_SYMLINK_NOFOLLOW);
 
 		/* Restore the full path name */
 		if (slash)
-			*slash = sav;
+			FREE(filename_copy);
 
 		if (ret) {
 			if (errno == EACCES || errno == ELOOP || errno == ENOENT || errno == ENOTDIR)
@@ -756,9 +786,9 @@ check_security(char *filename, bool script_security)
 		      S_ISREG(buf.st_mode)) &&			/* This is a file */
 		     ((buf.st_gid && buf.st_mode & S_IWGRP) ||	/* Group is not root and group write permission */
 		      buf.st_mode & S_IWOTH))) {		/* World has write permission */
-			log_message(LOG_INFO, "Unsafe permissions found for script '%s'%s.", filename, script_security ? " - disabling" : "");
+			log_message(LOG_INFO, "Unsafe permissions found for script '%s'%s.", filename, using_script_security ? " - disabling" : "");
 			flags |= SC_INSECURE;
-			return flags | (script_security ? SC_INHIBIT : 0);
+			return flags | (using_script_security ? SC_INHIBIT : 0);
 		}
 	}
 
@@ -812,11 +842,11 @@ check_script_secure(notify_script_t *script,
 
 	if ((script->gid && setegid(script->gid)) ||
 	    (script->uid && seteuid(script->uid))) {
-		log_message(LOG_INFO, "Unable to set uid:gid %d:%d for script %s - disabling", script->uid, script->gid, script->args[0]);
+		log_message(LOG_INFO, "Unable to set uid:gid %u:%u for script %s - disabling", script->uid, script->gid, script->args[0]);
 
 		if ((script->uid && seteuid(old_uid)) ||
 		    (script->gid && setegid(old_gid)))
-			log_message(LOG_INFO, "Unable to restore uid:gid %d:%d after script %s", script->uid, script->gid, script->args[0]);
+			log_message(LOG_INFO, "Unable to restore uid:gid %u:%u after script %s", script->uid, script->gid, script->args[0]);
 
 		return SC_INHIBIT;
 	}
@@ -827,7 +857,7 @@ check_script_secure(notify_script_t *script,
 
 	if ((script->gid && setegid(old_gid)) ||
 	    (script->uid && seteuid(old_uid)))
-		log_message(LOG_INFO, "Unable to restore uid:gid %d:%d after checking script %s", script->uid, script->gid, script->args[0]);
+		log_message(LOG_INFO, "Unable to restore uid:gid %u:%u after checking script %s", script->uid, script->gid, script->args[0]);
 
 	if (!new_path)
 	{
@@ -848,7 +878,7 @@ check_script_secure(notify_script_t *script,
 		 * alter their behaviour based on what they are called */
 		if (strcmp(orig_file_part + 1, new_file_part + 1)) {
 			real_file_path = new_path;
-			new_path = MALLOC(new_file_part - real_file_path + 1 + strlen(orig_file_part + 1) + 1);
+			new_path = MALLOC(new_file_part - real_file_path + 1 + strlen(orig_file_part) - 1 + 1);
 			strncpy(new_path, real_file_path, new_file_part + 1 - real_file_path);
 			strcpy(new_path + (new_file_part + 1 - real_file_path), orig_file_part + 1);
 
@@ -893,7 +923,7 @@ check_script_secure(notify_script_t *script,
 		    (file_buf.st_gid == 0 && (file_buf.st_mode & S_IXGRP) && (file_buf.st_mode & S_ISGID)))
 			need_script_protection = true;
 	} else
-		log_message(LOG_INFO, "WARNING - script '%s' is not executable for uid:gid %d:%d - disabling.", script->args[0], script->uid, script->gid);
+		log_message(LOG_INFO, "WARNING - script '%s' is not executable for uid:gid %u:%u - disabling.", script->args[0], script->uid, script->gid);
 
 	/* Default to execable */
 	script->flags |= SC_EXECABLE;
@@ -960,7 +990,7 @@ set_pwnam_buf_len(void)
 		getpwnam_buf_len = (size_t)buf_len;
 }
 
-bool
+static bool
 set_uid_gid(const char *username, const char *groupname, uid_t *uid_p, gid_t *gid_p, bool default_user)
 {
 	uid_t uid;
@@ -971,48 +1001,53 @@ set_uid_gid(const char *username, const char *groupname, uid_t *uid_p, gid_t *gi
 	struct group *grp_p;
 	int ret;
 	bool using_default_default_user = false;
+	char *buf;
 
 	if (!getpwnam_buf_len)
 		set_pwnam_buf_len();
 
-	{
-		char buf[getpwnam_buf_len];
+	buf = MALLOC(getpwnam_buf_len);
 
-		if (default_user && !username) {
-			using_default_default_user = true;
-			username = "keepalived_script";
-		}
-
-		if ((ret = getpwnam_r(username, &pwd, buf, sizeof(buf), &pwd_p))) {
-			log_message(LOG_INFO, "Unable to resolve %sscript username '%s' - ignoring", default_user ? "default " : "", username);
-			return true;
-		}
-		if (!pwd_p) {
-			if (using_default_default_user)
-				log_message(LOG_INFO, "WARNING - default user '%s' for script execution does not exist - please create.", username);
-			else
-				log_message(LOG_INFO, "%script user '%s' does not exist", default_user ? "Default s" : "S", username);
-			return true;
-		}
-
-		uid = pwd.pw_uid;
-		gid = pwd.pw_gid;
-
-		if (groupname) {
-			if ((ret = getgrnam_r(groupname, &grp, buf, sizeof(buf), &grp_p))) {
-				log_message(LOG_INFO, "Unable to resolve %sscript group name '%s' - ignoring", default_user ? "default " : "", groupname);
-				return true;
-			}
-			if (!grp_p) {
-				log_message(LOG_INFO, "%script group '%s' does not exist", default_user ? "Default s" : "S", groupname);
-				return true;
-			}
-			gid = grp.gr_gid;
-		}
-
-		*uid_p = uid;
-		*gid_p = gid;
+	if (default_user && !username) {
+		using_default_default_user = true;
+		username = "keepalived_script";
 	}
+
+	if ((ret = getpwnam_r(username, &pwd, buf, getpwnam_buf_len, &pwd_p))) {
+		log_message(LOG_INFO, "Unable to resolve %sscript username '%s' - ignoring", default_user ? "default " : "", username);
+		FREE(buf);
+		return true;
+	}
+	if (!pwd_p) {
+		if (using_default_default_user)
+			log_message(LOG_INFO, "WARNING - default user '%s' for script execution does not exist - please create.", username);
+		else
+			log_message(LOG_INFO, "%script user '%s' does not exist", default_user ? "Default s" : "S", username);
+		FREE(buf);
+		return true;
+	}
+
+	uid = pwd.pw_uid;
+	gid = pwd.pw_gid;
+
+	if (groupname) {
+		if ((ret = getgrnam_r(groupname, &grp, buf, getpwnam_buf_len, &grp_p))) {
+			log_message(LOG_INFO, "Unable to resolve %sscript group name '%s' - ignoring", default_user ? "default " : "", groupname);
+			FREE(buf);
+			return true;
+		}
+		if (!grp_p) {
+			log_message(LOG_INFO, "%script group '%s' does not exist", default_user ? "Default s" : "S", groupname);
+			FREE(buf);
+			return true;
+		}
+		gid = grp.gr_gid;
+	}
+
+	*uid_p = uid;
+	*gid_p = gid;
+
+	FREE(buf);
 
 	return false;
 }
@@ -1037,10 +1072,10 @@ set_default_script_user(const char *username, const char *groupname)
 }
 
 bool
-set_script_uid_gid(vector_t *strvec, unsigned keyword_offset, uid_t *uid_p, gid_t *gid_p)
+set_script_uid_gid(const vector_t *strvec, unsigned keyword_offset, uid_t *uid_p, gid_t *gid_p)
 {
-	char *username;
-	char *groupname;
+	const char *username;
+	const char *groupname;
 
 	username = strvec_slot(strvec, keyword_offset);
 	if (vector_size(strvec) > keyword_offset + 1)
@@ -1052,14 +1087,18 @@ set_script_uid_gid(vector_t *strvec, unsigned keyword_offset, uid_t *uid_p, gid_
 }
 
 void
-set_script_params_array(vector_t *strvec, notify_script_t *script, unsigned extra_params)
+set_script_params_array(const vector_t *strvec, notify_script_t *script, unsigned extra_params)
 {
 	unsigned num_words = 0;
 	size_t len = 0;
 	char **word_ptrs;
 	char *words;
-	vector_t *strvec_qe = NULL;
+	const vector_t *strvec_qe = NULL;
 	unsigned i;
+	union {		/* See replace_cmd_line for details of why this is necessary */
+		char **params;
+		const char **cparams;
+	} args;
 
 	/* Count the number of words, and total string length */
 	if (vector_size(strvec) >= 2)
@@ -1073,8 +1112,10 @@ set_script_params_array(vector_t *strvec, notify_script_t *script, unsigned extr
 		len += strlen(strvec_slot(strvec_qe, i)) + 1;
 
 	/* Allocate memory for pointers to words and words themselves */
-	script->args = word_ptrs = MALLOC((num_words + extra_params + 1) * sizeof(char *) + len);
+	word_ptrs = MALLOC((num_words + extra_params + 1) * sizeof(char *) + len);
 	words = (char *)word_ptrs + (num_words + extra_params + 1) * sizeof(char *);
+	args.params = word_ptrs;
+	script->args = args.cparams;
 
 	/* Set up pointers to words, and copy the words */
 	for (i = 0; i < num_words; i++) {
@@ -1093,7 +1134,7 @@ notify_script_t*
 notify_script_init(int extra_params, const char *type)
 {
 	notify_script_t *script = MALLOC(sizeof(notify_script_t));
-	vector_t *strvec_qe;
+	const vector_t *strvec_qe;
 
 	/* We need to reparse the command line, allowing for quoted and escaped strings */
 	strvec_qe = alloc_strvec_quoted_escaped(NULL);
@@ -1106,7 +1147,7 @@ notify_script_init(int extra_params, const char *type)
 
 	set_script_params_array(strvec_qe, script, extra_params);
 	if (!script->args) {
-		log_message(LOG_INFO, "Unable to parse script '%s' - ignoring", FMT_STR_VSLOT(strvec_qe, 1));
+		log_message(LOG_INFO, "Unable to parse script '%s' - ignoring", strvec_slot(strvec_qe, 1));
 		FREE(script);
 		free_strvec(strvec_qe);
 		return NULL;
@@ -1117,7 +1158,7 @@ notify_script_init(int extra_params, const char *type)
 	if (vector_size(strvec_qe) > 2) {
 		if (set_script_uid_gid(strvec_qe, 2, &script->uid, &script->gid)) {
 			log_message(LOG_INFO, "Invalid user/group for %s script %s - ignoring", type, script->args[0]);
-			FREE(script->args);
+			FREE_CONST(script->args);
 			FREE(script);
 			free_strvec(strvec_qe);
 			return NULL;
@@ -1126,7 +1167,7 @@ notify_script_init(int extra_params, const char *type)
 	else {
 		if (set_default_script_user(NULL, NULL)) {
 			log_message(LOG_INFO, "Failed to set default user for %s script %s - ignoring", type, script->args[0]);
-			FREE(script->args);
+			FREE_CONST(script->args);
 			FREE(script);
 			free_strvec(strvec_qe);
 			return NULL;
@@ -1142,7 +1183,7 @@ notify_script_init(int extra_params, const char *type)
 }
 
 void
-add_script_param(notify_script_t *script, char *param)
+add_script_param(notify_script_t *script, const char *param)
 {
 	/* We store the args as an array of pointers to the args, terminated
 	 * by a NULL pointer, followed by the null terminated strings themselves
@@ -1167,8 +1208,8 @@ notify_resource_release(void)
 	}
 }
 
-bool
-notify_script_compare(notify_script_t *a, notify_script_t *b)
+bool __attribute__ ((pure))
+notify_script_compare(const notify_script_t *a, const notify_script_t *b)
 {
 	int i;
 

@@ -52,10 +52,10 @@ typedef struct _ssl_data {
 	int				strong_check;
 	SSL_CTX				*ctx;
 	const SSL_METHOD		*meth;
-	char				*password;
-	char				*cafile;
-	char				*certfile;
-	char				*keyfile;
+	const char			*password;
+	const char			*cafile;
+	const char			*certfile;
+	const char			*keyfile;
 } ssl_data_t;
 
 /* Real Server definition */
@@ -66,6 +66,13 @@ typedef struct _real_server {
 	int				pweight;	/* previous weight
 							 * used for reloading */
 	unsigned			forwarding_method; /* NAT/TUN/DR */
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	int				tun_type;	/* tunnel type */
+	unsigned			tun_port;	/* tunnel port for gue tunnels */
+#ifdef _HAVE_IPVS_TUN_CSUM_
+	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
+#endif
+#endif
 	uint32_t			u_threshold;   /* Upper connection limit. */
 	uint32_t			l_threshold;   /* Lower connection limit. */
 	int				inhibit;	/* Set weight to 0 instead of removing
@@ -85,7 +92,7 @@ typedef struct _real_server {
 	unsigned			num_failed_checkers;/* Number of failed checkers */
 	bool				set;		/* in the IPVS table */
 	bool				reloaded;	/* active state was copied from old config while reloading */
-	char				*virtualhost;	/* Default virtualhost for HTTP and SSL health checkers */
+	const char			*virtualhost;	/* Default virtualhost for HTTP and SSL health checkers */
 #if defined(_WITH_SNMP_CHECKER_) && defined(_WITH_LVS_)
 	/* Statistics */
 	uint32_t			activeconns;	/* active connections */
@@ -130,7 +137,7 @@ typedef struct _virtual_server_group {
 
 /* Virtual Server definition */
 typedef struct _virtual_server {
-	char				*vsgname;
+	const char			*vsgname;
 	virtual_server_group_t		*vsg;
 	struct sockaddr_storage		addr;
 	uint32_t			vfwmark;
@@ -147,9 +154,16 @@ typedef struct _virtual_server {
 	char				pe_name[IP_VS_PENAME_MAXLEN];
 #endif
 	unsigned			forwarding_method;
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	int				tun_type;	/* tunnel type */
+	unsigned			tun_port;	/* tunnel port for gue tunnels */
+#ifdef _HAVE_IPVS_TUN_CSUM_
+	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
+#endif
+#endif
 	uint32_t			persistence_granularity;
 #endif
-	char				*virtualhost;	/* Default virtualhost for HTTP and SSL healthcheckers
+	const char			*virtualhost;	/* Default virtualhost for HTTP and SSL healthcheckers
 							   if not set on real servers */
 	int				weight;
 	list				rs;
@@ -190,45 +204,16 @@ typedef struct _check_data {
 #ifdef _WITH_BFD_
 	list				track_bfds;	/* list of checker_tracked_bfd_t */
 #endif
+	unsigned			num_checker_fd_required;
+	unsigned			num_smtp_alert;
 } check_data_t;
 
 /* macro utility */
 #define ISALIVE(S)		((S)->alive)
 #define SET_ALIVE(S)		((S)->alive = true)
 #define UNSET_ALIVE(S)		((S)->alive = false)
-#define FMT_RS(R, V) (inet_sockaddrtotrio (&(R)->addr, (V)->service_type))
+#define FMT_RS(R, V) (format_rs(R, V))
 #define FMT_VS(V) (format_vs((V)))
-
-#define VS_SCRIPT_ISEQ(XS,YS) \
-	(!(XS) == !(YS) && \
-	 (!(XS) || \
-	  (!notify_script_compare((XS), (YS)) && \
-	   (XS)->uid == (YS)->uid && \
-	   (XS)->gid == (YS)->gid)))
-
-#define VS_ISEQ(X,Y)	(sockstorage_equal(&(X)->addr,&(Y)->addr)			&&\
-			 (X)->vfwmark		      == (Y)->vfwmark			&&\
-			 (X)->af		      == (Y)->af			&&\
-			 (X)->service_type	      == (Y)->service_type		&&\
-			 (X)->forwarding_method       == (Y)->forwarding_method		&&\
-			 (X)->persistence_granularity == (Y)->persistence_granularity	&&\
-			 VS_SCRIPT_ISEQ((X)->notify_quorum_up, (Y)->notify_quorum_up)	&& \
-			 VS_SCRIPT_ISEQ((X)->notify_quorum_down, (Y)->notify_quorum_down) && \
-			 !strcmp((X)->sched, (Y)->sched)				&&\
-			 (X)->persistence_timeout     == (Y)->persistence_timeout	&&\
-			 !(X)->vsgname		      == !(Y)->vsgname			&& \
-			 (!(X)->vsgname || !strcmp((X)->vsgname, (Y)->vsgname))		&& \
-			 !(X)->virtualhost	      == !(Y)->virtualhost		&& \
-			 (!(X)->virtualhost || !strcmp((X)->virtualhost, (Y)->virtualhost)))
-
-#define VSGE_ISEQ(X,Y)	(sockstorage_equal(&(X)->addr,&(Y)->addr) &&	\
-			 (X)->range     == (Y)->range &&		\
-			 (X)->vfwmark   == (Y)->vfwmark)
-
-#define RS_ISEQ(X,Y)	(sockstorage_equal(&(X)->addr,&(Y)->addr)			&& \
-			 (X)->forwarding_method       == (Y)->forwarding_method		&& \
-			 !(X)->virtualhost	      == !(Y)->virtualhost		&& \
-			 (!(X)->virtualhost || !strcmp((X)->virtualhost, (Y)->virtualhost)))
 
 #ifndef IP_VS_SVC_F_SCHED_MH_PORT
 #define IP_VS_SVC_F_SCHED_MH_PORT IP_VS_SVC_F_SCHED_SH_PORT
@@ -242,17 +227,19 @@ extern check_data_t *check_data;
 extern check_data_t *old_check_data;
 
 /* prototypes */
-extern ssl_data_t *alloc_ssl(void);
+extern ssl_data_t *alloc_ssl(void) __attribute((malloc));
 extern void free_ssl(void);
-extern void alloc_vsg(char *);
-extern void alloc_vsg_entry(vector_t *);
-extern void alloc_vs(char *, char *);
-extern void alloc_rs(char *, char *);
-extern void alloc_ssvr(char *, char *);
+extern void alloc_vsg(const char *);
+extern void alloc_vsg_entry(const vector_t *);
+extern void alloc_vs(const char *, const char *);
+extern void alloc_rs(const char *, const char *);
+extern void alloc_ssvr(const char *, const char *);
 extern check_data_t *alloc_check_data(void);
 extern void free_check_data(check_data_t *);
-extern void dump_check_data(FILE *, check_data_t *);
-extern char *format_vs (virtual_server_t *);
+extern void dump_data_check(FILE *);
+extern const char *format_vs (const virtual_server_t *);
+extern const char *format_vsge (const virtual_server_group_entry_t *);
+extern const char *format_rs(const real_server_t *, const virtual_server_t *);
 extern bool validate_check_config(void);
 
 #endif

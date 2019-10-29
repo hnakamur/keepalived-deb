@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include <unistd.h>
+#include <inttypes.h>
 
 #include "ipwrapper.h"
 #include "check_api.h"
@@ -36,16 +37,63 @@
 #include "smtp.h"
 #include "check_daemon.h"
 
+static bool __attribute((pure))
+vs_iseq(const virtual_server_t *vs_a, const virtual_server_t *vs_b)
+{
+	if (!vs_a->vsgname != !vs_b->vsgname)
+		return false;
+
+	if (vs_a->vsgname) {
+		/* Should we check the vsg entries match? */
+		if (inet_sockaddrport(&vs_a->addr) != inet_sockaddrport(&vs_b->addr))
+			return false;
+
+		return !strcmp(vs_a->vsgname, vs_b->vsgname);
+	} else if (vs_a->af != vs_b->af)
+		return false;
+	else if (vs_a->vfwmark) {
+		if (vs_a->vfwmark != vs_b->vfwmark)
+			return false;
+	} else {
+		if (vs_a->service_type != vs_b->service_type ||
+		    !sockstorage_equal(&vs_a->addr, &vs_b->addr))
+			return false;
+	}
+
+	return true;
+}
+
+static bool __attribute((pure))
+vsge_iseq(const virtual_server_group_entry_t *vsge_a, const virtual_server_group_entry_t *vsge_b)
+{
+	if (vsge_a->is_fwmark != vsge_b->is_fwmark)
+		return false;
+
+	if (vsge_a->is_fwmark)
+		return vsge_a->vfwmark == vsge_b->vfwmark;
+
+	if (!sockstorage_equal(&vsge_a->addr, &vsge_b->addr) ||
+	    vsge_a->range != vsge_b->range)
+		return false;
+
+	return true;
+}
+
+static bool __attribute((pure))
+rs_iseq(const real_server_t *rs_a, const real_server_t *rs_b)
+{
+	return sockstorage_equal(&rs_a->addr, &rs_b->addr);
+}
+
 /* Returns the sum of all alive RS weight in a virtual server. */
-static unsigned long
+static unsigned long __attribute__ ((pure))
 weigh_live_realservers(virtual_server_t * vs)
 {
 	element e;
 	real_server_t *svr;
 	long count = 0;
 
-	for (e = LIST_HEAD(vs->rs); e; ELEMENT_NEXT(e)) {
-		svr = ELEMENT_DATA(e);
+	LIST_FOREACH(vs->rs, svr, e) {
 		if (ISALIVE(svr))
 			count += svr->weight;
 	}
@@ -55,29 +103,28 @@ weigh_live_realservers(virtual_server_t * vs)
 static void
 notify_fifo_vs(virtual_server_t* vs)
 {
-	char *state = vs->quorum_state_up ? "UP" : "DOWN";
+	const char *state = vs->quorum_state_up ? "UP" : "DOWN";
 	size_t size;
 	char *line;
-	char *vs_str;
+	const char *vs_str;
 
 	if (global_data->notify_fifo.fd == -1 &&
 	    global_data->lvs_notify_fifo.fd == -1)
 		return;
 
 	vs_str = FMT_VS(vs);
-	size = strlen(vs_str) + strlen(state) + 6;
-	line = MALLOC(size);
+	size = strlen(vs_str) + strlen(state) + 5;
+	line = MALLOC(size + 1);
 	if (!line)
 		return;
 
-	snprintf(line, size, "VS %s %s\n", vs_str, state);
+	snprintf(line, size + 1, "VS %s %s\n", vs_str, state);
 
-	if (global_data->notify_fifo.fd != -1) {
-		if (write(global_data->notify_fifo.fd, line, size - 1) == -1) {}
-	}
-	if (global_data->lvs_notify_fifo.fd != -1) {
-		if (write(global_data->lvs_notify_fifo.fd, line, size - 1) == -1) {}
-	}
+	if (global_data->notify_fifo.fd != -1)
+		if (write(global_data->notify_fifo.fd, line, size) == -1) {}
+
+	if (global_data->lvs_notify_fifo.fd != -1)
+		if (write(global_data->lvs_notify_fifo.fd, line, size) == -1) {}
 
 	FREE(line);
 }
@@ -85,35 +132,30 @@ notify_fifo_vs(virtual_server_t* vs)
 static void
 notify_fifo_rs(virtual_server_t* vs, real_server_t* rs)
 {
-	char *state = rs->alive ? "UP" : "DOWN";
+	const char *state = rs->alive ? "UP" : "DOWN";
 	size_t size;
 	char *line;
-	char *str;
-	char *rs_str;
-	char *vs_str;
+	const char *rs_str;
+	const char *vs_str;
 
 	if (global_data->notify_fifo.fd == -1 &&
 	    global_data->lvs_notify_fifo.fd == -1)
 		return;
 
-	str = FMT_RS(rs, vs);
-	rs_str = MALLOC(strlen(str)+1);
-	strcpy(rs_str, str);
+	rs_str = FMT_RS(rs, vs);
 	vs_str = FMT_VS(vs);
-	size = strlen(rs_str) + strlen(vs_str) + strlen(state) + 7;
-	line = MALLOC(size);
+	size = strlen(rs_str) + strlen(vs_str) + strlen(state) + 6;
+	line = MALLOC(size + 1);
 	if (!line)
 		return;
 
-	snprintf(line, size, "RS %s %s %s\n", rs_str, vs_str, state);
-	FREE(rs_str);
+	snprintf(line, size + 1, "RS %s %s %s\n", rs_str, vs_str, state);
 
-	if (global_data->notify_fifo.fd != -1) {
-		if (write(global_data->notify_fifo.fd, line, size - 1) == - 1) {}
-	}
-	if (global_data->lvs_notify_fifo.fd != -1) {
-		if (write(global_data->lvs_notify_fifo.fd, line, size - 1) == -1) {}
-	}
+	if (global_data->notify_fifo.fd != -1)
+		if (write(global_data->notify_fifo.fd, line, size) == - 1) {}
+
+	if (global_data->lvs_notify_fifo.fd != -1)
+		if (write(global_data->lvs_notify_fifo.fd, line, size) == -1) {}
 
 	FREE(line);
 }
@@ -255,22 +297,26 @@ clear_service_vs(virtual_server_t * vs, bool stopping)
 {
 	bool sav_inhibit;
 
-	/* Processing real server queue */
-	if (vs->s_svr && vs->s_svr->set) {
-		/* Ensure removed if inhibit_on_failure set */
-		sav_inhibit = vs->s_svr->inhibit;
-		vs->s_svr->inhibit = false;
+	if (global_data->lvs_flush_onstop == LVS_NO_FLUSH) {
+		/* Processing real server queue */
+		if (vs->s_svr && vs->s_svr->set) {
+			/* Ensure removed if inhibit_on_failure set */
+			sav_inhibit = vs->s_svr->inhibit;
+			vs->s_svr->inhibit = false;
 
-		ipvs_cmd(LVS_CMD_DEL_DEST, vs, vs->s_svr);
+			ipvs_cmd(LVS_CMD_DEL_DEST, vs, vs->s_svr);
 
-		vs->s_svr->inhibit = sav_inhibit;
+			vs->s_svr->inhibit = sav_inhibit;
 
-		UNSET_ALIVE(vs->s_svr);
+			UNSET_ALIVE(vs->s_svr);
+		}
+
+		/* Even if the sorry server was configured, if we are using
+		 * inhibit_on_failure, then real servers may be configured. */
+		clear_service_rs(vs, vs->rs, stopping);
 	}
-
-	/* Even if the sorry server was configured, if we are using
-	 * inhibit_on_failure, then real servers may be configured. */
-	clear_service_rs(vs, vs->rs, stopping);
+	else if (vs->s_svr && vs->s_svr->set)
+		UNSET_ALIVE(vs->s_svr);
 
 	/* The above will handle Omega case for VS as well. */
 
@@ -345,11 +391,10 @@ sync_service_vsg(virtual_server_t * vs)
 		NULL,
 	};
 
-	for (l = ll; *l; l++)
-		for (e = LIST_HEAD(*l); e; ELEMENT_NEXT(e)) {
-			vsge = ELEMENT_DATA(e);
-			if (vs->reloaded && !vsge->reloaded) {
-				log_message(LOG_INFO, "VS [%s:%d:%u] added into group %s"
+	for (l = ll; *l; l++) {
+		LIST_FOREACH(*l, vsge, e) {
+			if (!vsge->reloaded) {
+				log_message(LOG_INFO, "VS [%s:%" PRIu32 ":%u] added into group %s"
 // Does this work with no address?
 						    , inet_sockaddrtotrio(&vsge->addr, vs->service_type)
 						    , vsge->range
@@ -360,6 +405,7 @@ sync_service_vsg(virtual_server_t * vs)
 				ipvs_group_sync_entry(vs, vsge);
 			}
 		}
+	}
 }
 
 /* add or remove _alive_ real servers from a virtual server */
@@ -567,10 +613,10 @@ update_svr_wgt(int weight, virtual_server_t * vs, real_server_t * rs
 		, bool update_quorum)
 {
 	if (weight != rs->weight) {
-		log_message(LOG_INFO, "Changing weight from %d to %d for %s service %s of VS %s"
+		log_message(LOG_INFO, "Changing weight from %d to %d for %sactive service %s of VS %s"
 				    , rs->weight
 				    , weight
-				    , ISALIVE(rs) ? "active" : "inactive"
+				    , ISALIVE(rs) ? "" : "in"
 				    , FMT_RS(rs, vs)
 				    , FMT_VS(vs));
 		rs->weight = weight;
@@ -636,15 +682,14 @@ update_svr_checker_state(bool alive, checker_t *checker)
 }
 
 /* Check if a vsg entry is in new data */
-static virtual_server_group_entry_t *
+static virtual_server_group_entry_t * __attribute__ ((pure))
 vsge_exist(virtual_server_group_entry_t *vsg_entry, list l)
 {
 	element e;
 	virtual_server_group_entry_t *vsge;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vsge = ELEMENT_DATA(e);
-		if (VSGE_ISEQ(vsg_entry, vsge))
+	LIST_FOREACH(l, vsge, e) {
+		if (vsge_iseq(vsg_entry, vsge))
 			return vsge;
 	}
 
@@ -658,25 +703,59 @@ clear_diff_vsge(list old, list new, virtual_server_t * old_vs)
 	virtual_server_group_entry_t *vsge, *new_vsge;
 	element e;
 
-	for (e = LIST_HEAD(old); e; ELEMENT_NEXT(e)) {
-		vsge = ELEMENT_DATA(e);
+	LIST_FOREACH(old, vsge, e) {
 		new_vsge = vsge_exist(vsge, new);
-		if (new_vsge) {
-			new_vsge->tcp_alive = vsge->tcp_alive;
-			new_vsge->udp_alive = vsge->udp_alive;
-			new_vsge->sctp_alive = vsge->sctp_alive;
-			new_vsge->fwm4_alive = vsge->fwm4_alive;
-			new_vsge->fwm6_alive = vsge->fwm6_alive;
+		if (new_vsge)
 			new_vsge->reloaded = true;
-		}
 		else {
-			log_message(LOG_INFO, "VS [%s:%d:%u] in group %s no longer exists"
-					    , inet_sockaddrtotrio(&vsge->addr, old_vs->service_type)
-					    , vsge->range
-					    , vsge->vfwmark
-					    , old_vs->vsgname);
+			if (vsge->is_fwmark)
+				log_message(LOG_INFO, "VS [%u] in group %s no longer exists",
+						      vsge->vfwmark, old_vs->vsgname);
+			else
+				log_message(LOG_INFO, "VS [%s:%" PRIu32 "] in group %s no longer exists"
+						    , inet_sockaddrtotrio(&vsge->addr, old_vs->service_type)
+						    , vsge->range
+						    , old_vs->vsgname);
 
 			ipvs_group_remove_entry(old_vs, vsge);
+		}
+	}
+}
+
+static void
+update_alive_counts(virtual_server_t *old, virtual_server_t *new)
+{
+	virtual_server_group_entry_t *vsge, *new_vsge;
+	list *old_l, *new_l;
+	element e;
+
+	if (!old->vsg || !new->vsg)
+	 	return ;
+
+	list old_ll[] = {
+		old->vsg->addr_range,
+		old->vsg->vfwmark,
+		NULL,
+	};
+	list new_ll[] = {
+		new->vsg->addr_range,
+		new->vsg->vfwmark,
+		NULL,
+	};
+
+	for (old_l = old_ll, new_l = new_ll; *old_l; old_l++, new_l++) {
+		LIST_FOREACH(*old_l, vsge, e) {
+			new_vsge = vsge_exist(vsge, *new_l);
+			if (new_vsge) {
+				if (vsge->is_fwmark) {
+					new_vsge->fwm4_alive = vsge->fwm4_alive;
+					new_vsge->fwm6_alive = vsge->fwm6_alive;
+				} else {
+					new_vsge->tcp_alive = vsge->tcp_alive;
+					new_vsge->udp_alive = vsge->udp_alive;
+					new_vsge->sctp_alive = vsge->sctp_alive;
+				}
+			}
 		}
 	}
 }
@@ -694,19 +773,14 @@ clear_diff_vsg(virtual_server_t * old_vs, virtual_server_t * new_vs)
 }
 
 /* Check if a vs exist in new data and returns pointer to it */
-static virtual_server_t*
+static virtual_server_t* __attribute__ ((pure))
 vs_exist(virtual_server_t * old_vs)
 {
 	element e;
-	list l = check_data->vs;
 	virtual_server_t *vs;
 
-	if (LIST_ISEMPTY(l))
-		return NULL;
-
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vs = ELEMENT_DATA(e);
-		if (VS_ISEQ(old_vs, vs))
+	LIST_FOREACH(check_data->vs, vs, e) {
+		if (vs_iseq(old_vs, vs))
 			return vs;
 	}
 
@@ -714,7 +788,7 @@ vs_exist(virtual_server_t * old_vs)
 }
 
 /* Check if rs is in new vs data */
-static real_server_t *
+static real_server_t * __attribute__ ((pure))
 rs_exist(real_server_t * old_rs, list l)
 {
 	element e;
@@ -723,9 +797,8 @@ rs_exist(real_server_t * old_rs, list l)
 	if (LIST_ISEMPTY(l))
 		return NULL;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		rs = ELEMENT_DATA(e);
-		if (RS_ISEQ(rs, old_rs))
+	LIST_FOREACH(l, rs, e) {
+		if (rs_iseq(rs, old_rs))
 			return rs;
 	}
 
@@ -733,11 +806,13 @@ rs_exist(real_server_t * old_rs, list l)
 }
 
 static void
-migrate_checkers(real_server_t *old_rs, real_server_t *new_rs, list old_checkers_queue)
+migrate_checkers(virtual_server_t *vs, real_server_t *old_rs, real_server_t *new_rs, list old_checkers_queue)
 {
 	list l;
 	element e, e1;
 	checker_t *old_c, *new_c;
+	checker_t dummy_checker;
+	bool a_checker_has_run = false;
 
 	l = alloc_list(NULL, NULL);
 	LIST_FOREACH(old_checkers_queue, old_c, e) {
@@ -752,21 +827,53 @@ migrate_checkers(real_server_t *old_rs, real_server_t *new_rs, list old_checkers
 			LIST_FOREACH(l, old_c, e1) {
 				if (old_c->compare == new_c->compare && new_c->compare(old_c, new_c)) {
 					/* Update status if different */
-					if (old_c->is_up != new_c->is_up)
+					if (old_c->has_run && old_c->is_up != new_c->is_up)
 						set_checker_state(new_c, old_c->is_up);
 
 					/* Transfer some other state flags */
 					new_c->has_run = old_c->has_run;
+// retry_it needs fixing -  if retry changes, we may already have exceeded count
 					new_c->retry_it = old_c->retry_it;
 
 					break;
 				}
 			}
 		}
-
-		if (!new_rs->num_failed_checkers)
-			SET_ALIVE(new_rs);
 	}
+
+	/* Find out how many checkers are really failed */
+	new_rs->num_failed_checkers = 0;
+	LIST_FOREACH(checkers_queue, new_c, e) {
+		if (new_c->rs != new_rs)
+			continue;
+		if (new_c->has_run && !new_c->is_up)
+			new_rs->num_failed_checkers++;
+		if (new_c->has_run)
+			a_checker_has_run = true;
+	}
+
+	/* If a checker has failed, set new alpha checkers to be down until
+	 * they have run. */
+	if (new_rs->num_failed_checkers || (!new_rs->alive && !a_checker_has_run)) {
+		LIST_FOREACH(checkers_queue, new_c, e) {
+			if (new_c->rs != new_rs)
+				continue;
+			if (!new_c->has_run) {
+				if (new_c->alpha)
+					set_checker_state(new_c, false);
+				/* One failure is enough */
+				new_c->retry_it = new_c->retry;
+			}
+		}
+	}
+
+	/* If there are no failed checkers, the RS needs to be up */
+	if (!new_rs->num_failed_checkers && !new_rs->alive) {
+		dummy_checker.vs = vs;
+		dummy_checker.rs = new_rs;
+		perform_svr_state(true, &dummy_checker);
+	} else if (new_rs->num_failed_checkers && new_rs->set != new_rs->inhibit)
+		ipvs_cmd(new_rs->inhibit ? IP_VS_SO_SET_ADDDEST : IP_VS_SO_SET_DELDEST, vs, new_rs);
 
 	free_list(&l);
 }
@@ -798,8 +905,7 @@ clear_diff_rs(virtual_server_t *old_vs, virtual_server_t *new_vs, list old_check
 			 * flag value to not try to set
 			 * already set IPVS rule.
 			 */
-			if (new_rs->alive)
-				new_rs->alive = rs->alive;
+			new_rs->alive = rs->alive;
 			new_rs->set = rs->set;
 			new_rs->weight = rs->weight;
 			new_rs->pweight = rs->iweight;
@@ -814,7 +920,19 @@ clear_diff_rs(virtual_server_t *old_vs, virtual_server_t *new_vs, list old_check
 			 * For alpha mode checkers, if it was up, we don't need another
 			 * success to say it is now up.
 			 */
-			migrate_checkers(rs, new_rs, old_checkers_queue);
+			migrate_checkers(new_vs, rs, new_rs, old_checkers_queue);
+
+			/* Do we need to update the RS configuration? */
+			if (false ||
+#ifdef _HAVE_IPVS_TUN_TYPE_
+			    rs->tun_type != new_rs->tun_type ||
+			    rs->tun_port != new_rs->tun_port ||
+#ifdef _HAVE_IPVS_TUN_CSUM_
+			    rs->tun_flags != new_rs->tun_flags ||
+#endif
+#endif
+			    rs->forwarding_method != new_rs->forwarding_method)
+				ipvs_cmd(LVS_CMD_EDIT_DEST, new_vs, new_rs);
 		}
 	}
 	clear_service_rs(old_vs, rs_to_remove, false);
@@ -830,7 +948,7 @@ clear_diff_s_srv(virtual_server_t *old_vs, real_server_t *new_rs)
 	if (!old_rs)
 		return;
 
-	if (new_rs && RS_ISEQ(old_rs, new_rs)) {
+	if (new_rs && rs_iseq(old_rs, new_rs)) {
 		/* which fields are really used on s_svr? */
 		new_rs->alive = old_rs->alive;
 		new_rs->set = old_rs->set;
@@ -879,7 +997,7 @@ clear_diff_services(list old_checkers_queue)
 			clear_service_vs(vs, false);
 		} else {
 			/* copy status fields from old VS */
-			SET_ALIVE(new_vs);
+			new_vs->alive = vs->alive;
 			new_vs->quorum_state_up = vs->quorum_state_up;
 			new_vs->reloaded = true;
 			if (using_ha_suspend)
@@ -891,10 +1009,37 @@ clear_diff_services(list old_checkers_queue)
 			/* If vs exist, perform rs pool diff */
 			/* omega = false must not prevent the notifiers from being called,
 			   because the VS still exists in new configuration */
+			if (strcmp(vs->sched, new_vs->sched) ||
+			    vs->flags != new_vs->flags ||
+			    vs->persistence_granularity != new_vs->persistence_granularity ||
+			    vs->persistence_timeout != new_vs->persistence_timeout) {
+				ipvs_cmd(IP_VS_SO_SET_EDIT, new_vs, NULL);
+			}
+
 			vs->omega = true;
 			clear_diff_rs(vs, new_vs, old_checkers_queue);
 			clear_diff_s_srv(vs, new_vs->s_svr);
+
+			update_alive_counts(vs, new_vs);
 		}
+	}
+}
+
+/* This is only called during a reload. Any new real server with
+ * alpha mode checkers should start in down state */
+void
+check_new_rs_state(void)
+{
+	element e;
+	checker_t *checker;
+
+	LIST_FOREACH(checkers_queue, checker, e) {
+		if (checker->rs->reloaded)
+			continue;
+		if (!checker->alpha)
+			continue;
+		set_checker_state(checker, false);
+		UNSET_ALIVE(checker->rs);
 	}
 }
 
@@ -911,10 +1056,7 @@ link_vsg_to_vs(void)
 	if (LIST_ISEMPTY(check_data->vs))
 		return;
 
-	for (e = LIST_HEAD(check_data->vs); e; e = next) {
-		next = e->next;
-		vs = ELEMENT_DATA(e);
-
+	LIST_FOREACH_NEXT(check_data->vs, vs, e, next) {
 		if (vs->vsgname) {
 			vs->vsg = ipvs_get_group_by_name(vs->vsgname, check_data->vs_group);
 			if (!vs->vsg) {
@@ -952,16 +1094,10 @@ link_vsg_to_vs(void)
 	}
 
 	/* The virtual server port number is used to identify the sequence number of the virtual server in the group */
-	if (LIST_ISEMPTY(check_data->vs_group))
-		return;
-
-	for (e = LIST_HEAD(check_data->vs_group); e; ELEMENT_NEXT(e)) {
+	LIST_FOREACH(check_data->vs_group, vsg, e) {
 		vsg_member_no = 0;
-		vsg = ELEMENT_DATA(e);
 
-		for (e1 = LIST_HEAD(check_data->vs); e1; ELEMENT_NEXT(e1)) {
-			vs = ELEMENT_DATA(e1);
-
+		LIST_FOREACH(check_data->vs, vs, e1) {
 			if (!vs->vsgname)
 				continue;
 

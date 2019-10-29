@@ -103,7 +103,8 @@ am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 DIST_COMMON = $(srcdir)/Makefile.am $(noinst_HEADERS) \
 	$(am__DIST_COMMON)
 mkinstalldirs = $(install_sh) -d
-CONFIG_HEADER = $(top_builddir)/lib/config.h
+CONFIG_HEADER = $(top_builddir)/lib/config.h \
+	$(top_builddir)/lib/config_warnings.h
 CONFIG_CLEAN_FILES =
 CONFIG_CLEAN_VPATH_FILES =
 am__installdirs = "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(configdir)" \
@@ -308,6 +309,7 @@ RANLIB = @RANLIB@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
+SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
 VERSION = @VERSION@
@@ -366,7 +368,8 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
-	 -e 's|@PID_DIR[@]|$(PID_DIR)|g'
+	 -e 's|@PID_DIR[@]|$(PID_DIR)|g' \
+	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g'
 
 keepalived_SOURCES = main.c
 noinst_HEADERS = $(srcdir)/include/*.h

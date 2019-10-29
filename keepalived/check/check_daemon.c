@@ -33,7 +33,9 @@
 #include <sys/resource.h>
 
 #ifdef THREAD_DUMP
+#ifdef _WITH_SNMP_
 #include "snmp.h"
+#endif
 #include "scheduler.h"
 #include "smtp.h"
 #include "check_dns.h"
@@ -57,6 +59,7 @@
 #include "parser.h"
 #include "bitops.h"
 #include "keepalived_netlink.h"
+#include "check_print.h"
 #ifdef _WITH_SNMP_CHECKER_
   #include "check_snmp.h"
 #endif
@@ -74,18 +77,45 @@
 bool using_ha_suspend;
 
 /* local variables */
-static char *check_syslog_ident;
+static const char *check_syslog_ident;
 static bool two_phase_terminate;
 
+/* set fd ulimits  */
+static void
+set_checker_max_fds(void)
+{
+	/* Allow for:
+	 *   0	stdin
+	 *   1	stdout
+	 *   2	strerr
+	 *   3	memcheck log (debugging)
+	 *   4	log file
+	 *   5	epoll
+	 *   6	timerfd
+	 *   7	signalfd
+	 *   8	bfd pipe
+	 *   9	closed
+	 *   10	closed
+	 *   11	FIFO
+	 *   12	closed
+	 *   13	passwd file
+	 *   14	Unix domain socket
+	 *   One per checker using UDP/TCP
+	 *   One per SMTP alert
+	 *   qty 10 spare
+	 */
+	set_max_file_limit(14 + check_data->num_checker_fd_required + check_data->num_smtp_alert + 10);
+}
+
 static int
-lvs_notify_fifo_script_exit(__attribute__((unused)) thread_t *thread)
+lvs_notify_fifo_script_exit(__attribute__((unused)) thread_ref_t thread)
 {
 	log_message(LOG_INFO, "lvs notify fifo script terminated");
 
 	return 0;
 }
 
-void
+static void
 checker_dispatcher_release(void)
 {
 #ifdef _WITH_BFD_
@@ -145,10 +175,10 @@ checker_terminate_phase2(void)
 	closelog();
 
 #ifndef _MEM_CHECK_LOG_
-	FREE_PTR(check_syslog_ident);
+	FREE_CONST_PTR(check_syslog_ident);
 #else
 	if (check_syslog_ident)
-		free(check_syslog_ident);
+		free(no_const_char_p(check_syslog_ident));
 #endif
 	close_std_fd();
 
@@ -156,16 +186,16 @@ checker_terminate_phase2(void)
 }
 
 static int
-checker_shutdown_backstop_thread(thread_t *thread)
+checker_shutdown_backstop_thread(thread_ref_t thread)
 {
 	int count = 0;
-	thread_t *t;
+	thread_ref_t t;
 
 	/* Force terminate all script processes */
 	if (thread->master->child.rb_root.rb_node)
 		script_killall(thread->master, SIGKILL, true);
 
-	rb_for_each_entry_cached(t, &thread->master->child, n)
+	rb_for_each_entry_cached_const(t, &thread->master->child, n)
 		count++;
 
 	log_message(LOG_ERR, "backstop thread invoked: shutdown timer %srunning, child count %d",
@@ -190,8 +220,13 @@ checker_terminate_phase1(bool schedule_next_thread)
 		script_killall(master, SIGTERM, true);
 
 	/* Send shutdown messages */
-	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug))
-		clear_services();
+	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug)) {
+		if (global_data->lvs_flush_onstop == LVS_FLUSH_FULL) {
+			log_message(LOG_INFO, "Flushing lvs on shutdown in oneshot");
+			ipvs_flush_cmd();
+		} else
+			clear_services();
+	}
 
 	if (schedule_next_thread) {
 		/* If there are no child processes, we can terminate immediately,
@@ -207,7 +242,7 @@ checker_terminate_phase1(bool schedule_next_thread)
 
 #ifndef _DEBUG_
 static int
-start_checker_termination_thread(__attribute__((unused)) thread_t * thread)
+start_checker_termination_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	/* This runs in the context of a thread */
 	two_phase_terminate = true;
@@ -236,7 +271,7 @@ stop_check(int status)
 
 /* Daemon init sequence */
 static void
-start_check(list old_checkers_queue, data_t *old_global_data)
+start_check(list old_checkers_queue, data_t *prev_global_data)
 {
 	init_checkers_queue();
 
@@ -252,7 +287,14 @@ start_check(list old_checkers_queue, data_t *old_global_data)
 	init_data(conf_file, check_init_keywords);
 
 	if (reload)
-		init_global_data(global_data, old_global_data);
+		init_global_data(global_data, prev_global_data, true);
+
+	/* Update process name if necessary */
+	if ((!reload && global_data->lvs_process_name) ||
+	    (reload &&
+	     (!global_data->lvs_process_name != !prev_global_data->lvs_process_name ||
+	      (global_data->lvs_process_name && strcmp(global_data->lvs_process_name, prev_global_data->lvs_process_name)))))
+		set_process_name(global_data->lvs_process_name);
 
 	/* fill 'vsg' members of the virtual_server_t structure.
 	 * We must do that after parsing config, because
@@ -282,6 +324,9 @@ start_check(list old_checkers_queue, data_t *old_global_data)
 		return;
 	}
 
+	/* Ensure we can open sufficient file descriptors */
+	set_checker_max_fds();
+
 	/* Create a notify FIFO if needed, and open it */
 	notify_fifo_open(&global_data->notify_fifo, &global_data->lvs_notify_fifo, lvs_notify_fifo_script_exit, "lvs_");
 
@@ -309,8 +354,10 @@ start_check(list old_checkers_queue, data_t *old_global_data)
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
 	/* Processing differential configuration parsing */
-	if (reload)
+	if (reload) {
 		clear_diff_services(old_checkers_queue);
+		check_new_rs_state();
+	}
 
 	/* We can send SMTP messages from here so set the time */
 	set_time_now();
@@ -320,10 +367,8 @@ start_check(list old_checkers_queue, data_t *old_global_data)
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
 	/* Dump configuration */
-	if (__test_bit(DUMP_CONF_BIT, &debug)) {
-		dump_global_data(NULL, global_data);
-		dump_check_data(NULL, check_data);
-	}
+	if (__test_bit(DUMP_CONF_BIT, &debug))
+		dump_data_check(NULL);
 
 	/* Register checkers thread */
 	register_checkers_thread();
@@ -337,6 +382,11 @@ start_check(list old_checkers_queue, data_t *old_global_data)
 #endif
 #endif
 			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
+
+#ifdef _HAVE_SCHED_RT_
+	/* Set the process cpu affinity if configured */
+	set_process_cpu_affinity(&global_data->checker_cpu_mask, "checker");
+#endif
 }
 
 void
@@ -348,9 +398,10 @@ check_validate_config(void)
 #ifndef _DEBUG_
 /* Reload thread */
 static int
-reload_check_thread(__attribute__((unused)) thread_t * thread)
+reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	list old_checkers_queue;
+	bool with_snmp = false;
 
 	log_message(LOG_INFO, "Reloading");
 
@@ -368,10 +419,15 @@ reload_check_thread(__attribute__((unused)) thread_t * thread)
 	/* Remove the notify fifo - we don't know if it will be the same after a reload */
 	notify_fifo_close(&global_data->notify_fifo, &global_data->lvs_notify_fifo);
 
+#if !defined _DEBUG_ && defined _WITH_SNMP_CHECKER_
+	if (prog_type == PROG_TYPE_CHECKER && global_data->enable_snmp_checker)
+		with_snmp = true;
+#endif
+
 	/* Destroy master thread */
 	checker_dispatcher_release();
 	thread_cleanup_master(master);
-	thread_add_base_threads(master);
+	thread_add_base_threads(master, with_snmp);
 
 	/* Save previous checker data */
 	old_checkers_queue = checkers_queue;
@@ -398,6 +454,21 @@ reload_check_thread(__attribute__((unused)) thread_t * thread)
 	return 0;
 }
 
+static int
+print_check_data(__attribute__((unused)) thread_ref_t thread)
+{
+        check_print_data();
+        return 0;
+}
+
+static void
+sigusr1_check(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+	log_message(LOG_INFO, "Printing checker data for process(%d) on signal",
+		    getpid());
+	thread_add_event(master, print_check_data, NULL, 0);
+}
+
 static void
 sigreload_check(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 {
@@ -419,12 +490,13 @@ check_signal_init(void)
 	signal_set(SIGHUP, sigreload_check, NULL);
 	signal_set(SIGINT, sigend_check, NULL);
 	signal_set(SIGTERM, sigend_check, NULL);
+	signal_set(SIGUSR1, sigusr1_check, NULL);
 	signal_ignore(SIGPIPE);
 }
 
 /* CHECK Child respawning thread */
 static int
-check_respawn_thread(thread_t * thread)
+check_respawn_thread(thread_ref_t thread)
 {
 	/* We catch a SIGCHLD, handle it */
 	checkers_child = 0;
@@ -484,7 +556,7 @@ start_check_child(void)
 {
 #ifndef _DEBUG_
 	pid_t pid;
-	char *syslog_ident;
+	const char *syslog_ident;
 
 	/* Initialize child process */
 #ifdef ENABLE_LOG_TO_FILE
@@ -618,6 +690,7 @@ void
 register_check_parent_addresses(void)
 {
 #ifndef _DEBUG_
+	register_thread_address("print_check_data", print_check_data);
 	register_thread_address("check_respawn_thread", check_respawn_thread);
 #endif
 }

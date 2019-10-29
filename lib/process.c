@@ -27,16 +27,16 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-#ifdef _HAVE_SCHED_RT_
-#include <sched.h>
-#endif
 #include <stdbool.h>
 
 #include "process.h"
+#include "utils.h"
 #include "logger.h"
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 #include "signals.h"
 #endif
+#include "warnings.h"
+#include "bitops.h"
 
 #ifdef _HAVE_SCHED_RT_
 static bool realtime_priority_set;
@@ -51,8 +51,9 @@ static bool priority_set;
 static int orig_priority;
 static bool process_locked_in_memory;
 
+static struct rlimit orig_fd_limit;
+
 /* rlimit values to set for child processes */
-static struct rlimit nofile;
 bool rlimit_nofile_set;
 static struct rlimit core;
 bool rlimit_core_set;
@@ -101,6 +102,9 @@ reset_process_priority(void)
 	priority_set = false;
 }
 
+/* NOTE: This function generates a "stack protector not protecting local variables:
+   variable length buffer" warning */
+RELAX_STACK_PROTECTOR_START
 void
 set_process_priorities(
 #ifdef _HAVE_SCHED_RT_
@@ -143,6 +147,55 @@ set_process_priorities(
 	if (no_swap_stack_size)
 		set_process_dont_swap(no_swap_stack_size);
 }
+RELAX_STACK_PROTECTOR_END
+
+#ifdef _HAVE_SCHED_RT_
+int
+set_process_cpu_affinity(cpu_set_t *set, const char *process)
+{
+	/* If not used then empty set */
+	if (!CPU_COUNT(set))
+		return 0;
+
+	if (sched_setaffinity(0, sizeof(cpu_set_t), set)) {
+		log_message(LOG_WARNING, "unable to set cpu affinity to %s process (%m)"
+				       , process);
+		return -1;
+	}
+
+	return 0;
+}
+
+int
+get_process_cpu_affinity_string(cpu_set_t *set, char *buffer, size_t size)
+{
+	int i, num_cpus, len, s = size;
+	char *cp = buffer;
+
+	/* If not used then empty set */
+	if (!CPU_COUNT(set))
+		return 0;
+
+	num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	for (i = 0; i < num_cpus; i++) {
+		if (!CPU_ISSET(i, set))
+			continue;
+
+		len = integer_to_string(i, cp, s);
+		if (len < 0 || s <= len + 1) {
+			*cp = '\0';
+			return -1;
+		}
+		*(cp + len) = ' ';
+		cp += len + 1;
+		s -= len + 1;
+	}
+
+	*cp = '\0';
+	return 0;
+}
+
+#endif
 
 void
 reset_process_priorities(void)
@@ -180,7 +233,7 @@ reset_process_priorities(void)
 	}
 
 	if (rlimit_nofile_set) {
-		setrlimit(RLIMIT_NOFILE, &nofile);
+		setrlimit(RLIMIT_NOFILE, &orig_fd_limit);
 		rlimit_nofile_set = false;
 	}
 	if (rlimit_core_set) {
@@ -190,13 +243,9 @@ reset_process_priorities(void)
 }
 
 void
-set_child_rlimit(int resource, struct rlimit *rlim)
+set_child_rlimit(int resource, const struct rlimit *rlim)
 {
-	if (resource == RLIMIT_NOFILE) {
-		nofile = *rlim;
-		rlimit_nofile_set = true;
-	}
-	else if (resource == RLIMIT_CORE) {
+	if (resource == RLIMIT_CORE) {
 		core = *rlim;
 		rlimit_core_set = true;
 	}
@@ -205,15 +254,44 @@ set_child_rlimit(int resource, struct rlimit *rlim)
 }
 
 pid_t
-local_fork()
+local_fork(void)
 {
 	pid_t pid;
 
 	pid = fork();
 
 	/* If we are the child process, reset all elevated priorities */
-	if (pid > 0)
+	if (pid == 0)
 		reset_process_priorities();
 
 	return pid;
+}
+
+void
+set_max_file_limit(unsigned fd_required)
+{
+	struct rlimit limit = { .rlim_cur = 0 };
+
+	if (orig_fd_limit.rlim_cur == 0) {
+		if (getrlimit(RLIMIT_NOFILE, &orig_fd_limit))
+			log_message(LOG_INFO, "Failed to get original RLIMIT_NOFILE, errno %d", errno);
+		else
+			limit = orig_fd_limit;
+	} else if (getrlimit(RLIMIT_NOFILE, &limit))
+		log_message(LOG_INFO, "Failed to get current RLIMIT_NOFILE, errno %d", errno);
+
+	if (fd_required <= orig_fd_limit.rlim_cur &&
+	    orig_fd_limit.rlim_cur == limit.rlim_cur)
+		return;
+
+	limit.rlim_cur = orig_fd_limit.rlim_cur > fd_required ? orig_fd_limit.rlim_cur : fd_required;
+	limit.rlim_max = orig_fd_limit.rlim_max > fd_required ? orig_fd_limit.rlim_max : fd_required;
+
+	if (setrlimit(RLIMIT_NOFILE, &limit) == -1)
+		log_message(LOG_INFO, "Failed to set open file limit to %" PRI_rlim_t ":%" PRI_rlim_t " failed - errno %d", limit.rlim_cur, limit.rlim_max, errno);
+	else if (__test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Set open file limit to %" PRI_rlim_t ":%" PRI_rlim_t ".", limit.rlim_cur, limit.rlim_max);
+
+	/* We don't want child processes to get excessive limits */
+	rlimit_nofile_set = (limit.rlim_cur != orig_fd_limit.rlim_cur);
 }

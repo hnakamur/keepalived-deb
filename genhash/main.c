@@ -32,6 +32,7 @@
 /* keepalived includes */
 #include "utils.h"
 #include "signals.h"
+#include "git-commit.h"
 
 /* genhash includes */
 #include "include/main.h"
@@ -65,29 +66,37 @@ usage(const char *prog)
 {
 	enum feat_hashes i;
 
-	fprintf(stderr, VERSION_STRING);
-	fprintf(stderr,
-		"Usage:\n"
-		"  %1$s -s server-address -p port -u url\n"
-		"  %1$s -S -s server-address -p port -u url\n"
-		"  %1$s -h\n" "  %1$s -r\n\n", prog);
-	fprintf(stderr,
-		"Commands:\n"
-		"Either long or short options are allowed.\n"
-		"  %1$s --use-ssl         -S       Use SSL connection to remote server.\n"
-#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
-		"  %1$s --use-sni         -I       Use SNI during SSL handshake (uses virtualhost setting; see -V).\n"
+	fprintf(stderr, "%s", VERSION_STRING);
+#ifdef GIT_COMMIT
+	fprintf(stderr, ", git commit %s", GIT_COMMIT);
 #endif
-		"  %1$s --server          -s       Use the specified remote server address.\n"
-		"  %1$s --port            -p       Use the specified remote server port.\n"
-		"  %1$s --url             -u       Use the specified remote server url.\n"
-		"  %1$s --use-virtualhost -V       Use the specified virtualhost in GET query.\n"
-		"  %1$s --hash            -H       Use the specified hash algorithm.\n"
-		"  %1$s --verbose         -v       Use verbose mode output.\n"
-		"  %1$s --help            -h       Display this short inlined help screen.\n"
-		"  %1$s --release         -r       Display the release number.\n"
-		"  %1$s --fwmark          -m       Use the specified FW mark.\n",
-		prog);
+	fprintf(stderr, "\n\n%s\n\n", COPYRIGHT_STRING);
+	fprintf(stderr,
+		"Usage: %s COMMAND [OPTIONS]\n"
+		"Commands:\n"
+		"   -s server-address -p port -u url\n"
+		"   -S -s server-address -p port -u url\n"
+		"   -h\n"
+		"   -r\n\n", prog);
+	fprintf(stderr,
+		"Options:\n"
+		"Either long or short options are allowed.\n"
+		"   --use-ssl         -S       Use SSL connection to remote server.\n"
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		"   --use-sni         -I       Use SNI during SSL handshake (uses virtualhost setting; see -V).\n"
+#endif
+		"   --server          -s       Use the specified remote server address.\n"
+		"   --port            -p       Use the specified remote server port.\n"
+		"   --url             -u       Use the specified remote server url.\n"
+		"   --use-virtualhost -V       Use the specified virtualhost in GET query.\n"
+		"   --hash            -H       Use the specified hash algorithm.\n"
+		"   --verbose         -v       Use verbose mode output.\n"
+		"   --help            -h       Display this short inlined help screen.\n"
+		"   --release         -r       Display the release number.\n"
+		"   --fwmark          -m       Use the specified FW mark.\n"
+		"   --protocol        -P       Use the specified HTTP protocol - '1.0', 1.0c', '1.1'.\n"
+		"                                1.0c means 1.0 with 'Connection: close'\n"
+		"   --timeout         -t       Timeout in seconds\n");
 	fprintf(stderr, "\nSupported hash algorithms:\n");
 	for (i = hash_first; i < hash_guard; i++)
 		fprintf(stderr, "  %s%s\n",
@@ -105,6 +114,7 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 	void *ptr;
 	char *endptr;
 	long port_num;
+	const char *start;
 
 	memset(&hint, '\0', sizeof hint);
 
@@ -125,18 +135,24 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 		{"port",		required_argument, 0, 'p'},
 		{"url",			required_argument, 0, 'u'},
 		{"fwmark",		required_argument, 0, 'm'},
+		{"protocol",		required_argument, 0, 'P'},
+		{"timeout",		required_argument, 0, 't'},
 		{0, 0, 0, 0}
 	};
 
 	/* Parse the command line arguments */
-	while ((c = getopt_long (argc, argv, "rhvSs:H:V:p:u:m:"
+	while ((c = getopt_long (argc, argv, "rhvSs:H:V:p:u:m:P:t:"
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 							       "I"
 #endif
 				  , long_options, NULL)) != EOF) {
 		switch (c) {
 		case 'r':
-			fprintf(stderr, VERSION_STRING);
+			fprintf(stderr, "%s", VERSION_STRING);
+#ifdef GIT_COMMIT
+			fprintf(stderr, ", git commit %s", GIT_COMMIT);
+#endif
+			fprintf(stderr, "\n");
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -167,6 +183,7 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 					inet_ntop (res->ai_family, ptr, req_obj->ipaddress, INET6_ADDRSTRLEN);
 				} else {
 					fprintf(stderr, "server should be an IP, not %s\n", optarg);
+					freeaddrinfo(res);
 					return CMD_LINE_ERROR;
 				}
 			}
@@ -198,8 +215,9 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 			break;
 		case 'm':
 #ifdef _WITH_SO_MARK_
-			req_obj->mark = (unsigned)strtoul(optarg + strspn(optarg, " \t"), &endptr, 10);
-			if (*endptr || optarg[strspn(optarg, " \t")] == '-') {
+			start = optarg + strspn(optarg, " \t");
+			req_obj->mark = (unsigned)strtoul(start, &endptr, 10);
+			if (*endptr || start[0] == '-' || start[0] == ' ') {
 				fprintf(stderr, "invalid fwmark '%s'\n", optarg);
 				return CMD_LINE_ERROR;
 			}
@@ -207,6 +225,32 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 			fprintf(stderr, "genhash built without fwmark support\n");
 			return CMD_LINE_ERROR;
 #endif
+			break;
+		case 'P':
+			if (!strcmp(optarg, "1.0"))
+				req_obj->http_protocol = HTTP_PROTOCOL_1_0;
+			else if (!strcmp(optarg, "1.0c") || !strcmp(optarg, "1.0C"))
+				req_obj->http_protocol = HTTP_PROTOCOL_1_0C;
+			else if (!strcmp(optarg, "1.1"))
+				req_obj->http_protocol = HTTP_PROTOCOL_1_1;
+			/* 1.0k and 1.1k are for test purposes and are not expected to be used */
+			else if (!strcmp(optarg, "1.0k"))
+				req_obj->http_protocol = HTTP_PROTOCOL_1_0K;
+			else if (!strcmp(optarg, "1.1k"))
+				req_obj->http_protocol = HTTP_PROTOCOL_1_1K;
+			else {
+				fprintf(stderr, "invalid HTTP protocol version '%s'\n", optarg);
+				return CMD_LINE_ERROR;
+			}
+			break;
+		case 't':
+			start = optarg + strspn(optarg, " \t");
+			req_obj->timeout = (unsigned)strtoul(start, &endptr, 10);
+			if (*endptr || start[0] == '-' || !start[0]) {
+				fprintf(stderr, "invalid timeout '%s'\n", optarg);
+				return CMD_LINE_ERROR;
+			}
+			req_obj->timeout *= TIMER_HZ;
 			break;
 		default:
 			usage(argv[0]);
@@ -229,7 +273,7 @@ parse_cmdline(int argc, char **argv, REQ * req_obj)
 int
 main(int argc, char **argv)
 {
-	char *url_default = "/";
+	const char *url_default = "/";
 
 #ifdef _MEM_CHECK_
 	mem_log_init("Genhash", "Genhash process");
@@ -241,6 +285,8 @@ main(int argc, char **argv)
 
 	/* Preset (potentially) non-zero defaults */
 	req->hash = hash_default;
+	req->http_protocol = HTTP_PROTOCOL_1_0;
+	req->timeout = HTTP_CNX_TIMEOUT * TIMER_HZ;
 
 	/* Command line parser */
 	if (!parse_cmdline(argc, argv, req)) {

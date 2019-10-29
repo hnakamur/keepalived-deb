@@ -44,11 +44,11 @@ static inline double
 timeval_to_double(const timeval_t *t)
 {
 	/* The casts are necessary to avoid conversion warnings */
-	return (double)t->tv_sec + (double)t->tv_usec / TIMER_HZ_FLOAT;
+	return t->tv_sec + t->tv_usec / TIMER_HZ_DOUBLE;
 }
 
 static int
-vrrp_json_script_dump(json_writer_t *wr, char *prop, notify_script_t *script)
+vrrp_json_script_dump(json_writer_t *wr, const char *prop, notify_script_t *script)
 {
 	if (!script)
 		return -1;
@@ -95,7 +95,8 @@ vrrp_json_vrule_dump(json_writer_t *wr, void *data)
 static int
 vrrp_json_track_ifp_dump(json_writer_t *wr, void *data)
 {
-	interface_t *ifp = data;
+	tracked_if_t *tip = data;
+	interface_t *ifp = tip->ifp;
 
 	jsonw_string(wr, ifp->ifname);
 	return 0;
@@ -112,7 +113,7 @@ vrrp_json_track_script_dump(json_writer_t *wr, void *data)
 }
 
 static int
-vrrp_json_array_dump(json_writer_t *wr, char *prop, list l,
+vrrp_json_array_dump(json_writer_t *wr, const char *prop, list l,
 		     int (*func) (json_writer_t *, void *))
 {
 	void *data;
@@ -131,7 +132,7 @@ vrrp_json_array_dump(json_writer_t *wr, char *prop, list l,
 }
 
 static int
-vrrp_json_auth_dump(json_writer_t *wr, char *prop, vrrp_t *vrrp)
+vrrp_json_auth_dump(json_writer_t *wr, const char *prop, vrrp_t *vrrp)
 {
 	char buf[256];
 
@@ -161,7 +162,7 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 #endif
 	jsonw_string_field(wr, "ifp_ifname", vrrp->ifp->ifname);
 	jsonw_uint_field(wr, "master_priority", vrrp->master_priority);
-	jsonw_float_field(wr, "last_transition", timeval_to_double(&vrrp->last_transition));
+	jsonw_float_field_fmt(wr, "last_transition", "%f", timeval_to_double(&vrrp->last_transition));
 	jsonw_float_field(wr, "garp_delay", vrrp->garp_delay / TIMER_HZ_FLOAT);
 	jsonw_uint_field(wr, "garp_refresh", vrrp->garp_refresh.tv_sec);
 	jsonw_uint_field(wr, "garp_rep", vrrp->garp_rep);
@@ -253,7 +254,7 @@ vrrp_json_stats_dump(json_writer_t *wr, vrrp_t *vrrp)
  *	this offer generic integration for mapping
  *	socket fd to a FILE stream.
  */
-int
+static int
 vrrp_json_dump(FILE *fp)
 {
 	json_writer_t *wr;

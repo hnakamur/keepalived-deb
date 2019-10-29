@@ -50,28 +50,8 @@ static unsigned long specified_event_processes;
 /* Allow for English spelling */
 static const char * neighbor_str = "neighbor";
 
-static bool
-check_new_bfd(const char *name)
-{
-	if (strlen(name) >= BFD_INAME_MAX) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
-			    " name too long (maximum length is %i"
-			    " characters) - ignoring", name,
-			    BFD_INAME_MAX - 1);
-		return false;
-	}
-
-	if (find_bfd_by_name(name)) {
-		report_config_error(CONFIG_GENERAL_ERROR,
-			    "Configuration error: BFD instance %s"
-			    " already configured - ignoring", name);
-		return false;
-	}
-	return true;
-}
-
 static void
-bfd_handler(vector_t *strvec)
+bfd_handler(const vector_t *strvec)
 {
 	char *name;
 
@@ -83,18 +63,16 @@ bfd_handler(vector_t *strvec)
 
 	name = vector_slot(strvec, 1);
 
-	if (!check_new_bfd(name)) {
+	if (!alloc_bfd(name)) {
 		skip_block(true);
 		return;
 	}
-
-	alloc_bfd(name);
 
 	specified_event_processes = 0;
 }
 
 static void
-bfd_nbrip_handler(vector_t *strvec)
+bfd_nbrip_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	struct sockaddr_storage nbr_addr;
@@ -112,15 +90,7 @@ bfd_nbrip_handler(vector_t *strvec)
 		report_config_error(CONFIG_GENERAL_ERROR,
 			    "Configuration error: BFD instance %s has"
 			    " malformed %s address %s, ignoring instance",
-			    bfd->iname, neighbor_str, FMT_STR_VSLOT(strvec, 1));
-		list_del(bfd_data->bfd, bfd);
-		skip_block(false);
-		return;
-	} else if (find_bfd_by_addr(&nbr_addr)) {
-		report_config_error(CONFIG_GENERAL_ERROR,
-			    "Configuration error: BFD instance %s has"
-			    " duplicate %s address %s, ignoring instance",
-			    bfd->iname, neighbor_str, FMT_STR_VSLOT(strvec, 1));
+			    bfd->iname, neighbor_str, strvec_slot(strvec, 1));
 		list_del(bfd_data->bfd, bfd);
 		skip_block(false);
 		return;
@@ -129,7 +99,7 @@ bfd_nbrip_handler(vector_t *strvec)
 }
 
 static void
-bfd_srcip_handler(vector_t *strvec)
+bfd_srcip_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	struct sockaddr_storage src_addr;
@@ -144,13 +114,13 @@ bfd_srcip_handler(vector_t *strvec)
 		report_config_error(CONFIG_GENERAL_ERROR,
 			    "Configuration error: BFD instance %s has"
 			    " malformed source address %s, ignoring",
-			    bfd->iname, FMT_STR_VSLOT(strvec, 1));
+			    bfd->iname, strvec_slot(strvec, 1));
 	} else
 		bfd->src_addr = src_addr;
 }
 
 static void
-bfd_minrx_handler(vector_t *strvec)
+bfd_minrx_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	unsigned value;
@@ -164,7 +134,7 @@ bfd_minrx_handler(vector_t *strvec)
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN, BFD_MINRX_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_rx value %s is not valid (must be in range"
-			    " [%u-%u]), ignoring", bfd->iname, FMT_STR_VSLOT(strvec, 1),
+			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINRX_MIN, BFD_MINRX_MAX);
 	else
 		bfd->local_min_rx_intv = value * 1000U;
@@ -176,7 +146,7 @@ bfd_minrx_handler(vector_t *strvec)
 }
 
 static void
-bfd_mintx_handler(vector_t *strvec)
+bfd_mintx_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	unsigned value;
@@ -190,7 +160,7 @@ bfd_mintx_handler(vector_t *strvec)
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN, BFD_MINTX_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_tx value %s is not valid (must be in range"
-			    " [%u-%u]), ignoring", bfd->iname, FMT_STR_VSLOT(strvec, 1),
+			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINTX_MIN, BFD_MINTX_MAX);
 	else
 		bfd->local_min_tx_intv = value * 1000U;
@@ -202,7 +172,7 @@ bfd_mintx_handler(vector_t *strvec)
 }
 
 static void
-bfd_idletx_handler(vector_t *strvec)
+bfd_idletx_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	unsigned value;
@@ -216,7 +186,7 @@ bfd_idletx_handler(vector_t *strvec)
 	if (!read_unsigned_strvec(strvec, 1, &value,BFD_IDLETX_MIN, BFD_IDLETX_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " idle_tx value %s is not valid (must be in range"
-			    " [%u-%u]), ignoring", bfd->iname, FMT_STR_VSLOT(strvec, 1),
+			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_IDLETX_MIN, BFD_IDLETX_MAX);
 	else
 		bfd->local_idle_tx_intv = value * 1000U;
@@ -228,7 +198,7 @@ bfd_idletx_handler(vector_t *strvec)
 }
 
 static void
-bfd_multiplier_handler(vector_t *strvec)
+bfd_multiplier_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	unsigned value;
@@ -242,14 +212,14 @@ bfd_multiplier_handler(vector_t *strvec)
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MULTIPLIER_MIN, BFD_MULTIPLIER_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " multiplier value %s not valid (must be in range"
-			    " [%u-%u]), ignoring", bfd->iname, FMT_STR_VSLOT(strvec, 1),
+			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MULTIPLIER_MIN, BFD_MULTIPLIER_MAX);
 	else
 		bfd->local_detect_mult = value;
 }
 
 static void
-bfd_passive_handler(__attribute__((unused)) vector_t *strvec)
+bfd_passive_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	bfd_t *bfd;
 
@@ -262,7 +232,7 @@ bfd_passive_handler(__attribute__((unused)) vector_t *strvec)
 }
 
 static void
-bfd_ttl_handler(vector_t *strvec)
+bfd_ttl_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	unsigned value;
@@ -276,14 +246,14 @@ bfd_ttl_handler(vector_t *strvec)
 	if (!read_unsigned_strvec(strvec, 1, &value, 1, BFD_TTL_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " ttl/hoplimit value %s not valid (must be in range"
-			    " [1-%u]), ignoring", bfd->iname,
-			    FMT_STR_VSLOT(strvec, 1), BFD_TTL_MAX);
+			    " [1-%d]), ignoring", bfd->iname,
+			    strvec_slot(strvec, 1), BFD_TTL_MAX);
 	else
 		bfd->ttl = value;
 }
 
 static void
-bfd_maxhops_handler(vector_t *strvec)
+bfd_maxhops_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
 	int value;
@@ -297,8 +267,8 @@ bfd_maxhops_handler(vector_t *strvec)
 	if (!read_int_strvec(strvec, 1, &value, -1, BFD_TTL_MAX, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " max_hops value %s not valid (must be in range"
-			    " [-1-%u]), ignoring", bfd->iname,
-			    FMT_STR_VSLOT(strvec, 1), BFD_TTL_MAX);
+			    " [-1-%d]), ignoring", bfd->iname,
+			    strvec_slot(strvec, 1), BFD_TTL_MAX);
 	else
 		bfd->max_hops = value;
 }
@@ -350,6 +320,23 @@ bfd_end_handler(void)
 		return;
 	}
 
+	if (find_bfd_by_addr(&bfd->nbr_addr, &bfd->src_addr)) {
+		if (bfd->src_addr.ss_family) {
+			char src_addr[INET6_ADDRSTRLEN];
+			strcpy(src_addr, inet_sockaddrtos(&bfd->src_addr));
+			report_config_error(CONFIG_GENERAL_ERROR,
+				    "Configuration error: BFD instance %s has"
+				    " duplicate source/%s address %s/%s, ignoring instance",
+				    bfd->iname, neighbor_str, src_addr, inet_sockaddrtos(&bfd->nbr_addr));
+		} else
+			report_config_error(CONFIG_GENERAL_ERROR,
+				    "Configuration error: BFD instance %s has"
+				    " duplicate %s address %s, ignoring instance",
+				    bfd->iname, neighbor_str, inet_sockaddrtos(&bfd->nbr_addr));
+		list_del(bfd_data->bfd, bfd);
+		return;
+	}
+
 	if (!bfd->ttl)
 		bfd->ttl = bfd->nbr_addr.ss_family == AF_INET ? BFD_CONTROL_TTL : BFD_CONTROL_HOPLIMIT;
 	if (bfd->max_hops > bfd->ttl) {
@@ -378,16 +365,22 @@ bfd_end_handler(void)
 #ifdef _WITH_VRRP_
 #ifndef _DEBUG_
 static void
-bfd_vrrp_handler(vector_t *strvec)
+bfd_vrrp_handler(const vector_t *strvec)
 {
 	vrrp_tracked_bfd_t *tbfd;
-	char *name;
+	const char *name;
 	element e;
 
 	if (!strvec)
 		return;
 
-	name = vector_slot(strvec, 1);
+	name = strvec_slot(strvec, 1);
+
+	if (strlen(name) >= sizeof tbfd->bname) {
+		report_config_error(CONFIG_GENERAL_ERROR, "BFD name %s too long", name);
+		skip_block(true);
+		return;
+	}
 
 	LIST_FOREACH(vrrp_data->vrrp_track_bfds, tbfd, e) {
 		if (!strcmp(name, tbfd->bname)) {
@@ -400,13 +393,14 @@ bfd_vrrp_handler(vector_t *strvec)
 	PMALLOC(tbfd);
 	strcpy(tbfd->bname, name);
 	tbfd->weight = 0;
+	tbfd->weight_reverse = false;
 	tbfd->bfd_up = false;
 	list_add(vrrp_data->vrrp_track_bfds, tbfd);
 }
 #endif
 
 static void
-bfd_vrrp_weight_handler(vector_t *strvec)
+bfd_vrrp_weight_handler(const vector_t *strvec)
 {
 	vrrp_tracked_bfd_t *tbfd;
 	int value;
@@ -420,14 +414,22 @@ bfd_vrrp_weight_handler(vector_t *strvec)
 	if (!read_int_strvec(strvec, 1, &value, -253, 253, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " weight value %s not valid (must be in range"
-			    " [%d-%d]), ignoring", tbfd->bname, FMT_STR_VSLOT(strvec, 1),
+			    " [%d-%d]), ignoring", tbfd->bname, strvec_slot(strvec, 1),
 			    -253, 253);
 	} else
 		tbfd->weight = value;
+
+	if (vector_size(strvec) >= 3) {
+		if (strcmp(strvec_slot(strvec, 2), "reverse"))
+			report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
+				    " unknown weight option %s", tbfd->bname, strvec_slot(strvec, 2));
+		else
+			tbfd->weight_reverse = true;
+	}
 }
 
 static void
-bfd_event_vrrp_handler(__attribute__((unused)) vector_t *strvec)
+bfd_event_vrrp_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	__set_bit(DAEMON_VRRP, &specified_event_processes);
 }
@@ -436,7 +438,7 @@ bfd_event_vrrp_handler(__attribute__((unused)) vector_t *strvec)
 #ifdef _WITH_LVS_
 #ifndef _DEBUG_
 static void
-bfd_checker_handler(vector_t *strvec)
+bfd_checker_handler(const vector_t *strvec)
 {
 	checker_tracked_bfd_t *tbfd;
 	char *name;
@@ -456,8 +458,7 @@ bfd_checker_handler(vector_t *strvec)
 	}
 
 	PMALLOC(tbfd);
-	tbfd->bname = MALLOC(strlen(name)+1);
-	strcpy(tbfd->bname, name);
+	tbfd->bname = STRDUP(name);
 //	tbfd->weight = 0;
 
 	list_add(check_data->track_bfds, tbfd);
@@ -465,20 +466,20 @@ bfd_checker_handler(vector_t *strvec)
 #endif
 
 static void
-bfd_event_checker_handler(__attribute__((unused)) vector_t *strvec)
+bfd_event_checker_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	__set_bit(DAEMON_CHECKERS, &specified_event_processes);
 }
 #endif
 
 static void
-ignore_handler(__attribute__((unused)) vector_t *strvec)
+ignore_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	return;
 }
 
 static void
-install_keyword_conditional(const char *string, void (*handler) (vector_t *), bool want_handler)
+install_keyword_conditional(const char *string, void (*handler) (const vector_t *), bool want_handler)
 {
 	install_keyword(string, want_handler ? handler : ignore_handler);
 }
@@ -540,7 +541,7 @@ init_bfd_keywords(bool active)
 #endif
 }
 
-vector_t *
+const vector_t *
 bfd_init_keywords(void)
 {
 	/* global definitions mapping */

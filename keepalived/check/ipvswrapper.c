@@ -29,6 +29,7 @@
 #include <sys/wait.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/stat.h>
 
 #ifndef O_CLOEXEC	/* Since Linux 2.6.23 and glibc 2.7 */
 #define O_CLOEXEC 0	/* It doesn't really matter if O_CLOEXEC isn't set here */
@@ -40,103 +41,39 @@
 #include "utils.h"
 #include "logger.h"
 #include "libipvs.h"
+#include "main.h"
 
 static bool no_ipvs = false;
 
-/*
- * Utility functions coming from Wensong code
- */
-
-static char*
-get_modprobe(void)
+static const char * __attribute__((pure))
+ipvs_cmd_str(int cmd)
 {
-	int procfile;
-	char *ret;
-	ssize_t count;
-
-	ret = MALLOC(PATH_MAX);
-	if (!ret)
-		return NULL;
-
-	procfile = open("/proc/sys/kernel/modprobe", O_RDONLY | O_CLOEXEC);
-	if (procfile < 0) {
-		FREE(ret);
-		return NULL;
-	}
-
-	count = read(procfile, ret, PATH_MAX);
-	close(procfile);
-
-	if (count > 0 && count < PATH_MAX)
+	switch (cmd)
 	{
-		if (ret[count - 1] == '\n')
-			ret[count - 1] = '\0';
-		else
-			ret[count] = '\0';
-		return ret;
+		switch_define_str(IP_VS_SO_SET_ADD);
+		switch_define_str(IP_VS_SO_SET_ADDDEST);
+		switch_define_str(IP_VS_SO_SET_DEL);
+		switch_define_str(IP_VS_SO_SET_DELDEST);
+		switch_define_str(IP_VS_SO_SET_EDIT);
+		switch_define_str(IP_VS_SO_SET_EDITDEST);
+		switch_define_str(IP_VS_SO_SET_FLUSH);
+		switch_define_str(IP_VS_SO_SET_STARTDAEMON);
+		switch_define_str(IP_VS_SO_SET_STOPDAEMON);
+		switch_define_str(IP_VS_SO_SET_TIMEOUT);
+		switch_define_str(IP_VS_SO_SET_ZERO);
 	}
 
-	FREE(ret);
-
-	return NULL;
+	return "(unknown)";
 }
 
-static bool
-modprobe_ipvs(void)
-{
-	char *argv[] = { "/sbin/modprobe", "-s", "--", "ip_vs", NULL };
-	int child;
-	int status;
-	int rc;
-	char *modprobe = get_modprobe();
-	struct sigaction act, old_act;
-
-	if (modprobe)
-		argv[0] = modprobe;
-
-	act.sa_handler = SIG_DFL;
-	sigemptyset(&act.sa_mask);
-	act.sa_flags = 0;
-
-	sigaction ( SIGCHLD, &act, &old_act);
-
-#ifdef ENABLE_LOG_TO_FILE
-	if (log_file_name)
-		flush_log_file();
-#endif
-
-	if (!(child = fork())) {
-		execv(argv[0], argv);
-		exit(1);
-	}
-
-	rc = waitpid(child, &status, 0);
-
-	sigaction ( SIGCHLD, &old_act, NULL);
-
-	if (rc < 0) {
-		log_message(LOG_INFO, "IPVS: waitpid error (%s)"
-				    , strerror(errno));
-	}
-
-	if (modprobe)
-		FREE(modprobe);
-
-	if (!WIFEXITED(status) || WEXITSTATUS(status)) {
-		return true;
-	}
-
-	return false;
-}
 /* fetch virtual server group from group name */
-virtual_server_group_t *
-ipvs_get_group_by_name(char *gname, list l)
+virtual_server_group_t * __attribute__ ((pure))
+ipvs_get_group_by_name(const char *gname, list l)
 {
 	element e;
 	virtual_server_group_t *vsg;
 
-	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-		vsg = ELEMENT_DATA(e);
+	LIST_FOREACH(l, vsg, e) {
 		if (!strcmp(vsg->gname, gname))
 			return vsg;
 	}
@@ -147,10 +84,10 @@ ipvs_get_group_by_name(char *gname, list l)
 int
 ipvs_start(void)
 {
-	log_message(LOG_DEBUG, "Initializing ipvs");
+	log_message(LOG_DEBUG, "%snitializing ipvs", reload ? "Rei" : "I");
 	/* Initialize IPVS module */
 	if (ipvs_init()) {
-		if (modprobe_ipvs() || ipvs_init()) {
+		if (keepalived_modprobe("ip_vs") || ipvs_init()) {
 			log_message(LOG_INFO, "IPVS: Can't initialize ipvs: %s",
 			       ipvs_strerror(errno));
 			no_ipvs = true;
@@ -182,7 +119,8 @@ ipvs_set_timeouts(int tcp_timeout, int tcpfin_timeout, int udp_timeout)
 	to.tcp_fin_timeout = tcpfin_timeout;
 	to.udp_timeout = udp_timeout;
 
-	ipvs_set_timeout(&to);
+	if (ipvs_set_timeout(&to))
+		log_message(LOG_INFO, "Failed to set ipvs timeouts");
 }
 
 /* Send user rules to IPVS module */
@@ -240,7 +178,7 @@ ipvs_talk(int cmd, ipvs_service_t *srule, ipvs_dest_t *drule, ipvs_daemon_t *dae
 		else if (errno == ENOENT &&
 			(cmd == IP_VS_SO_SET_DEL || cmd == IP_VS_SO_SET_DELDEST))
 			result = 0;
-		log_message(LOG_INFO, "IPVS (cmd %d, errno %d): %s", cmd, errno, ipvs_strerror(errno));
+		log_message(LOG_INFO, "IPVS cmd %s(%d) error: %s(%d)", ipvs_cmd_str(cmd), cmd, ipvs_strerror(errno), errno);
 	}
 	return result;
 }
@@ -259,7 +197,7 @@ ipvs_syncd_cmd(int cmd, const struct lvs_syncd_config *config, int state, bool i
 	if (config) {
 		daemonrule.syncid = (int)config->syncid;
 		if (!ignore_interface)
-			strcpy(daemonrule.mcast_ifn, config->ifname);
+			strcpy_safe(daemonrule.mcast_ifn, config->ifname);
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 		if (cmd == IPVS_STARTDAEMON) {
 			if (config->sync_maxlen)
@@ -270,11 +208,11 @@ ipvs_syncd_cmd(int cmd, const struct lvs_syncd_config *config, int state, bool i
 				daemonrule.mcast_ttl = config->mcast_ttl;
 			if (config->mcast_group.ss_family == AF_INET) {
 				daemonrule.mcast_af = AF_INET;
-				daemonrule.mcast_group.ip = ((struct sockaddr_in *)&config->mcast_group)->sin_addr.s_addr;
+				daemonrule.mcast_group.ip = ((const struct sockaddr_in *)&config->mcast_group)->sin_addr.s_addr;
 			}
 			else if (config->mcast_group.ss_family == AF_INET6) {
 				daemonrule.mcast_af = AF_INET6;
-				memcpy(&daemonrule.mcast_group.in6, &((struct sockaddr_in6 *)&config->mcast_group)->sin6_addr, sizeof(daemonrule.mcast_group.in6));
+				memcpy(&daemonrule.mcast_group.in6, &((const struct sockaddr_in6 *)&config->mcast_group)->sin6_addr, sizeof(daemonrule.mcast_group.in6));
 			}
 		}
 #endif
@@ -337,7 +275,7 @@ is_vsge_alive(virtual_server_group_entry_t *vsge, virtual_server_t *vs)
 }
 
 static void
-update_vsge_alive_count(virtual_server_group_entry_t *vsge, virtual_server_t *vs, bool up)
+update_vsge_alive_count(virtual_server_group_entry_t *vsge, const virtual_server_t *vs, bool up)
 {
 	unsigned *alive_p;
 
@@ -361,13 +299,13 @@ update_vsge_alive_count(virtual_server_group_entry_t *vsge, virtual_server_t *vs
 }
 
 static void
-set_vsge_alive(virtual_server_group_entry_t *vsge, virtual_server_t *vs)
+set_vsge_alive(virtual_server_group_entry_t *vsge, const virtual_server_t *vs)
 {
 	update_vsge_alive_count(vsge, vs, true);
 }
 
 static void
-unset_vsge_alive(virtual_server_group_entry_t *vsge, virtual_server_t *vs)
+unset_vsge_alive(virtual_server_group_entry_t *vsge, const virtual_server_t *vs)
 {
 	update_vsge_alive_count(vsge, vs, false);
 }
@@ -384,7 +322,7 @@ ipvs_change_needed(int cmd, virtual_server_group_entry_t *vsge, virtual_server_t
 			vs->service_type == IPPROTO_TCP ? vsge->tcp_alive :
 			vs->service_type == IPPROTO_UDP ? vsge->udp_alive : vsge->sctp_alive;
 
-		return (count == 1);
+		return (count == 0);
 	}
 	else if (cmd == IP_VS_SO_SET_ADDDEST)
 		return !rs->alive;
@@ -397,9 +335,9 @@ ipvs_change_needed(int cmd, virtual_server_group_entry_t *vsge, virtual_server_t
 static void
 ipvs_set_vsge_alive_state(int cmd, virtual_server_group_entry_t *vsge, virtual_server_t *vs)
 {
-	if (cmd == IP_VS_SO_SET_ADD)
+	if (cmd == IP_VS_SO_SET_ADDDEST)
 		set_vsge_alive(vsge, vs);
-	else if (cmd == IP_VS_SO_SET_DEL)
+	else if (cmd == IP_VS_SO_SET_DELDEST)
 		unset_vsge_alive(vsge, vs);
 }
 
@@ -414,32 +352,40 @@ ipvs_group_cmd(int cmd, ipvs_service_t *srule, ipvs_dest_t *drule, virtual_serve
 	if (!vsg)
 		return 0;
 
-	/* visit addr_ip list */
+	/* visit addr_range list */
 	LIST_FOREACH(vsg->addr_range, vsg_entry, e) {
+		if (cmd == IP_VS_SO_SET_ADD && reload && vsg_entry->reloaded)
+			continue;
 		if (ipvs_change_needed(cmd, vsg_entry, vs, rs)) {
 			srule->user.port = inet_sockaddrport(&vsg_entry->addr);
-
-			if (vsg_entry->range) {
-				if (ipvs_group_range_cmd(cmd, srule, drule, vsg_entry))
-					return -1;
-			} else {
-				if (vsg_entry->addr.ss_family == AF_INET6)
-					inet_sockaddrip6(&vsg_entry->addr, &srule->nf_addr.in6);
+			if (rs) {
+				if (rs->forwarding_method != IP_VS_CONN_F_MASQ)
+					drule->user.port = srule->user.port;
 				else
-					srule->nf_addr.ip = inet_sockaddrip4(&vsg_entry->addr);
-
-				/* Talk to the IPVS channel */
-				if (ipvs_talk(cmd, srule, drule, NULL, false))
-					return -1;
+					drule->user.port = inet_sockaddrport(&rs->addr);
 			}
+
+			if (ipvs_group_range_cmd(cmd, srule, drule, vsg_entry))
+				return -1;
 		}
-		ipvs_set_vsge_alive_state(cmd, vsg_entry, vs);
+
+		if (cmd == IP_VS_SO_SET_ADDDEST || cmd == IP_VS_SO_SET_DELDEST)
+			ipvs_set_vsge_alive_state(cmd, vsg_entry, vs);
 	}
 
 	/* visit vfwmark list */
 	memset(&srule->nf_addr, 0, sizeof(srule->nf_addr));
 	srule->user.port = 0;
+	if (rs) {
+		if (rs->forwarding_method != IP_VS_CONN_F_MASQ)
+			drule->user.port = 0;
+		else
+			drule->user.port = inet_sockaddrport(&rs->addr);
+	}
 	LIST_FOREACH(vsg->vfwmark, vsg_entry, e) {
+		if (cmd == IP_VS_SO_SET_ADD && reload && vsg_entry->reloaded)
+			continue;
+
 		srule->user.fwmark = vsg_entry->vfwmark;
 
 		/* Talk to the IPVS channel */
@@ -460,7 +406,7 @@ ipvs_set_srule(int cmd, ipvs_service_t *srule, virtual_server_t *vs)
 	/* Clean service rule */
 	memset(srule, 0, sizeof(ipvs_service_t));
 
-	strncpy(srule->user.sched_name, vs->sched, IP_VS_SCHEDNAME_MAXLEN);
+	strcpy_safe(srule->user.sched_name, vs->sched);
 	srule->af = vs->af;
 	srule->user.flags = vs->flags;
 	srule->user.netmask = (vs->af == AF_INET6) ? 128 : ((uint32_t) 0xffffffff);
@@ -502,6 +448,13 @@ ipvs_set_drule(int cmd, ipvs_dest_t *drule, real_server_t * rs)
 	drule->user.weight = rs->weight;
 	drule->user.u_threshold = rs->u_threshold;
 	drule->user.l_threshold = rs->l_threshold;
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	drule->tun_type = rs->tun_type;
+	drule->tun_port = rs->tun_port;
+#ifdef _HAVE_IPVS_TUN_CSUM_
+	drule->tun_flags = rs->tun_flags;
+#endif
+#endif
 }
 
 /* Set/Remove a RS from a VS */
@@ -540,12 +493,16 @@ ipvs_cmd(int cmd, virtual_server_t *vs, real_server_t *rs)
 
 	if (vs->vfwmark) {
 		srule.user.fwmark = vs->vfwmark;
+		if (rs && rs->forwarding_method != IP_VS_CONN_F_MASQ)
+			drule.user.port = 0;
 	} else {
 		if (vs->af == AF_INET6)
 			inet_sockaddrip6(&vs->addr, &srule.nf_addr.in6);
 		else
 			srule.nf_addr.ip = inet_sockaddrip4(&vs->addr);
 		srule.user.port = inet_sockaddrport(&vs->addr);
+		if (rs && rs->forwarding_method != IP_VS_CONN_F_MASQ)
+			drule.user.port = srule.user.port;
 	}
 
 	/* Talk to the IPVS channel */
@@ -608,7 +565,7 @@ ipvs_group_remove_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge
 			/* Setting IPVS drule */
 			ipvs_set_drule(IP_VS_SO_SET_DELDEST, &drule, rs);
 
-			/* Set vs rule */
+			/* Delete rs rule */
 			if (vsge->is_fwmark) {
 				/* Talk to the IPVS channel */
 				ipvs_talk(IP_VS_SO_SET_DELDEST, &srule, &drule, NULL, false);
@@ -619,12 +576,11 @@ ipvs_group_remove_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge
 	}
 
 	/* Remove VS entry if this is the last VS using it */
-	unset_vsge_alive(vsge, vs);
 	if (!is_vsge_alive(vsge, vs)) {
-		if (vsge->range)
-			ipvs_group_range_cmd(IP_VS_SO_SET_DEL, &srule, NULL, vsge);
-		else
+		if (vsge->is_fwmark)
 			ipvs_talk(IP_VS_SO_SET_DEL, &srule, NULL, NULL, false);
+		else
+			ipvs_group_range_cmd(IP_VS_SO_SET_DEL, &srule, NULL, vsge);
 	}
 }
 
@@ -729,11 +685,11 @@ ipvs_update_stats(virtual_server_t *vs)
 	union nf_inet_addr nfaddr;
 	unsigned i;
 	real_server_t *rs;
-	time_t time_now = time(NULL);
+	time_t cur_time = time(NULL);
 
-	if (time_now - vs->lastupdated < STATS_REFRESH)
+	if (cur_time - vs->lastupdated < STATS_REFRESH)
 		return;
-	vs->lastupdated = time_now;
+	vs->lastupdated = cur_time;
 
 	/* Reset stats */
 	memset(&vs->stats, 0, sizeof(vs->stats));

@@ -57,7 +57,7 @@ static const char *terminate_banner;	/* banner string for report file */
 static bool skip_mem_check_final;
 #endif
 
-static void *
+static void * __attribute__ ((malloc))
 xalloc(unsigned long size)
 {
 	void *mem = malloc(size);
@@ -79,7 +79,10 @@ xalloc(unsigned long size)
 	return mem;
 }
 
-void *
+#ifdef _MEM_CHECK_
+static
+#endif
+void * __attribute__ ((malloc))
 zalloc(unsigned long size)
 {
 	void *mem = xalloc(size);
@@ -141,8 +144,6 @@ enum slot_type {
 #define CHECK_VAL	0xa5a5
 #endif
 
-#define FREE_LIST_SIZE	256
-
 typedef struct {
 	enum slot_type type;
 	int line;
@@ -174,13 +175,13 @@ static unsigned seq_num;
 static FILE *log_op = NULL;
 
 static inline int
-memcheck_ptr_cmp(MEMCHECK *m1, MEMCHECK *m2)
+memcheck_ptr_cmp(const MEMCHECK *m1, const MEMCHECK *m2)
 {
-	return m1->ptr - m2->ptr;
+	return (char *)m1->ptr - (char *)m2->ptr;
 }
 
 static inline int
-memcheck_seq_cmp(MEMCHECK *m1, MEMCHECK *m2)
+memcheck_seq_cmp(const MEMCHECK *m1, const MEMCHECK *m2)
 {
 	return m1->seq_num - m2->seq_num;
 }
@@ -226,8 +227,8 @@ get_free_alloc_entry(void)
 	return entry;
 }
 
-void *
-keepalived_malloc(size_t size, const char *file, const char *function, int line)
+static void *
+keepalived_malloc_common(size_t size, const char *file, const char *function, int line, const char *name)
 {
 	void *buf;
 	MEMCHECK *entry, *entry2;
@@ -255,12 +256,12 @@ keepalived_malloc(size_t size, const char *file, const char *function, int line)
 	if (++number_alloc_list > max_alloc_list)
 		max_alloc_list = number_alloc_list;
 
-	fprintf(log_op, "%szalloc [%3d:%3d], %9p, %4zu at %s, %3d, %s%s\n",
-	       format_time(), entry->seq_num, number_alloc_list, buf, size, file, line, function, !size ? " - size is 0" : "");
+	fprintf(log_op, "%s%s [%3u:%3u], %9p, %4zu at %s, %3d, %s%s\n",
+	       format_time(), name, entry->seq_num, number_alloc_list, buf, size, file, line, function, !size ? " - size is 0" : "");
 #ifdef _MEM_CHECK_LOG_
 	if (__test_bit(MEM_CHECK_LOG_BIT, &debug))
-		log_message(LOG_INFO, "zalloc[%3d:%3d], %9p, %4zu at %s, %3d, %s",
-		       entry->seq_num, number_alloc_list, buf, size, file, line, function);
+		log_message(LOG_INFO, "%s[%3u:%3u], %9p, %4zu at %s, %3d, %s",
+		       name, entry->seq_num, number_alloc_list, buf, size, file, line, function);
 #endif
 
 	num_mallocs++;
@@ -273,7 +274,32 @@ keepalived_malloc(size_t size, const char *file, const char *function, int line)
 		list_add_tail(&entry2->l, &bad_list);
 	}
 
+	/* coverity[leaked_storage] */
 	return buf;
+}
+
+void *
+keepalived_malloc(size_t size, const char *file, const char *function, int line)
+{
+	return keepalived_malloc_common(size, file, function, line, "zalloc");
+}
+
+char *
+keepalived_strdup(const char *str, const char *file, const char *function, int line)
+{
+	char *str_p;
+
+	str_p = keepalived_malloc_common(strlen(str) + 1, file, function, line, "strdup");
+	return strcpy(str_p, str);
+}
+
+char *
+keepalived_strndup(const char *str, size_t size, const char *file, const char *function, int line)
+{
+	char *str_p;
+
+	str_p = keepalived_malloc_common(size + 1, file, function, line, "strndup");
+	return strncpy(str_p, str, size);
 }
 
 static void *
@@ -342,7 +368,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 			if (le->ptr == buffer &&
 			    le->type == LAST_FREE) {
 				fprintf
-				    (log_op, "%11s-> pointer last released at [%3d:%3d], at %s, %3d, %s\n",
+				    (log_op, "%11s-> pointer last released at [%3u:%3u], at %s, %3d, %s\n",
 				     "", le->seq_num, number_alloc_list,
 				     le->file, le->line,
 				     le->func);
@@ -354,6 +380,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 		list_add_tail(&entry->l, &bad_list);
 
+		/* coverity[leaked_storage] */
 		return NULL;
 	}
 
@@ -369,7 +396,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 		entry2->type = OVERRUN;
 		list_add_tail(&entry2->l, &bad_list);
 
-		fprintf(log_op, "%s%s corrupt, buffer overrun [%3d:%3d], %9p, %4zu at %s, %3d, %s\n",
+		fprintf(log_op, "%s%s corrupt, buffer overrun [%3u:%3u], %9p, %4zu at %s, %3d, %s\n",
 		       format_time(), !is_realloc ? "free" : "realloc",
 		       entry->seq_num, number_alloc_list, buffer,
 		       entry->size, file,
@@ -389,7 +416,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 		free(buffer);
 
 		if (is_realloc) {
-			fprintf(log_op, "%s%-7s[%3d:%3d], %9p, %4zu at %s, %3d, %s -> %9s, %4s at %s, %3d, %s\n",
+			fprintf(log_op, "%s%-7s[%3u:%3u], %9p, %4zu at %s, %3d, %s -> %9s, %4s at %s, %3d, %s\n",
 			       format_time(), "realloc", entry->seq_num,
 			       number_alloc_list, entry->ptr,
 			       entry->size, entry->file,
@@ -406,7 +433,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 			list_add_tail(&entry2->l, &bad_list);
 		}
 		else
-			fprintf(log_op, "%s%-7s[%3d:%3d], %9p, %4zu at %s, %3d, %s -> %9s, %4s at %s, %3d, %s\n",
+			fprintf(log_op, "%s%-7s[%3u:%3u], %9p, %4zu at %s, %3d, %s -> %9s, %4s at %s, %3d, %s\n",
 			       format_time(), "free", entry->seq_num,
 			       number_alloc_list, entry->ptr,
 			       entry->size, entry->file,
@@ -414,7 +441,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 			       "NULL", "", file, line, function);
 #ifdef _MEM_CHECK_LOG_
 		if (__test_bit(MEM_CHECK_LOG_BIT, &debug))
-			log_message(LOG_INFO, "%-7s[%3d:%3d], %9p, %4zu at %s, %3d, %s",
+			log_message(LOG_INFO, "%-7s[%3u:%3u], %9p, %4zu at %s, %3d, %s",
 			       is_realloc ? "realloc" : "free",
 			       entry->seq_num, number_alloc_list, buffer,
 			       entry->size, file, line, function);
@@ -440,7 +467,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 	if (mem_allocated > max_mem_allocated)
 		max_mem_allocated = mem_allocated;
 
-	fprintf(log_op, "%srealloc[%3d:%3d], %9p, %4zu at %s, %3d, %s -> %9p, %4zu at %s, %3d, %s\n",
+	fprintf(log_op, "%srealloc[%3u:%3u], %9p, %4zu at %s, %3d, %s -> %9p, %4zu at %s, %3d, %s\n",
 	       format_time(), entry->seq_num,
 	       number_alloc_list, entry->ptr,
 	       entry->size, entry->file,
@@ -448,7 +475,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 	       buffer, size, file, line, function);
 #ifdef _MEM_CHECK_LOG_
 	if (__test_bit(MEM_CHECK_LOG_BIT, &debug))
-		log_message(LOG_INFO, "realloc[%3d:%3d], %9p, %4zu at %s, %3d, %s -> %9p, %4zu at %s, %3d, %s",
+		log_message(LOG_INFO, "realloc[%3u:%3u], %9p, %4zu at %s, %3d, %s -> %9p, %4zu at %s, %3d, %s",
 		       entry->seq_num, number_alloc_list, entry->ptr,
 		       entry->size, entry->file,
 		       entry->line, entry->func,
@@ -474,6 +501,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 	num_reallocs++;
 
+	/* coverity[leaked_storage] */
 	return buffer;
 }
 
@@ -512,11 +540,11 @@ keepalived_alloc_log(bool final)
 		fprintf(log_op, "Entries %s\n\n", final ? "not released" : "currently allocated");
 		rb_for_each_entry(entry, &alloc_list, t) {
 			sum += entry->size;
-			fprintf(log_op, "%9p [%3d:%3d], %4zu at %s, %3d, %s",
+			fprintf(log_op, "%9p [%3u:%3u], %4zu at %s, %3d, %s",
 			       entry->ptr, entry->seq_num, number_alloc_list,
 			       entry->size, entry->file, entry->line, entry->func);
 			if (entry->type != ALLOCATED)
-				fprintf(log_op, " type = %d", entry->type);
+				fprintf(log_op, " type = %u", entry->type);
 			fprintf(log_op, "\n");
 		}
 	}
@@ -560,19 +588,19 @@ keepalived_alloc_log(bool final)
 				break;
 			case OVERRUN:
 				overrun++;
-				fprintf(log_op, "%9p [%3d:%3d], %4zu at %s, %3d, %s - buffer overrun\n",
+				fprintf(log_op, "%9p [%3u:%3u], %4zu at %s, %3d, %s - buffer overrun\n",
 				       entry->ptr, entry->seq_num, number_alloc_list,
 				       entry->size, entry->file, entry->line, entry->func);
 				break;
 			case MALLOC_ZERO_SIZE:
 				zero_size++;
-				fprintf(log_op, "%9p [%3d:%3d], %4zu at %s, %3d, %s - malloc zero size\n",
+				fprintf(log_op, "%9p [%3u:%3u], %4zu at %s, %3d, %s - malloc zero size\n",
 				       entry->ptr, entry->seq_num, number_alloc_list,
 				       entry->size, entry->file, entry->line, entry->func);
 				break;
 			case REALLOC_ZERO_SIZE:
 				zero_size++;
-				fprintf(log_op, "%9p [%3d:%3d], %4zu at %s, %3d, %s - realloc zero size (handled as free)\n",
+				fprintf(log_op, "%9p [%3u:%3u], %4zu at %s, %3d, %s - realloc zero size (handled as free)\n",
 				       entry->ptr, entry->seq_num, number_alloc_list,
 				       entry->size, entry->file, entry->line, entry->func);
 				break;
@@ -586,14 +614,14 @@ keepalived_alloc_log(bool final)
 
 	fprintf(log_op, "\n\n---[ Keepalived memory dump summary for (%s) ]---\n", terminate_banner);
 	fprintf(log_op, "Total number of bytes %s...: %zu\n", final ? "not freed" : "allocated", sum);
-	fprintf(log_op, "Number of entries %s.......: %d\n", final ? "not freed" : "allocated", number_alloc_list);
-	fprintf(log_op, "Maximum allocated entries.........: %d\n", max_alloc_list);
+	fprintf(log_op, "Number of entries %s.......: %u\n", final ? "not freed" : "allocated", number_alloc_list);
+	fprintf(log_op, "Maximum allocated entries.........: %u\n", max_alloc_list);
 	fprintf(log_op, "Maximum memory allocated..........: %zu\n", max_mem_allocated);
-	fprintf(log_op, "Number of mallocs.................: %d\n", num_mallocs);
-	fprintf(log_op, "Number of reallocs................: %d\n", num_reallocs);
-	fprintf(log_op, "Number of bad entries.............: %d\n", badptr);
-	fprintf(log_op, "Number of buffer overrun..........: %d\n", overrun);
-	fprintf(log_op, "Number of 0 size allocations......: %d\n\n", zero_size);
+	fprintf(log_op, "Number of mallocs.................: %u\n", num_mallocs);
+	fprintf(log_op, "Number of reallocs................: %u\n", num_reallocs);
+	fprintf(log_op, "Number of bad entries.............: %u\n", badptr);
+	fprintf(log_op, "Number of buffer overrun..........: %u\n", overrun);
+	fprintf(log_op, "Number of 0 size allocations......: %u\n\n", zero_size);
 	if (sum != mem_allocated)
 		fprintf(log_op, "ERROR - sum of allocated %zu != mem_allocated %zu\n", sum, mem_allocated);
 
@@ -649,7 +677,8 @@ mem_log_init(const char* prog_name, const char *banner)
 		int fd = fileno(log_op);
 
 		/* We don't want any children to inherit the log file */
-		fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
+		if (fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC))
+			log_message(LOG_INFO, "Warning - failed to set CLOEXEC on log file %s", log_name);
 
 		/* Make the log output line buffered. This was to ensure that
 		 * children didn't inherit the buffer, but the CLOEXEC above

@@ -54,7 +54,7 @@
 
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 struct lvs_syncd_config {
-	char				*ifname;	/* handle LVS sync daemon state using this */
+	const char			*ifname;	/* handle LVS sync daemon state using this */
 	vrrp_t				*vrrp;		/* instance FSM & running on specific interface */
 	unsigned			syncid;		/* 0 .. 255 */
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
@@ -63,7 +63,7 @@ struct lvs_syncd_config {
 	uint16_t			mcast_port;
 	uint8_t				mcast_ttl;
 #endif
-	char				*vrrp_name;	/* used during configuration and SNMP */
+	const char			*vrrp_name;	/* used during configuration and SNMP */
 };
 #endif
 
@@ -72,7 +72,7 @@ extern int ipvs_start(void);
 extern void ipvs_stop(void);
 extern void ipvs_set_timeouts(int, int, int);
 extern void ipvs_flush_cmd(void);
-extern virtual_server_group_t *ipvs_get_group_by_name(char *, list);
+extern virtual_server_group_t *ipvs_get_group_by_name(const char *, list) __attribute__ ((pure));
 extern void ipvs_group_sync_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge);
 extern void ipvs_group_remove_entry(virtual_server_t *, virtual_server_group_entry_t *);
 extern int ipvs_cmd(int, virtual_server_t *, real_server_t *);

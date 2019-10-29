@@ -29,7 +29,7 @@
 
 /* Multiple list helpers functions */
 list
-alloc_mlist_r(void (*free_func) (void *), void (*dump_func) (FILE *, void *), size_t size)
+alloc_mlist_r(void (*free_func) (void *), void (*dump_func) (FILE *, const void *), size_t size)
 {
 	list new = (list) MALLOC(size * sizeof (struct _list));
 	new->free = free_func;
@@ -81,16 +81,15 @@ free_mlist_r(list l, size_t size)
 
 /* Simple list helpers functions */
 list
-alloc_list_r(void (*free_func) (void *), void (*dump_func) (FILE *fp, void *))
+alloc_list_r(void (*free_func) (void *), void (*dump_func) (FILE *fp, const void *))
 {
 	return alloc_mlist_r(free_func, dump_func, 1);
 }
 
-static element
+static element __attribute__ ((malloc))
 alloc_element(void)
 {
-	element new = (element) MALLOC(sizeof (struct _element));
-	return new;
+	return (element) MALLOC(sizeof (struct _element));
 }
 
 static inline void
@@ -136,7 +135,7 @@ list_add_head_r(list l, void *data)
 }
 
 static inline void
-__list_remove(list l, element e)
+__list_remove(list l, const element e)
 {
 	if (e->prev)
 		e->prev->next = e->next;
@@ -152,17 +151,23 @@ __list_remove(list l, element e)
 }
 
 void
-list_remove_r(list l, element e)
+list_remove_r(list l, const element e)
 {
 	if (l->free)
 		(*l->free) (e->data);
 
 	__list_remove(l, e);
-	FREE(e);
+	FREE_ONLY(e);
 }
 
 void
-list_del_r(list l, void *data)
+list_extract(list l, const element e)
+{
+	__list_remove(l, e);
+}
+
+void
+list_del_r(list l, const void *data)
 {
 	element e;
 
@@ -181,8 +186,8 @@ list_transfer(element e, list l_from, list l_to)
 	__list_add(l_to, e);
 }
 
-void *
-list_element(list l, size_t num)
+void * __attribute__ ((pure))
+list_element(const list l, size_t num)
 {
 	element e = LIST_HEAD(l);
 	size_t i = 0;
@@ -201,7 +206,7 @@ list_element(list l, size_t num)
 }
 
 void
-dump_list(FILE *fp, list l)
+dump_list(FILE *fp, const list l)
 {
 	element e;
 
@@ -263,7 +268,7 @@ free_list_r(list *lp)
 }
 
 void
-free_list_element_r(list l, element e)
+free_list_element_r(list l, const element e)
 {
 	if (!l || !e)
 		return;
@@ -278,11 +283,11 @@ free_list_element_r(list l, element e)
 	if (l->free)
 		(*l->free) (e->data);
 	l->count--;
-	FREE(e);
+	FREE_ONLY(e);
 }
 
 void
-free_list_data_r(list l, void *data)
+free_list_data_r(list l, const void *data)
 {
 	element e;
 

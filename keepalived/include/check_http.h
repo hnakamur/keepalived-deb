@@ -42,11 +42,22 @@
 #include "scheduler.h"
 #include "list.h"
 
+typedef enum {
+        HTTP_PROTOCOL_1_0,
+        HTTP_PROTOCOL_1_0C,
+        HTTP_PROTOCOL_1_1,
+} http_protocol_t;
+
+#define HTTP_STATUS_CODE_MIN		100
+#define HTTP_STATUS_CODE_MAX		599
+#define HTTP_DEFAULT_STATUS_CODE_MIN	200
+#define HTTP_DEFAULT_STATUS_CODE_MAX	299
+
 /* Checker argument structure  */
 /* ssl specific thread arguments defs */
 typedef struct _request {
 	char				*buffer;
-	char				*extracted;
+	const char			*extracted;
 	int				error;
 	int				status_code;
 	size_t				len;
@@ -68,7 +79,7 @@ typedef struct _request {
 
 #ifdef _WITH_REGEX_CHECK_
 typedef struct _regex {
-	unsigned char			*pattern;
+	const unsigned char		*pattern;
 	int				pcre2_options;
 	pcre2_code			*pcre2_reCompiled;
 	pcre2_match_data		*pcre2_match_data;
@@ -83,10 +94,10 @@ typedef struct _regex {
 #endif
 
 typedef struct _url {
-	char				*path;
-	uint8_t				*digest;
-	int				status_code;
-	char				*virtualhost;
+	const char			*path;
+	const uint8_t			*digest;
+	unsigned long			status_code[(HTTP_STATUS_CODE_MAX - HTTP_STATUS_CODE_MIN + 1 - 1) / (sizeof(unsigned long) * CHAR_BIT) + 1];
+	const char			*virtualhost;
 	ssize_t				len_mismatch;
 #ifdef _WITH_REGEX_CHECK_
 	bool				regex_no_match;
@@ -101,13 +112,16 @@ typedef struct _url {
 
 typedef struct _http_checker {
 	unsigned			proto;
-	unsigned			url_it;		/* current url checked index */
+	element				url_it;		/* current url checked list element */
+	url_t				*failed_url;	/* the url that is currently failing, if any */
 	request_t			*req;		/* GET buffer and SSL args */
 	list				url;
-	char				*virtualhost;
+	http_protocol_t			http_protocol;
+	const char			*virtualhost;
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 	bool				enable_sni;
 #endif
+	bool				fast_recovery;
 } http_checker_t;
 
 /* global defs */
@@ -115,18 +129,6 @@ typedef struct _http_checker {
 #define MAX_BUFFER_LENGTH 4096U
 #define PROTO_HTTP	0x01
 #define PROTO_SSL	0x02
-
-/* GET processing command */
-#define REQUEST_TEMPLATE "GET %s HTTP/1.0\r\n" \
-			 "User-Agent: KeepAliveClient\r\n" \
-			 "Host: %s%s\r\n\r\n"
-
-#define REQUEST_TEMPLATE_IPV6 "GET %s HTTP/1.0\r\n" \
-			 "User-Agent: KeepAliveClient\r\n" \
-			 "Host: [%s]%s\r\n\r\n"
-
-/* macro utility */
-#define FMT_HTTP_RS(C) FMT_CHK(C)
 
 #ifdef _REGEX_DEBUG_
 extern bool do_regex_debug;
@@ -137,9 +139,9 @@ extern bool do_regex_timers;
 
 /* Define prototypes */
 extern void install_http_check_keyword(void);
-extern int timeout_epilog(thread_t *, const char *);
+extern int timeout_epilog(thread_ref_t, const char *);
 extern void http_process_response(request_t *, size_t, url_t *);
-extern int http_handle_response(thread_t *, unsigned char digest[16], bool);
+extern int http_handle_response(thread_ref_t, unsigned char digest[16], bool);
 #ifdef THREAD_DUMP
 extern void register_check_http_addresses(void);
 #endif

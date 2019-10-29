@@ -40,6 +40,7 @@
 #include <getopt.h>
 #include <linux/version.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 #include "main.h"
 #include "global_data.h"
@@ -67,6 +68,9 @@
 #endif
 #ifdef _WITH_JSON_
 #include "vrrp_json.h"
+#endif
+#ifdef _WITH_NFTABLES_
+#include "vrrp_nftables.h"
 #endif
 #endif
 #ifdef _WITH_BFD_
@@ -96,6 +100,10 @@
 #ifdef _TSM_DEBUG_
 #include "vrrp_scheduler.h"
 #endif
+#if defined _PARSER_DEBUG_ || defined _DUMP_KEYWORDS_
+#include "parser.h"
+#endif
+#include "warnings.h"
 
 /* musl libc doesn't define the following */
 #ifndef	W_EXITCODE
@@ -105,39 +113,36 @@
 #define	WCOREFLAG		((int32_t)WCOREDUMP(0xffffffff))
 #endif
 
-#define	VERSION_STRING		PACKAGE_NAME " v" PACKAGE_VERSION " (" GIT_DATE ")"
-#define COPYRIGHT_STRING	"Copyright(C) 2001-" GIT_YEAR " Alexandre Cassen, <acassen@gmail.com>"
-
 #define CHILD_WAIT_SECS	5
 
 /* global var */
 const char *version_string = VERSION_STRING;		/* keepalived version */
-char *conf_file = KEEPALIVED_CONFIG_FILE;		/* Configuration file */
+const char *conf_file = KEEPALIVED_CONFIG_FILE;		/* Configuration file */
 int log_facility = LOG_DAEMON;				/* Optional logging facilities */
 bool reload;						/* Set during a reload */
-char *main_pidfile;					/* overrule default pidfile */
+const char *main_pidfile;				/* overrule default pidfile */
 static bool free_main_pidfile;
 #ifdef _WITH_LVS_
 pid_t checkers_child;					/* Healthcheckers child process ID */
-char *checkers_pidfile;					/* overrule default pidfile */
+const char *checkers_pidfile;				/* overrule default pidfile */
 static bool free_checkers_pidfile;
 #endif
 #ifdef _WITH_VRRP_
 pid_t vrrp_child;					/* VRRP child process ID */
-char *vrrp_pidfile;					/* overrule default pidfile */
+const char *vrrp_pidfile;				/* overrule default pidfile */
 static bool free_vrrp_pidfile;
 #endif
 #ifdef _WITH_BFD_
 pid_t bfd_child;					/* BFD child process ID */
-char *bfd_pidfile;					/* overrule default pidfile */
+const char *bfd_pidfile;				/* overrule default pidfile */
 static bool free_bfd_pidfile;
 #endif
 unsigned long daemon_mode;				/* VRRP/CHECK/BFD subsystem selection */
 #ifdef _WITH_SNMP_
-bool snmp;						/* Enable SNMP support */
+bool snmp_option;					/* Enable SNMP support */
 const char *snmp_socket;				/* Socket to use for SNMP agent */
 #endif
-static char *syslog_ident;				/* syslog ident if not default */
+static const char *syslog_ident;			/* syslog ident if not default */
 bool use_pid_dir;					/* Put pid files in /var/run/keepalived or @localstatedir@/run/keepalived */
 
 unsigned os_major;					/* Kernel version */
@@ -170,7 +175,7 @@ static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
 
 /* debug flags */
-#if defined _TIMER_CHECK_ || defined _SMTP_ALERT_DEBUG_ || defined _EPOLL_DEBUG_ || defined _EPOLL_THREAD_DUMP_ || defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_ || defined _TSM_DEBUG_ || defined _VRRP_FD_DEBUG_ || defined _NETLINK_TIMERS_
+#if defined _TIMER_CHECK_ || defined _SMTP_ALERT_DEBUG_ || defined _EPOLL_DEBUG_ || defined _EPOLL_THREAD_DUMP_ || defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_ || defined _TSM_DEBUG_ || defined _VRRP_FD_DEBUG_ || defined _NETLINK_TIMERS_ || defined _NETWORK_TIMESTAMP_ || defined _TRACK_PROCESS_DEBUG_ || defined _PARSER_DEBUG_ || defined _DUMP_KEYWORDS_
 #define WITH_DEBUG_OPTIONS 1
 #endif
 
@@ -201,6 +206,18 @@ static char vrrp_fd_debug;
 #ifdef _NETLINK_TIMERS_
 static char netlink_timer_debug;
 #endif
+#ifdef _NETWORK_TIMESTAMP_
+static char network_timestamp_debug;
+#endif
+#ifdef _TRACK_PROCESS_DEBUG_
+static char track_process_debug;
+#endif
+#ifdef _PARSER_DEBUG_
+static char parser_debug;
+#endif
+#ifdef _DUMP_KEYWORDS_
+static char dump_keywords;
+#endif
 
 void
 free_parent_mallocs_startup(bool am_child)
@@ -210,9 +227,9 @@ free_parent_mallocs_startup(bool am_child)
 		free_dirname();
 #endif
 #ifndef _MEM_CHECK_LOG_
-		FREE_PTR(syslog_ident);
+		FREE_CONST_PTR(syslog_ident);
 #else
-		free(syslog_ident);
+		free(no_const_char_p(syslog_ident));
 #endif
 		syslog_ident = NULL;
 
@@ -220,7 +237,7 @@ free_parent_mallocs_startup(bool am_child)
 	}
 
 	if (free_main_pidfile) {
-		FREE_PTR(main_pidfile);
+		FREE_CONST_PTR(main_pidfile);
 		free_main_pidfile = false;
 	}
 }
@@ -230,21 +247,21 @@ free_parent_mallocs_exit(void)
 {
 #ifdef _WITH_VRRP_
 	if (free_vrrp_pidfile)
-		FREE_PTR(vrrp_pidfile);
+		FREE_CONST_PTR(vrrp_pidfile);
 #endif
 #ifdef _WITH_LVS_
 	if (free_checkers_pidfile)
-		FREE_PTR(checkers_pidfile);
+		FREE_CONST_PTR(checkers_pidfile);
 #endif
 #ifdef _WITH_BFD_
 	if (free_bfd_pidfile)
-		FREE_PTR(bfd_pidfile);
+		FREE_CONST_PTR(bfd_pidfile);
 #endif
 
-	FREE_PTR(config_id);
+	FREE_CONST_PTR(config_id);
 }
 
-char *
+const char *
 make_syslog_ident(const char* name)
 {
 	size_t ident_len = strlen(name) + 1;
@@ -313,7 +330,7 @@ make_pidfile_name(const char* start, const char* instance, const char* extn)
 }
 
 #ifdef _WITH_VRRP_
-bool
+bool __attribute__ ((pure))
 running_vrrp(void)
 {
 	return (__test_bit(DAEMON_VRRP, &daemon_mode) &&
@@ -323,7 +340,7 @@ running_vrrp(void)
 #endif
 
 #ifdef _WITH_LVS_
-bool
+bool __attribute__ ((pure))
 running_checker(void)
 {
 	return (__test_bit(DAEMON_CHECKERS, &daemon_mode) &&
@@ -333,7 +350,7 @@ running_checker(void)
 #endif
 
 #ifdef _WITH_BFD_
-bool
+static bool __attribute__ ((pure))
 running_bfd(void)
 {
 	return (__test_bit(DAEMON_BFD, &daemon_mode) &&
@@ -361,7 +378,7 @@ find_keepalived_child_name(pid_t pid)
 	return NULL;
 }
 
-static vector_t *
+static const vector_t *
 global_init_keywords(void)
 {
 	/* global definitions mapping */
@@ -512,15 +529,25 @@ static bool reload_config(void)
 
 	read_config_file();
 
-	init_global_data(global_data, old_global_data);
+	init_global_data(global_data, old_global_data, false);
+
+	/* Update process name if necessary */
+	if (!global_data->process_name != !old_global_data->process_name ||
+	    (global_data->process_name && strcmp(global_data->process_name, old_global_data->process_name)))
+		set_process_name(global_data->process_name);
 
 #if HAVE_DECL_CLONE_NEWNET
+	if (override_namespace) {
+		FREE_CONST_PTR(global_data->network_namespace);
+		global_data->network_namespace = STRDUP(override_namespace);
+	}
+
 	if (!!old_global_data->network_namespace != !!global_data->network_namespace ||
 	    (global_data->network_namespace && strcmp(old_global_data->network_namespace, global_data->network_namespace))) {
 		log_message(LOG_INFO, "Cannot change network namespace at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_PTR(global_data->network_namespace);
+	FREE_CONST_PTR(global_data->network_namespace);
 	global_data->network_namespace = old_global_data->network_namespace;
 	old_global_data->network_namespace = NULL;
 #endif
@@ -530,7 +557,7 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change instance name at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_PTR(global_data->instance_name);
+	FREE_CONST_PTR(global_data->instance_name);
 	global_data->instance_name = old_global_data->instance_name;
 	old_global_data->instance_name = NULL;
 
@@ -540,7 +567,7 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change nftables table name at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_PTR(global_data->vrrp_nf_table_name);
+	FREE_CONST_PTR(global_data->vrrp_nf_table_name);
 	global_data->vrrp_nf_table_name = old_global_data->vrrp_nf_table_name;
 	old_global_data->vrrp_nf_table_name = NULL;
 #endif
@@ -574,7 +601,7 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 		start_vrrp_child();
 #endif
 #ifdef _WITH_LVS_
-	if (sig == SIGHUP) {
+	if (sig == SIGHUP || sig == SIGUSR1) {
 		if (checkers_child > 0)
 			kill(checkers_child, sig);
 		else if (running_checker())
@@ -848,6 +875,18 @@ signal_init(void)
 	signal_ignore(SIGPIPE);
 }
 
+static void
+signals_ignore(void) {
+#ifndef _DEBUG_
+	signal_ignore(SIGHUP);
+	signal_ignore(SIGUSR1);
+	signal_ignore(SIGUSR2);
+#ifdef _WITH_JSON_
+	signal_ignore(SIGJSON);
+#endif
+#endif
+}
+
 /* To create a core file when abrt is running (a RedHat distribution),
  * and keepalived isn't installed from an RPM package, edit the file
  * “/etc/abrt/abrt.conf”, and change the value of the field
@@ -944,6 +983,7 @@ set_umask(const char *optarg)
 	return umask_bits;
 }
 
+RELAX_SUGGEST_ATTRIBUTE_CONST_START
 void
 initialise_debug_options(void)
 {
@@ -952,15 +992,15 @@ initialise_debug_options(void)
 
 	if (prog_type == PROG_TYPE_PARENT)
 		mask = 1 << PROG_TYPE_PARENT;
-#if _WITH_BFD_
+#ifdef _WITH_BFD_
 	else if (prog_type == PROG_TYPE_BFD)
 		mask = 1 << PROG_TYPE_BFD;
 #endif
-#if _WITH_LVS_
+#ifdef _WITH_LVS_
 	else if (prog_type == PROG_TYPE_CHECKER)
 		mask = 1 << PROG_TYPE_CHECKER;
 #endif
-#if _WITH_VRRP_
+#ifdef _WITH_VRRP_
 	else if (prog_type == PROG_TYPE_VRRP)
 		mask = 1 << PROG_TYPE_VRRP;
 #endif
@@ -992,8 +1032,23 @@ initialise_debug_options(void)
 #ifdef _NETLINK_TIMERS_
 	do_netlink_timers = !!(netlink_timer_debug & mask);
 #endif
+#ifdef _NETWORK_TIMESTAMP_
+	do_network_timestamp = !!(network_timestamp_debug & mask);
+#endif
+#ifdef _WITH_CN_PROC_
+#ifdef _TRACK_PROCESS_DEBUG_
+	do_track_process_debug = !!(track_process_debug & mask);
+#endif
+#endif
+#ifdef _PARSER_DEBUG_
+	do_parser_debug = !!(parser_debug & mask);
+#endif
+#ifdef _DUMP_KEYWORDS_
+	do_dump_keywords = !!(dump_keywords & mask);
+#endif
 #endif
 }
+RELAX_SUGGEST_ATTRIBUTE_CONST_END
 
 #ifdef  WITH_DEBUG_OPTIONS
 static void
@@ -1007,13 +1062,13 @@ set_debug_options(const char *options)
 	all_processes = 1;
 #else
 	all_processes = (1 << PROG_TYPE_PARENT);
-#if _WITH_BFD_
+#ifdef _WITH_BFD_
 	all_processes |= (1 << PROG_TYPE_BFD);
 #endif
-#if _WITH_LVS_
+#ifdef _WITH_LVS_
 	all_processes |= (1 << PROG_TYPE_CHECKER);
 #endif
-#if _WITH_VRRP_
+#ifdef _WITH_VRRP_
 	all_processes |= (1 << PROG_TYPE_VRRP);
 #endif
 #endif
@@ -1046,12 +1101,24 @@ set_debug_options(const char *options)
 #ifdef _NETLINK_TIMERS_
 		netlink_timer_debug = all_processes;
 #endif
+#ifdef _NETWORK_TIMESTAMP_
+		network_timestamp_debug = all_processes;
+#endif
+#ifdef _TRACK_PROCESS_DEBUG_
+		track_process_debug = all_processes;
+#endif
+#ifdef _PARSER_DEBUG_
+		parser_debug = all_processes;
+#endif
+#ifdef _DUMP_KEYWORDS_
+		dump_keywords = all_processes;
+#endif
 
 		return;
 	}
 
 	opt_p = options;
-	do {
+	while (*opt_p) {
 		if (!isupper(*opt_p)) {
 			fprintf(stderr, "Unknown debug option'%c' in '%s'\n", *opt_p, options);
 			return;
@@ -1070,17 +1137,17 @@ set_debug_options(const char *options)
 				case 'p':
 					processes |= (1 << PROG_TYPE_PARENT);
 					break;
-#if _WITH_BFD_
+#ifdef _WITH_BFD_
 				case 'b':
 					processes |= (1 << PROG_TYPE_BFD);
 					break;
 #endif
-#if _WITH_LVS_
+#ifdef _WITH_LVS_
 				case 'c':
 					processes |= (1 << PROG_TYPE_CHECKER);
 					break;
 #endif
-#if _WITH_VRRP_
+#ifdef _WITH_VRRP_
 				case 'v':
 					processes |= (1 << PROG_TYPE_VRRP);
 					break;
@@ -1140,11 +1207,31 @@ set_debug_options(const char *options)
 			netlink_timer_debug = processes;
 			break;
 #endif
+#ifdef _NETWORK_TIMESTAMP_
+		case 'P':
+			network_timestamp_debug = processes;
+			break;
+#endif
+#ifdef _TRACK_PROCESS_DEBUG_
+		case 'O':
+			track_process_debug = processes;
+			break;
+#endif
+#ifdef _PARSER_DEBUG_
+		case 'C':
+			parser_debug = processes;
+			break;
+#endif
+#ifdef _DUMP_KEYWORDS_
+		case 'K':
+			dump_keywords = processes;
+			break;
+#endif
 		default:
 			fprintf(stderr, "Unknown debug type '%c' in '%s'\n", opt, options);
 			return;
 		}
-	} while (opt_p && *opt_p);
+	}
 }
 #endif
 
@@ -1231,7 +1318,7 @@ usage(const char *prog)
 #ifdef _EPOLL_THREAD_DUMP_
 	fprintf(stderr, "                                   D - epoll thread dump debug\n");
 #endif
-#ifdef _VRRP_FD_DEBUG
+#ifdef _VRRP_FD_DEBUG_
 	fprintf(stderr, "                                   F - vrrp fd dump debug\n");
 #endif
 #ifdef _REGEX_DEBUG_
@@ -1245,6 +1332,18 @@ usage(const char *prog)
 #endif
 #ifdef _NETLINK_TIMERS_
 	fprintf(stderr, "                                   N - netlink timer debug\n");
+#endif
+#ifdef _NETWORK_TIMESTAMP_
+	fprintf(stderr, "                                   P - network timestamp debug\n");
+#endif
+#ifdef _TRACK_PROCESS_DEBUG_
+	fprintf(stderr, "                                   O - track process debug\n");
+#endif
+#ifdef _PARSER_DEBUG_
+	fprintf(stderr, "                                   C - parser (config) debug\n");
+#endif
+#ifdef _DUMP_KEYWORDS_
+	fprintf(stderr, "                                   K - dump keywords\n");
 #endif
 	fprintf(stderr, "                                 Example --debug=TpMEvcp\n");
 #endif
@@ -1363,10 +1462,8 @@ parse_cmdline(int argc, char **argv)
 
 		/* Check for an empty option argument. For example --use-file= returns
 		 * a 0 length option, which we don't want */
-		if (longindex >= 0 && long_options[longindex].has_arg == required_argument && optarg && !optarg[0]) {
+		if (longindex >= 0 && long_options[longindex].has_arg == required_argument && optarg && !optarg[0])
 			c = ':';
-			optarg = NULL;
-		}
 
 		switch (c) {
 		case 'v':
@@ -1512,7 +1609,7 @@ parse_cmdline(int argc, char **argv)
 #endif
 #ifdef _WITH_SNMP_
 		case 'x':
-			snmp = 1;
+			snmp_option = true;
 			break;
 		case 'A':
 			snmp_socket = optarg;
@@ -1533,14 +1630,12 @@ parse_cmdline(int argc, char **argv)
 #endif
 #if HAVE_DECL_CLONE_NEWNET
 		case 's':
-			override_namespace = MALLOC(strlen(optarg) + 1);
-			strcpy(override_namespace, optarg);
+			override_namespace = optarg;
 			break;
 #endif
 		case 'i':
-			FREE_PTR(config_id);
-			config_id = MALLOC(strlen(optarg) + 1);
-			strcpy(config_id, optarg);
+			FREE_CONST_PTR(config_id);
+			config_id = STRDUP(optarg);
 			break;
 		case 4:			/* --signum */
 			signum = get_signum(optarg);
@@ -1653,6 +1748,15 @@ keepalived_main(int argc, char **argv)
 	struct utsname uname_buf;
 	char *end;
 	int exit_code = KEEPALIVED_EXIT_OK;
+#ifdef _WITH_NFTABLES_
+	FILE *fp;
+	char nft_ver_buf[128];
+	char *p;
+	unsigned nft_major = 0, nft_minor = 0, nft_release = 0;
+#endif
+
+	/* Ignore reloading signals till signal_init call */
+	signals_ignore();
 
 	/* Ensure time_now is set. We then don't have to check anywhere
 	 * else if it is set. */
@@ -1714,9 +1818,7 @@ keepalived_main(int argc, char **argv)
 		/* config_id defaults to hostname */
 		if (!config_id) {
 			end = strchrnul(uname_buf.nodename, '.');
-			config_id = MALLOC((size_t)(end - uname_buf.nodename) + 1);
-			strncpy(config_id, uname_buf.nodename, (size_t)(end - uname_buf.nodename));
-			config_id[end - uname_buf.nodename] = '\0';
+			config_id = STRNDUP(uname_buf.nodename, (size_t)(end - uname_buf.nodename));
 		}
 	}
 
@@ -1783,16 +1885,39 @@ keepalived_main(int argc, char **argv)
 
 	read_config_file();
 
-	init_global_data(global_data, NULL);
+	init_global_data(global_data, NULL, false);
+
+#ifdef _WITH_NFTABLES_
+	if (global_data->vrrp_nf_table_name) {
+		/* We are using nftables. Find the version of nft. */
+		fp = popen("nft -v 2>/dev/null", "r");
+		if (fgets(nft_ver_buf, sizeof(nft_ver_buf) - 1, fp)) {
+			p = strchr(nft_ver_buf, ' ');
+			while (*p == ' ')
+				p++;
+			if (*p == 'v')
+				p++;
+
+			if (sscanf(p, "%u.%u.%u", &nft_major, &nft_minor, &nft_release) >= 2)
+				global_data->nft_version = (nft_major * 0x100 + nft_minor) * 0x100 + nft_release;
+		}
+		pclose(fp);
+
+		set_nf_ifname_type();
+	}
+#endif
+
+	/* Update process name if necessary */
+	if (global_data->process_name)
+		set_process_name(global_data->process_name);
 
 #if HAVE_DECL_CLONE_NEWNET
 	if (override_namespace) {
 		if (global_data->network_namespace) {
 			log_message(LOG_INFO, "Overriding config net_namespace '%s' with command line namespace '%s'", global_data->network_namespace, override_namespace);
-			FREE(global_data->network_namespace);
+			FREE_CONST(global_data->network_namespace);
 		}
-		global_data->network_namespace = override_namespace;
-		override_namespace = NULL;
+		global_data->network_namespace = STRDUP(override_namespace);
 	}
 #endif
 
@@ -1913,7 +2038,7 @@ keepalived_main(int argc, char **argv)
 	if (!__test_bit(DONT_FORK_BIT, &debug) &&
 	    xdaemon(false, false, true) > 0) {
 		closelog();
-		FREE_PTR(config_id);
+		FREE_CONST_PTR(config_id);
 		FREE_PTR(orig_core_dump_pattern);
 		close_std_fd();
 		exit(0);
@@ -1991,12 +2116,12 @@ end:
 	closelog();
 
 #ifndef _MEM_CHECK_LOG_
-	FREE_PTR(syslog_ident);
+	FREE_CONST_PTR(syslog_ident);
 #else
 	if (syslog_ident)
-		free(syslog_ident);
+		free(no_const_char_p(syslog_ident));
 #endif
 	close_std_fd();
 
-	exit(exit_code);
+	return exit_code;
 }

@@ -5,6 +5,9 @@
 #define _CONFIG_H
   
 
+/* Define to enable checksum debugging */
+#undef CHECKSUM_DIAGNOSTICS
+
 /* Define if need to check for EINTR errno */
 #undef CHECK_EINTR
 
@@ -99,6 +102,10 @@
    to 0 if you don't. */
 #undef HAVE_DECL_IFLA_INET6_ADDR_GEN_MODE
 
+/* Define to 1 if you have the declaration of `IFLA_IPVLAN_MODE', and to 0 if
+   you don't. */
+#undef HAVE_DECL_IFLA_IPVLAN_MODE
+
 /* Define to 1 if you have the declaration of `IFLA_MACVLAN_MODE', and to 0 if
    you don't. */
 #undef HAVE_DECL_IFLA_MACVLAN_MODE
@@ -159,6 +166,10 @@
    0 if you don't. */
 #undef HAVE_DECL_IPVS_DEST_ATTR_STATS64
 
+/* Define to 1 if you have the declaration of `IPVS_DEST_ATTR_TUN_TYPE', and
+   to 0 if you don't. */
+#undef HAVE_DECL_IPVS_DEST_ATTR_TUN_TYPE
+
 /* Define to 1 if you have the declaration of `IPVS_SVC_ATTR_STATS64', and to
    0 if you don't. */
 #undef HAVE_DECL_IPVS_SVC_ATTR_STATS64
@@ -167,9 +178,17 @@
    you don't. */
 #undef HAVE_DECL_IP_MULTICAST_ALL
 
+/* Define to 1 if you have the declaration of `IP_VS_CONN_F_TUNNEL_TYPE_GRE',
+   and to 0 if you don't. */
+#undef HAVE_DECL_IP_VS_CONN_F_TUNNEL_TYPE_GRE
+
 /* Define to 1 if you have the declaration of `IP_VS_SVC_F_ONEPACKET', and to
    0 if you don't. */
 #undef HAVE_DECL_IP_VS_SVC_F_ONEPACKET
+
+/* Define to 1 if you have the declaration of
+   `IP_VS_TUNNEL_ENCAP_FLAG_NOCSUM', and to 0 if you don't. */
+#undef HAVE_DECL_IP_VS_TUNNEL_ENCAP_FLAG_NOCSUM
 
 /* Define to 1 if you have the declaration of `LWTUNNEL_ENCAP_ILA', and to 0
    if you don't. */
@@ -182,6 +201,10 @@
 /* Define to 1 if you have the declaration of `MACVLAN_MODE_PRIVATE', and to 0
    if you don't. */
 #undef HAVE_DECL_MACVLAN_MODE_PRIVATE
+
+/* Define to 1 if you have the declaration of `NFTA_DUP_MAX', and to 0 if you
+   don't. */
+#undef HAVE_DECL_NFTA_DUP_MAX
 
 /* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
    */
@@ -285,6 +308,9 @@
 /* Define to 1 if you have the `gettimeofday' function. */
 #undef HAVE_GETTIMEOFDAY
 
+/* Define to 1 if IFLA_LINK_NETNSID supported */
+#undef HAVE_IFLA_LINK_NETNSID
+
 /* Define to 1 if you have the `inotify_init1' function. */
 #undef HAVE_INOTIFY_INIT1
 
@@ -318,11 +344,11 @@
 /* Define to 1 if you have the <libiptc/libxtc.h> header file. */
 #undef HAVE_LIBIPTC_LIBXTC_H
 
+/* Define to 1 if you have the <libnftnl/udata.h> header file. */
+#undef HAVE_LIBNFTNL_UDATA_H
+
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
-
-/* Define to 1 if you have the `xtables' library (-lxtables). */
-#undef HAVE_LIBXTABLES
 
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
@@ -356,9 +382,6 @@
 
 /* Define to 1 if you have the <linux/ip_vs.h> header file. */
 #undef HAVE_LINUX_IP_VS_H
-
-/* Define to 1 if you have the <linux/netfilter/nf_tables.h> header file. */
-#undef HAVE_LINUX_NETFILTER_NF_TABLES_H
 
 /* Define to 1 if you have the <linux/netfilter/xt_set.h> header file. */
 #undef HAVE_LINUX_NETFILTER_XT_SET_H
@@ -419,11 +442,17 @@
 /* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined */
 #undef HAVE_NFTNL_EXPR_LOOKUP_FLAGS
 
+/* Define to 1 if nftnl_udata_put_u32 declared */
+#undef HAVE_NFTNL_UDATA_PUT_U32
+
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
 
 /* Define to 1 if you have the `OPENSSL_init_crypto' function. */
 #undef HAVE_OPENSSL_INIT_CRYPTO
+
+/* Define to 1 if OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG) bug) */
+#undef HAVE_OPENSSL_INIT_NO_LOAD_CONFIG_BUG
 
 /* Define to 1 if you have the <openssl/md5.h> header file. */
 #undef HAVE_OPENSSL_MD5_H
@@ -549,9 +578,6 @@
 /* Define to 1 if `vfork' works. */
 #undef HAVE_WORKING_VFORK
 
-/* Define to 1 if you have the <xtables.h> header file. */
-#undef HAVE_XTABLES_H
-
 /* Define to 1 if have struct xt_set_info_match_v1 */
 #undef HAVE_XT_SET_INFO_MATCH_V1
 
@@ -592,6 +618,9 @@
 /* Define to 1 if libipvs can use netlink */
 #undef LIBIPVS_USE_NL
 
+/* libnftnl version in hex */
+#undef LIBNFTNL_VERSION
+
 /* The type of parameter __line passed to __assert_fail() */
 #undef LINE_type
 
@@ -628,6 +657,9 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* Parent directory of /run */
+#undef PID_DIR_ROOT
+
 /* Define printf format specifier for rlim_t */
 #undef PRI_rlim_t
 
@@ -653,14 +685,14 @@
 /* Version number of package */
 #undef VERSION
 
-/* Define the xtables library name */
-#undef XTABLES_LIB_NAME
-
 /* Define if <linux/netfilter/x_tables.h> doesnt define it */
 #undef XT_EXTENSION_MAXNAMELEN
 
 /* Define to 1 to build with debugging support */
 #undef _DEBUG_
+
+/* Define to enable keyword dumping */
+#undef _DUMP_KEYWORDS_
 
 /* Define to 1 to enable asserts */
 #undef _ENABLE_ASSERT_
@@ -674,14 +706,29 @@
 /* Consider ${with_fixed_if_type} interfaces to be unchangeable */
 #undef _FIXED_IF_TYPE_
 
+/* Define to 1 if can have _Pragma GCC diagnostic push/pop */
+#undef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
+
 /* Define to 1 if have FIB routing support */
 #undef _HAVE_FIB_ROUTING_
+
+/* Define to 1 if can have _Pragma GCC diagnostic in functions */
+#undef _HAVE_FUNCTION_DIAGNOSTIC_PRAGMAS_
 
 /* Define to 1 if have IPv4 netlink device configuration */
 #undef _HAVE_IPV4_DEVCONF_
 
 /* Define to 1 if have IPVS syncd attributes */
 #undef _HAVE_IPVS_SYNCD_ATTRIBUTES_
+
+/* Define to 1 if have IPVS tunnel checksum options */
+#undef _HAVE_IPVS_TUN_CSUM_
+
+/* Define to 1 if have IPVS gre tunnel */
+#undef _HAVE_IPVS_TUN_GRE_
+
+/* Define to 1 if have IPVS tunnel type */
+#undef _HAVE_IPVS_TUN_TYPE_
 
 /* Define to 1 if have ipset library */
 #undef _HAVE_LIBIPSET_
@@ -712,6 +759,10 @@
 /* Define to 1 if have pe selection support */
 #undef _HAVE_PE_NAME_
 
+/* Define to 1 if _Pragma("GCC diagnostic warning \"-Wstrict-overflow=1\"")
+   supported */
+#undef _HAVE_PRAGMA_WARN_STRICT_OVERFLOW_1_
+
 /* Define to 1 if have SCHED_RR */
 #undef _HAVE_SCHED_RT_
 
@@ -720,6 +771,9 @@
 
 /* Define to 1 if have kernel VRF support */
 #undef _HAVE_VRF_
+
+/* Define to 1 if have IP VLAN support */
+#undef _HAVE_VRRP_IPVLAN_
 
 /* Define to 1 if have MAC VLAN support */
 #undef _HAVE_VRRP_VMAC_
@@ -733,9 +787,6 @@
 /* Define to 1 if building with libnl dynamic linking */
 #undef _LIBNL_DYNAMIC_
 
-/* Define to 1 if building with libxtables dynamic linking */
-#undef _LIBXTABLES_DYNAMIC_
-
 /* Define to 1 to build with malloc/free checks */
 #undef _MEM_CHECK_
 
@@ -745,8 +796,14 @@
 /* Define to 1 to build with netlink command timers support */
 #undef _NETLINK_TIMERS_
 
+/* Define to 1 to build with network timestamp support */
+#undef _NETWORK_TIMESTAMP_
+
 /* Define to 1 if unaligned memory access not supported */
 #undef _NO_UNALIGNED_ACCESS_
+
+/* Define to enable parser debugging */
+#undef _PARSER_DEBUG_
 
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
@@ -754,7 +811,7 @@
 /* Define to 1 to build with smtp-alert debugging support */
 #undef _SMTP_ALERT_DEBUG_
 
-/* Define to 1 to have keepalived send RFC6257 SNMP responses for VRRPv2
+/* Define to 1 to have keepalived send RFC6527 SNMP responses for VRRPv2
    instances */
 #undef _SNMP_REPLY_V3_FOR_V2_
 
@@ -763,6 +820,9 @@
 
 /* Define to 1 to build with set time logging */
 #undef _TIMER_CHECK_
+
+/* Define to enable logging all process connector events */
+#undef _TRACK_PROCESS_DEBUG_
 
 /* Define to 1 to build with TSM debugging support */
 #undef _TSM_DEBUG_
@@ -923,6 +983,8 @@
 /* Define as `fork' if `vfork' does not work. */
 #undef vfork
 
+
+#include "config_warnings.h"
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

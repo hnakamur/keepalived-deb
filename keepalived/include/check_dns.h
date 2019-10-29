@@ -67,11 +67,9 @@
 #define DNS_TYPE_RRSIG  46
 #define DNS_TYPE_DNSKEY 48
 
-#define FMT_DNS_RS(C) FMT_CHK(C)
-
 typedef struct _dns_type {
 	uint16_t type;
-	char *label;
+	const char * const label;
 } dns_type_t;
 
 extern const dns_type_t DNS_TYPE[];
@@ -87,7 +85,7 @@ typedef struct _dns_header {
 
 typedef struct _dns_check {
 	uint16_t type;
-	char *name;
+	const char *name;
 	uint8_t sbuf[DNS_BUFFER_SIZE];
 	size_t slen;
 } dns_check_t;

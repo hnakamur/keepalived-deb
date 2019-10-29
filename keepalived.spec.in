@@ -15,7 +15,6 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 BuildRequires: openssl-devel
 # We need both of these for proper LVS support
 BuildRequires: kernel-headers
-BuildRequires: libnfnetlink-devel
 BuildRequires: autoconf automake pkgconfig
 @SNMP_TRUE@BuildRequires: net-snmp-devel
 @WITH_DBUS_TRUE@BuildRequires: glib2-devel
@@ -30,14 +29,14 @@ BuildRequires: autoconf automake pkgconfig
 @INIT_SYSTEMD_TRUE@BuildRequires: systemd-units
 @WITH_REGEX_TRUE@BuildRequires: pcre2-devel
 
-@SNMP_TRUE@Requires: net-snmp
-@WITH_DBUS_TRUE@Requires: glib2
-@LIBIPTC_TRUE@Requires: iptables-libs
-@LIBIPSET_TRUE@Requires: ipset-libs
-@LIBNL1_TRUE@Requires: libnl
-@LIBNL3_TRUE@Requires: libnl3
-@NFTABLES_TRUE@Requires: libnftnl libmnl
-@WITH_REGEX_TRUE@Requires: pcre2
+@REQUIRE_IPTABLES_LIBS_TRUE@%if 0%{?rhel} <= 7
+@REQUIRE_IPTABLES_LIBS_TRUE@Requires: iptables
+@REQUIRE_IPTABLES_LIBS_TRUE@%else
+@REQUIRE_IPTABLES_LIBS_TRUE@Requires: iptables-libs
+@REQUIRE_IPTABLES_LIBS_TRUE@%endif
+@LIBIPSET_DYNAMIC_TRUE@Requires: ipset-libs
+@LIBNL_DYNAMIC_TRUE@@LIBNL1_TRUE@Require: libnl
+@LIBNL_DYNAMIC_TRUE@@LIBNL3_TRUE@Require: libnl3
 
 %description
 The main goal of the keepalived project is to add a strong & robust keepalive
@@ -66,6 +65,10 @@ CONFIG_OPTS=
 @IPTABLES_FALSE@CONFIG_OPTS="$CONFIG_OPTS --disable-iptables"
 @IPTABLES_TRUE@@LIBIPTC_FALSE@CONFIG_OPTS="$CONFIG_OPTS --disable-libiptc"
 @IPTABLES_TRUE@@LIBIPSET_FALSE@CONFIG_OPTS="$CONFIG_OPTS --disable-libipset"
+@LIBIPTC_DYNAMIC_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-libiptc-dynamic"
+@LIBXTABLES_DYNAMIC_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-libxtables-dynamic"
+@LIBIPSET_DYNAMIC_FALSE@CONFIG_OPTS="$CONFIG_OPTS --disable-libipset-dynamic"
+@LIBNL_DYNAMIC_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-libnl-dynamic"
 @SNMP_KEEPALIVED_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-snmp"
 @SNMP_KEEPALIVED_FALSE@@SNMP_VRRP_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-snmp-vrrp"
 @SNMP_KEEPALIVED_FALSE@@SNMP_CHECKER_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-snmp-checker"
@@ -82,6 +85,8 @@ CONFIG_OPTS=
 @INIT_OPENRC_TRUE@CONFIG_OPTS="$CONFIG_OPTS --with-init=openrc"
 @WITH_REGEX_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-regex"
 @WITH_BFD_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-bfd"
+@WITH_STRICT_CONFIG_CHECKS_TRUE@CONFIG_OPTS="$CONFIG_OPTS --enable-strict-config-checks"
+
 autoreconf -f -i
 %configure $CONFIG_OPTS
 %{__make} %{?_smp_mflags} STRIP=/bin/true
@@ -113,6 +118,7 @@ if [ $1 -eq 1 ]; then
         # Enable (but don't start) the units by default
 @INIT_SYSV_TRUE@	/sbin/chkconfig --add keepalived
 @INIT_SYSTEMD_TRUE@	/bin/systemctl enable keepalived.service >/dev/null 2>&1 || :
+:
 fi
 
 %preun
@@ -122,6 +128,8 @@ if [ $1 -eq 0 ]; then
 @INIT_SYSV_TRUE@	/sbin/chkconfig --del keepalived
 @INIT_SYSTEMD_TRUE@	/bin/systemctl disable keepalived.service >/dev/null 2>&1 || :
 @INIT_SYSTEMD_TRUE@	/bin/systemctl stop keepalived.service >/dev/null 2>&1 || :
+@INIT_UPSTART_TRUE@	/sbin/stop keepalived >/dev/null 2>&1 || :
+:
 fi
 
 %postun
@@ -131,6 +139,7 @@ if [ $1 -ge 1 ]; then
 	# and restart the daemon
 @INIT_SYSTEMD_TRUE@	/bin/systemctl daemon-reload >/dev/null 2>&1 || :
 @INIT_SYSTEMD_TRUE@	/bin/systemctl try-restart keepalived.service >/dev/null 2>&1 || :
+:
 fi
 
 %files

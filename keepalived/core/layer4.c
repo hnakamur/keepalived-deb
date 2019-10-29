@@ -50,16 +50,18 @@ socket_bind_connect(int fd, conn_opts_t *co)
 		return connect_error;
 	}
 	if (opt == SOCK_STREAM) {
-		/* free the tcp port after closing the socket descriptor */
+		/* free the tcp port after closing the socket descriptor, but
+		 * allow time for a proper shutdown. */
 		li.l_onoff = 1;
-		li.l_linger = 0;
-		setsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &li, sizeof (struct linger));
+		li.l_linger = 5;
+		if (setsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &li, sizeof (struct linger)))
+			log_message(LOG_INFO, "Failed to set SO_LINGER for socket %d - errno %d (%m)", fd, errno);
 	}
 
 #ifdef _WITH_SO_MARK_
 	if (co->fwmark) {
 		if (setsockopt (fd, SOL_SOCKET, SO_MARK, &co->fwmark, sizeof (co->fwmark)) < 0) {
-			log_message(LOG_ERR, "Error setting fwmark %d to socket: %s", co->fwmark, strerror(errno));
+			log_message(LOG_ERR, "Error setting fwmark %u to socket: %s", co->fwmark, strerror(errno));
 			return connect_error;
 		}
 	}
@@ -90,29 +92,35 @@ socket_bind_connect(int fd, conn_opts_t *co)
 		return connect_success;
 
 	/* If connect is in progress then return 1 else it's real error. */
-	if (ret < 0) {
-		if (errno != EINPROGRESS)
-			return connect_error;
-	}
+	if (errno == EINPROGRESS)
+		return connect_in_progress;
 
-	return connect_in_progress;
+	/* ENETUNREACH can be returned here. I'm not sure
+	 * about any of the others, but play safe. These
+	 * should all be considered to be a failure to connect
+	 * rather than a failure to run the check. */
+	if (errno == ENETUNREACH || errno == EHOSTUNREACH ||
+	    errno == ECONNREFUSED || errno == EHOSTDOWN ||
+	    errno == ENETDOWN || errno == ECONNRESET ||
+	    errno == ECONNABORTED || errno == ETIMEDOUT)
+		return connect_fail;
+
+	return connect_error;
 }
 
 enum connect_result
 socket_connect(int fd, struct sockaddr_storage *addr)
 {
-	conn_opts_t co;
-	memset(&co, 0, sizeof(co));
-	co.dst = *addr;
+	conn_opts_t co = { .dst = *addr };
+
 	return socket_bind_connect(fd, &co);
 }
 
 enum connect_result
-socket_state(thread_t * thread, int (*func) (thread_t *))
+socket_state(thread_ref_t thread, thread_func_t func)
 {
 	int status;
 	socklen_t addrlen;
-	int ret = 0;
 	timeval_t timer_min;
 
 	/* Handle connection timeout */
@@ -123,11 +131,8 @@ socket_state(thread_t * thread, int (*func) (thread_t *))
 
 	/* Check file descriptor */
 	addrlen = sizeof(status);
-	if (getsockopt(thread->u.fd, SOL_SOCKET, SO_ERROR, (void *) &status, &addrlen) < 0)
-		ret = errno;
-
-	/* Connection failed !!! */
-	if (ret) {
+	if (getsockopt(thread->u.f.fd, SOL_SOCKET, SO_ERROR, (void *) &status, &addrlen) < 0) {
+		/* getsockopt failed !!! */
 		thread_close_fd(thread);
 		return connect_error;
 	}
@@ -143,18 +148,24 @@ socket_state(thread_t * thread, int (*func) (thread_t *))
 	if (status == EINPROGRESS) {
 		timer_min = timer_sub_now(thread->sands);
 		thread_add_write(thread->master, func, THREAD_ARG(thread),
-				 thread->u.fd, -timer_long(timer_min));
+				 thread->u.f.fd, -timer_long(timer_min), true);
 		return connect_in_progress;
 	}
 
 	thread_close_fd(thread);
-	return connect_error;
+
+	if (status == ETIMEDOUT)
+		return connect_timeout;
+
+	/* Since the connect() call succeeded, treat this as a
+	 * failure to establish a connection. */
+	return connect_fail;
 }
 
 #ifdef _WITH_LVS_
 bool
-socket_connection_state(int fd, enum connect_result status, thread_t * thread,
-		     int (*func) (thread_t *), unsigned long timeout)
+socket_connection_state(int fd, enum connect_result status, thread_ref_t thread,
+		     thread_func_t func, unsigned long timeout)
 {
 	void *checker;
 
@@ -162,7 +173,7 @@ socket_connection_state(int fd, enum connect_result status, thread_t * thread,
 
 	if (status == connect_success ||
 	    status == connect_in_progress) {
-		thread_add_write(thread->master, func, checker, fd, timeout);
+		thread_add_write(thread->master, func, checker, fd, timeout, true);
 		return false;
 	}
 

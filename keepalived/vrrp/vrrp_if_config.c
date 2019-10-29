@@ -148,7 +148,7 @@ get_sysctl(const char* prefix, const char* iface, const char* parameter)
 	close(fd);
 
 	/* We only read integers 0-9 */
-	if (len <= 0)
+	if (len <= 0 || buf[0] < '0' || buf[0] > '9')
 		return UINT_MAX;
 
 	/* Return the value of the string read */
@@ -156,7 +156,7 @@ get_sysctl(const char* prefix, const char* iface, const char* parameter)
 }
 
 #ifdef _HAVE_IPV4_DEVCONF_
-struct nlattr *
+static struct nlattr *
 nest_start(struct nlmsghdr *nlh, unsigned short type)
 {
 	struct nlattr *nest = NLMSG_TAIL(nlh);
@@ -167,10 +167,10 @@ nest_start(struct nlmsghdr *nlh, unsigned short type)
 	return nest;
 }
 
-size_t
+static size_t
 nest_end(struct nlattr *nla, struct nlattr *nest)
 {
-	nest->nla_len = (unsigned short)((void *)nla - (void *)nest);
+	nest->nla_len = (unsigned short)((char *)nla - (char *)nest);
 
 	return nest->nla_len;
 }
@@ -220,6 +220,12 @@ netlink_set_interface_parameters(const interface_t *ifp, interface_t *base_ifp)
 {
 	if (netlink_set_interface_flags(ifp->ifindex, vmac_sysctl))
 		return -1;
+
+	/* If the underlying interface is a MACVLAN that has been moved into
+	 * a separate network namespace from the parent, we can't access the
+	 * parent. */
+	if (IS_VLAN(ifp) && ifp == base_ifp)
+		return 0;
 
 	/* Set arp_ignore and arp_filter on base interface if needed */
 	if (base_ifp->reset_arp_config)
@@ -313,6 +319,12 @@ set_interface_parameters_sysctl(const interface_t *ifp, interface_t *base_ifp)
 	set_sysctl("net/ipv4/conf", ifp->ifname, "rp_filter", 0);
 
 	set_sysctl("net/ipv4/conf", ifp->ifname, "promote_secondaries", 1);
+
+	/* If the underlying interface is a MACVLAN that has been moved into
+	 * a separate network namespace from the parent, we can't access the
+	 * parent. */
+	if (IS_VLAN(ifp) && ifp == base_ifp)
+		return;
 
 	if (base_ifp->reset_arp_config)
 		base_ifp->reset_arp_config++;
@@ -427,7 +439,7 @@ clear_rp_filter(void)
 	/* We want to ensure that default/rp_filter is at least the value of all/rp_filter */
 	rp_filter = get_sysctl("net/ipv4/conf", "default", "rp_filter");
 	if (rp_filter < all_rp_filter) {
-		log_message(LOG_INFO, "NOTICE: setting sysctl net.ipv4.conf.default.rp_filter from %d to %d", rp_filter, all_rp_filter);
+		log_message(LOG_INFO, "NOTICE: setting sysctl net.ipv4.conf.default.rp_filter from %u to %u", rp_filter, all_rp_filter);
 		set_sysctl("net/ipv4/conf", "default", "rp_filter", all_rp_filter);
 		default_rp_filter = rp_filter;
 	}
@@ -460,7 +472,7 @@ clear_rp_filter(void)
 	}
 
 	/* We have now made sure that all the interfaces have rp_filter >= all_rp_filter */
-	log_message(LOG_INFO, "NOTICE: setting sysctl net.ipv4.conf.all.rp_filter from %d to 0", all_rp_filter);
+	log_message(LOG_INFO, "NOTICE: setting sysctl net.ipv4.conf.all.rp_filter from %u to 0", all_rp_filter);
 	set_sysctl("net/ipv4/conf", "all", "rp_filter", 0);
 }
 
@@ -482,14 +494,14 @@ restore_rp_filter(void)
 
 	rp_filter = get_sysctl("net/ipv4/conf", "all", "rp_filter");
 	if (rp_filter == 0) {
-		log_message(LOG_INFO, "NOTICE: resetting sysctl net.ipv4.conf.all.rp_filter to %d", all_rp_filter);
+		log_message(LOG_INFO, "NOTICE: resetting sysctl net.ipv4.conf.all.rp_filter to %u", all_rp_filter);
 		set_sysctl("net/ipv4/conf", "all", "rp_filter", all_rp_filter);
 	}
 
 	if (default_rp_filter != UINT_MAX) {
 		rp_filter = get_sysctl("net/ipv4/conf", "default", "rp_filter");
 		if (rp_filter == all_rp_filter) {
-			log_message(LOG_INFO, "NOTICE: resetting sysctl net.ipv4.conf.default.rp_filter to %d", default_rp_filter);
+			log_message(LOG_INFO, "NOTICE: resetting sysctl net.ipv4.conf.default.rp_filter to %u", default_rp_filter);
 			set_sysctl("net/ipv4/conf", "default", "rp_filter", default_rp_filter);
 		}
 		default_rp_filter = UINT_MAX;
@@ -542,7 +554,9 @@ void link_set_ipv6(const interface_t* ifp, bool enable)
 }
 #endif
 
-bool get_ipv6_forwarding(const interface_t* ifp)
+void
+set_ipv6_forwarding(interface_t* ifp)
 {
-	return !!get_sysctl("net/ipv6/conf", ifp->ifname, "forwarding");
+	ifp->gna_router = !!get_sysctl("net/ipv6/conf", ifp->ifname, "forwarding");
+	ifp->last_gna_router_check = time_now;
 }

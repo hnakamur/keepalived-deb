@@ -103,7 +103,8 @@ am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
 mkinstalldirs = $(install_sh) -d
-CONFIG_HEADER = $(top_builddir)/lib/config.h
+CONFIG_HEADER = $(top_builddir)/lib/config.h \
+	$(top_builddir)/lib/config_warnings.h
 CONFIG_CLEAN_FILES =
 CONFIG_CLEAN_VPATH_FILES =
 LIBRARIES = $(noinst_LIBRARIES)
@@ -116,8 +117,8 @@ libcheck_a_DEPENDENCIES = $(am__append_1) $(am__append_3)
 am_libcheck_a_OBJECTS = check_daemon.$(OBJEXT) check_data.$(OBJEXT) \
 	check_parser.$(OBJEXT) check_api.$(OBJEXT) check_tcp.$(OBJEXT) \
 	check_http.$(OBJEXT) check_ssl.$(OBJEXT) check_smtp.$(OBJEXT) \
-	check_misc.$(OBJEXT) check_dns.$(OBJEXT) ipwrapper.$(OBJEXT) \
-	ipvswrapper.$(OBJEXT) libipvs.$(OBJEXT)
+	check_misc.$(OBJEXT) check_dns.$(OBJEXT) check_print.$(OBJEXT) \
+	ipwrapper.$(OBJEXT) ipvswrapper.$(OBJEXT) libipvs.$(OBJEXT)
 am__EXTRA_libcheck_a_SOURCES_DIST = check_snmp.c check_bfd.c
 libcheck_a_OBJECTS = $(am_libcheck_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
@@ -241,6 +242,7 @@ RANLIB = @RANLIB@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
+SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
 VERSION = @VERSION@
@@ -299,8 +301,8 @@ noinst_LIBRARIES = libcheck.a
 libcheck_a_SOURCES = \
 	check_daemon.c check_data.c check_parser.c \
 	check_api.c check_tcp.c check_http.c check_ssl.c \
-	check_smtp.c check_misc.c check_dns.c ipwrapper.c \
-	ipvswrapper.c libipvs.c
+	check_smtp.c check_misc.c check_dns.c check_print.c \
+	ipwrapper.c ipvswrapper.c libipvs.c
 
 EXTRA_libcheck_a_SOURCES = $(am__append_2) $(am__append_4)
 libcheck_a_LIBADD = $(am__append_1) $(am__append_3)
@@ -360,6 +362,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_http.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_misc.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_parser.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_print.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_snmp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_ssl.Po@am__quote@

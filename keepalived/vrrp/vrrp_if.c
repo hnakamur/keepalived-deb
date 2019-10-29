@@ -29,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <syslog.h>
+#include <inttypes.h>
 #include <linux/ip.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -67,6 +68,9 @@
 #ifdef THREAD_DUMP
 #include "scheduler.h"
 #endif
+#ifdef _WITH_FIREWALL_
+#include "vrrp_firewall.h"
+#endif
 
 
 /* Local vars */
@@ -83,7 +87,7 @@ list garp_delay;
 
 /* Helper functions */
 /* Return interface from interface index */
-interface_t *
+interface_t * __attribute__ ((pure))
 if_get_by_ifindex(ifindex_t ifindex)
 {
 	interface_t *ifp;
@@ -121,10 +125,11 @@ if_get_by_ifname(const char *ifname, if_lookup_t create)
 	if (!(ifp = MALLOC(sizeof(interface_t))))
 		return NULL;
 
-	strcpy(ifp->ifname, ifname);
+	strcpy_safe(ifp->ifname, ifname);
 #ifdef _HAVE_VRRP_VMAC_
 	ifp->base_ifp = ifp;
 #endif
+	ifp->if_type = IF_TYPE_STANDARD;
 	ifp->sin_addr_l = alloc_list(free_list_element_simple, NULL);
 	ifp->sin6_addr_l = alloc_list(free_list_element_simple, NULL);
 
@@ -137,7 +142,7 @@ if_get_by_ifname(const char *ifname, if_lookup_t create)
 }
 
 #ifdef _HAVE_VRRP_VMAC_
-/* Set the base_ifp for VMACs and vrf_master_ifp for VRFs - only used at startup */
+/* Set the base_ifp for VMACs and IPVLANs and vrf_master_ifp for VRFs - only used at startup */
 static void
 set_base_ifp(void)
 {
@@ -147,14 +152,22 @@ set_base_ifp(void)
 #endif
 	element e;
 
-	if (LIST_ISEMPTY(if_queue))
-		return;
-
 	LIST_FOREACH(if_queue, ifp, e) {
-		if (!ifp->base_ifp &&
+		if ((!ifp->base_ifp || ifp == ifp->base_ifp) &&
 		    ifp->base_ifindex) {
-			ifp->base_ifp = if_get_by_ifindex(ifp->base_ifindex);
-			ifp->base_ifindex = 0;	/* This is only used at startup, so ensure not used later */
+#ifdef HAVE_IFLA_LINK_NETNSID
+			if (ifp->base_netns_id != -1)
+				ifp->base_ifp = NULL;
+			else
+#endif
+				ifp->base_ifp = if_get_by_ifindex(ifp->base_ifindex);
+
+			/* If this is a MACVLAN/IPVLAN that has been moved into a separate network namespace
+			 * from its parent, then we can't get information about the parent. */
+			if (!ifp->base_ifp)
+				ifp->base_ifp = ifp;
+			else
+				ifp->base_ifindex = 0;	/* This is only used at startup, so ensure not used later */
 		}
 
 #ifdef _HAVE_VRF_
@@ -171,7 +184,7 @@ set_base_ifp(void)
 #endif
 
 /* Return the interface list itself */
-list
+list __attribute__ ((pure))
 get_if_list(void)
 {
 	return if_queue;
@@ -262,7 +275,7 @@ if_mii_probe(const int fd, const char *ifname)
 	uint16_t phy_id;
 
 	memset(&ifr, 0, sizeof (struct ifreq));
-	strcpy(ifr.ifr_name, ifname);
+	strcpy_safe(ifr.ifr_name, ifname);
 	if (ioctl(fd, SIOCGMIIPHY, &ifr) < 0)
 		return -1;
 
@@ -293,12 +306,12 @@ if_ethtool_status(const int fd)
 }
 
 static int
-if_ethtool_probe(const int fd, const char *ifname)
+if_ethtool_probe(const int fd, const interface_t *ifp)
 {
 	int status;
 
 	memset(&ifr, 0, sizeof (struct ifreq));
-	strcpy(ifr.ifr_name, ifname);
+	strcpy_safe(ifr.ifr_name, ifp->ifname);
 
 	status = if_ethtool_status(fd);
 
@@ -339,9 +352,9 @@ free_garp_delay(void *data)
 }
 
 static void
-dump_garp_delay(FILE *fp, void *data)
+dump_garp_delay(FILE *fp, const void *data)
 {
-	garp_delay_t *gd = data;
+	const garp_delay_t *gd = data;
 	char time_str[26];
 	interface_t *ifp;
 	element e;
@@ -383,7 +396,7 @@ alloc_garp_delay(void)
 void
 set_default_garp_delay(void)
 {
-	garp_delay_t default_delay;
+	garp_delay_t default_delay = {};
 	element e;
 	interface_t *ifp;
 	garp_delay_t *delay;
@@ -414,21 +427,22 @@ set_default_garp_delay(void)
 }
 
 static void
-dump_if(FILE *fp, void *data)
+dump_if(FILE *fp, const void *data)
 {
-	interface_t *ifp = data;
+	const interface_t *ifp = data;
 	char addr_str[INET6_ADDRSTRLEN];
 	char mac_buf[3 * sizeof ifp->hw_addr];
 	element e;
 	struct in_addr *addr_p;
 	struct in6_addr *addr6_p;
+	char time_str[26];
 
 	conf_write(fp, " Name = %s", ifp->ifname);
-	conf_write(fp, "   index = %u", ifp->ifindex);
+	conf_write(fp, "   index = %u%s", ifp->ifindex, ifp->ifindex ? "" : " (deleted)");
 	conf_write(fp, "   IPv4 address = %s",
 			ifp->sin_addr.s_addr ? inet_ntop2(ifp->sin_addr.s_addr) : "(none)");
 	if (!LIST_ISEMPTY(ifp->sin_addr_l)) {
-		conf_write(fp, "   Additional IPv4 addresses = %d", LIST_SIZE(ifp->sin_addr_l));
+		conf_write(fp, "   Additional IPv4 addresses = %u", LIST_SIZE(ifp->sin_addr_l));
 		LIST_FOREACH(ifp->sin_addr_l, addr_p, e)
 			conf_write(fp, "     %s", inet_ntop2(addr_p->s_addr));
 	}
@@ -438,7 +452,7 @@ dump_if(FILE *fp, void *data)
 	} else
 		conf_write(fp, "   IPv6 address = (none)");
 	if (!LIST_ISEMPTY(ifp->sin6_addr_l)) {
-		conf_write(fp, "   Additional IPv6 addresses = %d", LIST_SIZE(ifp->sin6_addr_l));
+		conf_write(fp, "   Additional IPv6 addresses = %u", LIST_SIZE(ifp->sin6_addr_l));
 		LIST_FOREACH(ifp->sin6_addr_l, addr6_p, e) {
 			inet_ntop(AF_INET6, addr6_p, addr_str, sizeof(addr_str));
 			conf_write(fp, "     %s", addr_str);
@@ -467,20 +481,44 @@ dump_if(FILE *fp, void *data)
 		  );
 
 #ifdef _HAVE_VRRP_VMAC_
-	if (ifp->vmac_type && ifp->base_ifp)
-		conf_write(fp, "   VMAC type %s, underlying interface = %s, state = %sUP, %sRUNNING",
-				ifp->vmac_type == MACVLAN_MODE_PRIVATE ? "private" :
-				ifp->vmac_type == MACVLAN_MODE_VEPA ? "vepa" :
-				ifp->vmac_type == MACVLAN_MODE_BRIDGE ? "bridge" :
+	if (IS_VLAN(ifp)) {
+		const char *if_type =
+#ifdef _HAVE_VRRP_IPVLAN
+				      ifp->if_type == IF_TYPE_IPVLAN ? "IPVLAN" : 
+#endif
+										  "VMAC";
+		const char *vlan_type =
+				ifp->if_type == IF_TYPE_MACVLAN ?
+					ifp->vmac_type == MACVLAN_MODE_PRIVATE ? "private" :
+					ifp->vmac_type == MACVLAN_MODE_VEPA ? "vepa" :
+					ifp->vmac_type == MACVLAN_MODE_BRIDGE ? "bridge" :
 #ifdef MACVLAN_MODE_PASSTHRU
-				ifp->vmac_type == MACVLAN_MODE_PASSTHRU ? "passthru" :
+					ifp->vmac_type == MACVLAN_MODE_PASSTHRU ? "passthru" :
 #endif
 #ifdef MACVLAN_MODE_SOURCE
-				ifp->vmac_type == MACVLAN_MODE_SOURCE ? "source" :
+					ifp->vmac_type == MACVLAN_MODE_SOURCE ? "source" :
 #endif
-				"unknown",
-				ifp->base_ifp->ifname,
-				ifp->base_ifp->ifi_flags & IFF_UP ? "" : "not ", ifp->base_ifp->ifi_flags & IFF_RUNNING ? "" : "not ");
+					"unknown" :
+#ifdef IFLA_IPVLAN_FLAGS
+					ifp->vmac_type == IPVLAN_MODE_PRIVATE ? "private" :
+					ifp->vmac_type == IPVLAN_MODE_VEPA ? "vepa" :
+#endif
+					"bridge";
+		if (ifp != ifp->base_ifp)
+			conf_write(fp, "   %s type %s, underlying interface = %s, state = %sUP, %sRUNNING",
+					if_type, vlan_type,
+					ifp->base_ifp->ifname,
+					ifp->base_ifp->ifi_flags & IFF_UP ? "" : "not ", ifp->base_ifp->ifi_flags & IFF_RUNNING ? "" : "not ");
+		else if (ifp->base_ifindex) {
+#ifdef HAVE_IFLA_LINK_NETNSID
+			conf_write(fp, "   %s type %s, underlying ifindex = %u, netns id = %d", if_type, vlan_type, ifp->base_ifindex, ifp->base_netns_id);
+#else
+			conf_write(fp, "   %s type %s, underlying ifindex = %d", if_type, vlan_type, ifp->base_ifindex);
+#endif
+		}
+		else
+			conf_write(fp, "   %s type %s, underlying interface in different namespace", if_type, vlan_type);
+	}
 	if (ifp->is_ours)
 		conf_write(fp, "   I/f created by keepalived");
 	else if (global_data->allow_if_changes && ifp->changeable_type)
@@ -488,7 +526,7 @@ dump_if(FILE *fp, void *data)
 	if (ifp->seen_interface)
 		conf_write(fp, "   Done VRID check");
 #endif
-	conf_write(fp, "   MTU = %d", ifp->mtu);
+	conf_write(fp, "   MTU = %" PRIu32, ifp->mtu);
 
 	switch (ifp->hw_type) {
 	case ARPHRD_LOOPBACK:
@@ -541,12 +579,17 @@ dump_if(FILE *fp, void *data)
 	conf_write(fp, "   Original arp_ignore %d", ifp->arp_ignore);
 	conf_write(fp, "   Original arp_filter %d", ifp->arp_filter);
 	if (ifp->rp_filter < UINT_MAX)
-		conf_write(fp, "   rp_filter %d", ifp->rp_filter);
+		conf_write(fp, "   rp_filter %u", ifp->rp_filter);
 #endif
 	conf_write(fp, "   Original promote_secondaries %d", ifp->promote_secondaries);
-	conf_write(fp, "   Reset promote_secondaries counter %d", ifp->reset_promote_secondaries);
+	conf_write(fp, "   Reset promote_secondaries counter %" PRIu32, ifp->reset_promote_secondaries);
+	if (timerisset(&ifp->last_gna_router_check)) {
+		ctime_r(&ifp->last_gna_router_check.tv_sec, time_str);
+		conf_write(fp, "   %sIPv6 forwarding. Last checked %ld.%6.6ld (%.24s.%6.6ld)", ifp->gna_router ? "" : "Not ", ifp->last_gna_router_check.tv_sec, ifp->last_gna_router_check.tv_usec, time_str, ifp->last_gna_router_check.tv_usec);
 
-	conf_write(fp, "   Tracking VRRP instances = %d", !LIST_ISEMPTY(ifp->tracking_vrrp) ? LIST_SIZE(ifp->tracking_vrrp) : 0);
+	}
+
+	conf_write(fp, "   Tracking VRRP instances = %u", !LIST_ISEMPTY(ifp->tracking_vrrp) ? LIST_SIZE(ifp->tracking_vrrp) : 0);
 	if (!LIST_ISEMPTY(ifp->tracking_vrrp))
 		dump_list(fp, ifp->tracking_vrrp);
 }
@@ -581,7 +624,7 @@ init_linkbeat_status(int fd, interface_t *ifp)
 	}
 
 	if ((!ifp->lb_type || ifp->lb_type == LB_ETHTOOL)) {
-		if ((status = if_ethtool_probe(fd, ifp->ifname)) >= 0) {
+		if ((status = if_ethtool_probe(fd, ifp)) >= 0) {
 			ifp->lb_type = LB_ETHTOOL;
 			if_up = !!status;
 		} else {
@@ -614,7 +657,7 @@ init_linkbeat_status(int fd, interface_t *ifp)
 }
 
 static int
-if_linkbeat_refresh_thread(thread_t * thread)
+if_linkbeat_refresh_thread(thread_ref_t thread)
 {
 	interface_t *ifp = THREAD_ARG(thread);
 	bool if_up = true, was_up;
@@ -631,7 +674,7 @@ if_linkbeat_refresh_thread(thread_t * thread)
 			if (IF_MII_SUPPORTED(ifp))
 				if_up = if_mii_probe(linkbeat_fd, ifp->ifname);
 			else if (IF_ETHTOOL_SUPPORTED(ifp))
-				if_up = if_ethtool_probe(linkbeat_fd, ifp->ifname);
+				if_up = if_ethtool_probe(linkbeat_fd, ifp);
 
 			/*
 			 * update ifp->flags to get the new IFF_RUNNING status.
@@ -678,8 +721,8 @@ init_interface_linkbeat(void)
 
 #ifdef _HAVE_VRRP_VMAC_
 		/* netlink messages work for vmacs */
-		if (ifp->vmac_type) {
-			log_message(LOG_INFO, "Turning off linkbeat for %s since netlink works for vmacs", ifp->ifname);
+		if (IS_VLAN(ifp)) {
+			log_message(LOG_INFO, "Turning off linkbeat for %s since netlink works for vmacs/ipvlans", ifp->ifname);
 			ifp->linkbeat_use_polling = false;
 			continue;
 		}
@@ -757,6 +800,9 @@ if_join_vrrp_group(sa_family_t family, int *sd, interface_t *ifp)
 	struct ip_mreqn imr;
 	struct ipv6_mreq imr6;
 	int ret = 0;
+#if defined _HAVE_VRRP_VMAC_
+	bool send_on_base_if;
+#endif
 
 	if (*sd < 0)
 		return -1;
@@ -767,19 +813,75 @@ if_join_vrrp_group(sa_family_t family, int *sd, interface_t *ifp)
 	 * traffic.
 	 */
 
+	/* We don't really want to send the IGMP/MLD messages on a VMAC
+	 * interface, since that will send using the 00:00:5e:00:0x:xx mac
+	 * address, and snooping switches will then be updated, even if we
+	 * are backup.
+	 * We have to join the group on the VMAC interface, otherwise we cannot
+	 * receive the messages to the multicast address (if we try receiving
+	 * on the base interface we don't see the messages since there is an
+	 * interface on the system with the MAC address matching the source address
+	 * of the packet). If we are using nftables and the dup statement is supported,
+	 * we just let nftables move the IGMP join message to the physical interface,
+	 * otherwise we need to join on both the VMAC interface and the physical
+	 * interface, and use nftables/iptables to drop the packet on the VMAC
+	 * interface.
+	 * If we are using neither nftables or iptables, there is no point in
+	 * duplicating the join, since we can't block it on the VMAC interface.
+	 *
+	 * This might all be better achieved using eBPF.
+	 */
+#if defined _HAVE_VRRP_VMAC_
+	send_on_base_if = false;
+	if (IS_VLAN(ifp) &&
+	    ifp->if_type == IF_TYPE_MACVLAN &&
+	    ifp->is_ours) {
+#ifdef _WITH_IPTABLES_
+		if (global_data->vrrp_iptables_outchain[0])
+			send_on_base_if = true;
+#endif
+#ifdef _WITH_NFTABLES_
+		if (global_data->vrrp_nf_table_name) {
+#if HAVE_DECL_NFTA_DUP_MAX
+			send_on_base_if = false;
+#else
+			send_on_base_if = true;
+#endif
+		}
+#endif
+	}
+#endif
+
 	if (family == AF_INET) {
 		memset(&imr, 0, sizeof(imr));
 		imr.imr_multiaddr = global_data->vrrp_mcast_group4.sin_addr;
-		imr.imr_ifindex = (int)IF_INDEX(ifp);
 
 		/* -> Need to handle multicast convergance after takeover.
 		 * We retry until multicast is available on the interface.
 		 */
+#if defined _HAVE_VRRP_VMAC_
+		if (send_on_base_if)
+		{
+			imr.imr_ifindex = IF_INDEX(IF_BASE_IFP(ifp));
+			if (setsockopt(*sd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+					 (char *) &imr, (socklen_t)sizeof(struct ip_mreqn)) < 0)
+				log_message(LOG_INFO, "Failed to set GARP on base if - errno %d (%m)", errno);
+		}
+#endif
+		imr.imr_ifindex = (int)IF_INDEX(ifp);
 		ret = setsockopt(*sd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
 				 (char *) &imr, (socklen_t)sizeof(struct ip_mreqn));
 	} else {
 		memset(&imr6, 0, sizeof(imr6));
 		imr6.ipv6mr_multiaddr = global_data->vrrp_mcast_group6.sin6_addr;
+#if defined _HAVE_VRRP_VMAC_
+		if (send_on_base_if) {
+			imr6.ipv6mr_interface = IF_INDEX(IF_BASE_IFP(ifp));
+			if (setsockopt(*sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
+					 (char *) &imr6, (socklen_t)sizeof(struct ipv6_mreq)) < 0)
+				log_message(LOG_INFO, "Failed to set MLD on base if - errno %d (%m)", errno);
+		}
+#endif
 		imr6.ipv6mr_interface = IF_INDEX(ifp);
 		ret = setsockopt(*sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
 				 (char *) &imr6, (socklen_t)sizeof(struct ipv6_mreq));
@@ -810,12 +912,32 @@ if_leave_vrrp_group(sa_family_t family, int sd, interface_t *ifp)
 	if (family == AF_INET) {
 		memset(&imr, 0, sizeof(imr));
 		imr.imr_multiaddr = global_data->vrrp_mcast_group4.sin_addr;
+#if defined _HAVE_VRRP_VMAC_ && defined _WITH_NFTABLES_ && !HAVE_DECL_NFTA_DUP_MAX
+		/* See description in if_join_vrrp_group */
+		if (IS_VLAN(ifp) &&
+		    ifp->if_type == IF_TYPE_MACVLAN &&
+		    ifp->is_ours) {
+			imr.imr_ifindex = IF_INDEX(IF_BASE_IFP(ifp));
+			setsockopt(sd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+					 (char *) &imr, sizeof(imr));
+		}
 		imr.imr_ifindex = (int)IF_INDEX(ifp);
 		ret = setsockopt(sd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
 				 (char *) &imr, sizeof(imr));
+#endif
 	} else {
 		memset(&imr6, 0, sizeof(imr6));
 		imr6.ipv6mr_multiaddr = global_data->vrrp_mcast_group6.sin6_addr;
+#if defined _HAVE_VRRP_VMAC_ && defined _WITH_NFTABLES_ && !HAVE_DECL_NFTA_DUP_MAX
+		/* See description in if_join_vrrp_group */
+		if (IS_VLAN(ifp) &&
+		    ifp->if_type == IF_TYPE_MACVLAN &&
+		    ifp->is_ours) {
+			imr6.ipv6mr_interface = IF_INDEX(IF_BASE_IFP(ifp));
+			setsockopt(sd, IPPROTO_IPV6, IPV6_DROP_MEMBERSHIP,
+					 (char *) &imr6, sizeof(struct ipv6_mreq));
+		}
+#endif
 		imr6.ipv6mr_interface = IF_INDEX(ifp);
 		ret = setsockopt(sd, IPPROTO_IPV6, IPV6_DROP_MEMBERSHIP,
 				 (char *) &imr6, sizeof(struct ipv6_mreq));
@@ -884,7 +1006,7 @@ if_setsockopt_ipv6_checksum(int *sd)
 	int ret;
 	int offset = 6;
 
-	if (!sd && *sd < 0)
+	if (!sd || *sd < 0)
 		return -1;
 
 	ret = setsockopt(*sd, IPPROTO_IPV6, IPV6_CHECKSUM, &offset, sizeof(offset));
@@ -1156,14 +1278,18 @@ cleanup_lost_interface(interface_t *ifp)
 
 #ifdef _HAVE_VRRP_VMAC_
 		/* If vmac going, clear VMAC_UP_BIT on vrrp instance */
-		if (vrrp->ifp->is_ours)
+		if (vrrp->ifp->is_ours) {
 			__clear_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags);
+#ifdef _WITH_FIREWALL_
+			firewall_remove_vmac(vrrp);
+#endif
+		}
 
 		if (vrrp->configured_ifp == ifp &&
 		    vrrp->configured_ifp->base_ifp == vrrp->ifp->base_ifp &&
 		    vrrp->ifp->is_ours) {
 			/* This is a changeable interface that the vrrp instance
-			 * was configured on. Delete the macvlan we created */
+			 * was configured on. Delete the macvlan/ipvlan we created */
 			netlink_link_del_vmac(vrrp);
 		}
 
@@ -1194,7 +1320,6 @@ cleanup_lost_interface(interface_t *ifp)
 			close(vrrp->sockets->fd_out);
 			vrrp->sockets->fd_out = -1;
 		}
-		vrrp->sockets->ifp->ifindex = 0;
 
 		if (IF_ISUP(ifp))
 			down_instance(vrrp);
@@ -1223,14 +1348,17 @@ setup_interface(vrrp_t *vrrp)
 #ifdef _HAVE_VRRP_VMAC_
 	/* If the vrrp instance uses a vmac, and that vmac i/f doesn't
 	 * exist, then create it */
-	if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) &&
-	    !vrrp->ifp->ifindex) {
-		if (!netlink_link_add_vmac(vrrp))
+	if (!vrrp->ifp->ifindex) {
+		if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) &&
+		    !netlink_link_add_vmac(vrrp))
 			return;
-	}
+#ifdef _HAVE_VRRP_IPVLAN_
+		else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags) &&
+		    !netlink_link_add_ipvlan(vrrp))
+			return;
 #endif
+	}
 
-#ifdef _HAVE_VRRP_VMAC_
 	if (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags))
 		ifp = vrrp->ifp->base_ifp;
 	else
@@ -1272,7 +1400,7 @@ setup_interface(vrrp_t *vrrp)
 
 #ifdef _HAVE_VRRP_VMAC_
 int
-recreate_vmac_thread(thread_t *thread)
+recreate_vmac_thread(thread_ref_t thread)
 {
 	vrrp_t *vrrp;
 	tracking_vrrp_t *tvp;
@@ -1289,7 +1417,11 @@ recreate_vmac_thread(thread_t *thread)
 		if (vrrp->ifp != ifp)
 			continue;
 
-		if (!__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
+		if (!__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags)
+#ifdef _HAVE_VRRP_IPVLAN_
+		    && !__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags)
+#endif
+		    						      )
 			continue;
 
 		/* Don't attempt to create the VMAC if the configured
@@ -1386,18 +1518,22 @@ update_added_interface(interface_t *ifp)
 			}
 		}
 
-		if (ifp->vmac_type && tvp->type & TRACK_VRRP) {
-			add_vrrp_to_interface(vrrp, ifp->base_ifp, tvp->weight, false, TRACK_VRRP_DYNAMIC);
-			if (!IF_ISUP(vrrp->configured_ifp->base_ifp) && !vrrp->dont_track_primary)
-				vrrp->num_script_if_fault++;
-		}
+		if (vrrp->vmac_flags) {
+			if (tvp->type & TRACK_VRRP) {
+				add_vrrp_to_interface(vrrp, ifp->base_ifp, tvp->weight, tvp->weight_multiplier == -1, false, TRACK_VRRP_DYNAMIC);
+				if (!IF_ISUP(vrrp->configured_ifp->base_ifp) && !vrrp->dont_track_primary) {
+					log_message(LOG_INFO, "(%s) interface %s is down",
+							vrrp->iname, vrrp->configured_ifp->base_ifp->ifname);
+					vrrp->num_script_if_fault++;
+				}
+			}
 
-		/* We might be the configured interface for a vrrp instance that itself uses
-		 * a macvlan. If so, we can create the macvlans */
-		if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) &&
-		    vrrp->configured_ifp == ifp &&
-		    !vrrp->ifp->ifindex)
-			thread_add_event(master, recreate_vmac_thread, vrrp->ifp, 0);
+			/* We might be the configured interface for a vrrp instance that itself uses
+			 * a macvlan. If so, we can create the macvlans */
+			if ( vrrp->configured_ifp == ifp &&
+			    !vrrp->ifp->ifindex)
+				thread_add_event(master, recreate_vmac_thread, vrrp->ifp, 0);
+		}
 #endif
 
 		/* If this is just a tracking interface, we don't need to do anything */
@@ -1407,7 +1543,7 @@ update_added_interface(interface_t *ifp)
 		/* Reopen any socket on this interface if necessary */
 		if (
 #ifdef _HAVE_VRRP_VMAC_
-		    !__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) &&
+		    !vrrp->vmac_flags &&
 #endif
 		    vrrp->sockets->fd_in == -1)
 			setup_interface(vrrp);

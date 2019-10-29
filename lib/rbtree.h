@@ -31,6 +31,8 @@
 
 #include <stdbool.h>
 
+#include "container.h"
+
 typedef struct rb_node {
 	unsigned long  __rb_parent_color;
 	struct rb_node *rb_right;
@@ -56,23 +58,13 @@ typedef struct rb_root_cached {
 	struct rb_node *rb_leftmost;
 } rb_root_cached_t;
 
-/* Copy from linux kernel 2.6 source (kernel.h, stddef.h) */
-#ifndef container_of
-# define container_of(ptr, type, member) ({	\
-	 const typeof( ((type *)0)->member ) *__mptr = (ptr);  \
-	 (type *)( (char *)__mptr - offsetof(type,member) );})
-#endif
-
-#ifndef offsetof
-# define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
-#endif
-
 
 #define rb_parent(r)   ((struct rb_node *)((r)->__rb_parent_color & ~3))
 
 #define RB_ROOT	(struct rb_root) { NULL, }
 #define RB_ROOT_CACHED (struct rb_root_cached) { {NULL, }, NULL }
 #define	rb_entry(ptr, type, member) container_of(ptr, type, member)
+#define	rb_entry_const(ptr, type, member) container_of_const(ptr, type, member)
 
 #define RB_EMPTY_ROOT(root)  (((root)->rb_node) == NULL)
 
@@ -88,10 +80,10 @@ extern void rb_erase(struct rb_node *, struct rb_root *);
 
 
 /* Find logical next and previous nodes in a tree */
-extern struct rb_node *rb_next(const struct rb_node *);
-extern struct rb_node *rb_prev(const struct rb_node *);
-extern struct rb_node *rb_first(const struct rb_root *);
-extern struct rb_node *rb_last(const struct rb_root *);
+extern struct rb_node *rb_next(const struct rb_node *) __attribute__ ((pure));
+extern struct rb_node *rb_prev(const struct rb_node *) __attribute__ ((pure));
+extern struct rb_node *rb_first(const struct rb_root *) __attribute__ ((pure));
+extern struct rb_node *rb_last(const struct rb_root *) __attribute__ ((pure));
 
 extern void rb_insert_color_cached(struct rb_node *,
 				   struct rb_root_cached *, bool);
@@ -100,8 +92,8 @@ extern void rb_erase_cached(struct rb_node *node, struct rb_root_cached *);
 #define rb_first_cached(root) (root)->rb_leftmost
 
 /* Postorder iteration - always visit the parent after its children */
-extern struct rb_node *rb_first_postorder(const struct rb_root *);
-extern struct rb_node *rb_next_postorder(const struct rb_node *);
+extern struct rb_node *rb_first_postorder(const struct rb_root *) __attribute__ ((pure));
+extern struct rb_node *rb_next_postorder(const struct rb_node *) __attribute__ ((pure));
 
 /* Fast replacement of a single node without remove/rebalance/add/rebalance */
 extern void rb_replace_node(struct rb_node *victim, struct rb_node *new,
@@ -134,6 +126,10 @@ static inline void rb_link_node_rcu(struct rb_node *node, struct rb_node *parent
 #define rb_entry_safe(ptr, type, member) \
 	({ typeof(ptr) ____ptr = (ptr); \
 	   ____ptr ? rb_entry(____ptr, type, member) : NULL; \
+	})
+#define rb_entry_safe_const(ptr, type, member) \
+	({ typeof(ptr) ____ptr = (ptr); \
+	   ____ptr ? rb_entry_const(____ptr, type, member) : NULL; \
 	})
 
 /**
@@ -321,6 +317,9 @@ static inline void rb_link_node_rcu(struct rb_node *node, struct rb_node *parent
 #define rb_for_each_entry(pos, root, member)				\
 	for (pos = rb_entry_safe(rb_first(root), typeof(*pos), member);	\
 	     pos; pos = rb_entry_safe(rb_next(&pos->member), typeof(*pos), member))
+#define rb_for_each_entry_const(pos, root, member)				\
+	for (pos = rb_entry_safe_const(rb_first(root), typeof(*pos), member);	\
+	     pos; pos = rb_entry_safe_const(rb_next(&pos->member), typeof(*pos), member))
 
 /**
  * rb_for_each_entry_safe - 	Iterate over rbtree of given type safe against removal
@@ -342,6 +341,9 @@ static inline void rb_link_node_rcu(struct rb_node *node, struct rb_node *parent
 #define rb_for_each_entry_cached(pos, root, member)				\
 	for (pos = rb_entry_safe(rb_first_cached(root), typeof(*pos), member);	\
 	     pos; pos = rb_entry_safe(rb_next(&pos->member), typeof(*pos), member))
+#define rb_for_each_entry_cached_const(pos, root, member)				\
+	for (pos = rb_entry_safe_const(rb_first_cached(root), typeof(*pos), member);	\
+	     pos; pos = rb_entry_safe_const(rb_next(&pos->member), typeof(*pos), member))
 
 /**
  * rb_for_each_entry_safe_cached - Iterate over cached rbtree of given type

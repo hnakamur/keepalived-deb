@@ -51,6 +51,7 @@
 #include "old_socket.h"
 #endif
 #include "logger.h"
+#include "utils.h"
 
 
 typedef struct ipvs_servicedest_s {
@@ -116,6 +117,13 @@ static struct nla_policy ipvs_dest_policy[IPVS_DEST_ATTR_MAX + 1] = {
 	[IPVS_DEST_ATTR_STATS]		= { .type = NLA_NESTED },
 #if HAVE_DECL_IPVS_DEST_ATTR_ADDR_FAMILY
 	[IPVS_DEST_ATTR_ADDR_FAMILY]	= { .type = NLA_U16 },
+#endif
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	[IPVS_DEST_ATTR_TUN_TYPE]	= { .type = NLA_U8 },
+	[IPVS_DEST_ATTR_TUN_PORT]	= { .type = NLA_U16 },
+#endif
+#ifdef _HAVE_IPVS_TUN_CSUM_
+	[IPVS_DEST_ATTR_TUN_FLAGS]	= { .type = NLA_U16 },
 #endif
 #ifdef _WITH_LVS_64BIT_STATS_
 	[IPVS_DEST_ATTR_STATS64]	= {.type = NLA_NESTED },
@@ -525,6 +533,17 @@ static int ipvs_nl_fill_dest_attr(struct nl_msg *msg, ipvs_dest_t *dst)
 	NLA_PUT_U16(msg, IPVS_DEST_ATTR_PORT, dst->user.port);
 	NLA_PUT_U32(msg, IPVS_DEST_ATTR_FWD_METHOD, dst->user.conn_flags & IP_VS_CONN_F_FWD_MASK);
 	NLA_PUT_U32(msg, IPVS_DEST_ATTR_WEIGHT, (uint32_t)dst->user.weight);
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	if ((dst->user.conn_flags & IP_VS_CONN_F_FWD_MASK) == IP_VS_CONN_F_TUNNEL) {
+		NLA_PUT_U8 (msg, IPVS_DEST_ATTR_TUN_TYPE, dst->tun_type);
+		if (dst->tun_type == IP_VS_CONN_F_TUNNEL_TYPE_GUE)
+			NLA_PUT_U16(msg, IPVS_DEST_ATTR_TUN_PORT, dst->tun_port);
+#ifdef _HAVE_IPVS_TUN_CSUM_
+		if (dst->tun_type != IP_VS_CONN_F_TUNNEL_TYPE_IPIP)
+			NLA_PUT_U16(msg, IPVS_DEST_ATTR_TUN_FLAGS, dst->tun_flags);
+#endif
+	}
+#endif
 	NLA_PUT_U32(msg, IPVS_DEST_ATTR_U_THRESH, dst->user.u_threshold);
 	NLA_PUT_U32(msg, IPVS_DEST_ATTR_L_THRESH, dst->user.l_threshold);
 
@@ -855,15 +874,13 @@ static int ipvs_services_parse_cb(struct nl_msg *msg, void *arg)
 		get->user.entrytable[i].user.port = nla_get_u16(svc_attrs[IPVS_SVC_ATTR_PORT]);
 	}
 
-	strncpy(get->user.entrytable[i].user.sched_name,
-		nla_get_string(svc_attrs[IPVS_SVC_ATTR_SCHED_NAME]),
-		IP_VS_SCHEDNAME_MAXLEN);
+	strcpy_safe(get->user.entrytable[i].user.sched_name,
+		nla_get_string(svc_attrs[IPVS_SVC_ATTR_SCHED_NAME]));
 
 #ifdef _HAVE_PE_NAME_
 	if (svc_attrs[IPVS_SVC_ATTR_PE_NAME])
-		strncpy(get->user.entrytable[i].pe_name,
-			nla_get_string(svc_attrs[IPVS_SVC_ATTR_PE_NAME]),
-			IP_VS_PENAME_MAXLEN);
+		strcpy_safe(get->user.entrytable[i].pe_name,
+			nla_get_string(svc_attrs[IPVS_SVC_ATTR_PE_NAME]));
 #endif
 
 	get->user.entrytable[i].user.netmask = nla_get_u32(svc_attrs[IPVS_SVC_ATTR_NETMASK]);

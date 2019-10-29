@@ -28,7 +28,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/types.h>
-#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
+#if HAVE_DECL_RTA_ENCAP && HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 #include <linux/mpls.h>
 #endif
 #ifdef RTNETLINK_H_NEEDS_SYS_SOCKET_H
@@ -251,9 +251,9 @@ typedef struct _ip_route {
 extern unsigned short add_addr2req(struct nlmsghdr *, size_t, unsigned short, ip_address_t *);
 extern void netlink_rtlist(list, int);
 extern void free_iproute(void *);
-extern void format_iproute(ip_route_t *, char *, size_t);
-extern void dump_iproute(FILE *, void *);
-extern void alloc_route(list, vector_t *, bool);
+extern void format_iproute(const ip_route_t *, char *, size_t);
+extern void dump_iproute(FILE *, const void *);
+extern void alloc_route(list, const vector_t *, bool);
 extern void clear_diff_routes(list, list);
 extern void clear_diff_sroutes(void);
 extern void reinstate_static_route(ip_route_t *);

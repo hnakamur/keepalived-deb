@@ -25,6 +25,7 @@
 /* system include */
 #include <errno.h>
 #include <unistd.h>
+#include <main.h>
 
 /* local include */
 #include "vrrp_notify.h"
@@ -87,10 +88,10 @@ get_ggscript(vrrp_sgroup_t * vgroup)
 static void
 notify_fifo(const char *name, int state_num, bool group, uint8_t priority)
 {
-	char *state = "{UNKNOWN}";
+	const char *state = "{UNKNOWN}";
 	size_t size;
 	char *line;
-	char *type;
+	const char *type;
 
 	if (global_data->notify_fifo.fd == -1 &&
 	    global_data->vrrp_notify_fifo.fd == -1)
@@ -111,6 +112,12 @@ notify_fifo(const char *name, int state_num, bool group, uint8_t priority)
 		break;
 	case VRRP_EVENT_MASTER_RX_LOWER_PRI:
 		state = "MASTER_RX_LOWER_PRI";
+		break;
+	case VRRP_EVENT_MASTER_PRIORITY_CHANGE:
+		state = "MASTER_PRIORITY";
+		break;
+	case VRRP_EVENT_BACKUP_PRIORITY_CHANGE:
+		state = "BACKUP_PRIORITY";
 		break;
 	}
 
@@ -146,7 +153,7 @@ notify_group_fifo(const vrrp_sgroup_t *vgroup)
 }
 
 static void
-notify_script_exec(notify_script_t* script, char *type, int state_num, char* name, int prio)
+notify_script_exec(notify_script_t* script, const char *type, int state_num, const char* name, int prio)
 {
 	char prio_buf[4];
 
@@ -167,12 +174,14 @@ notify_script_exec(notify_script_t* script, char *type, int state_num, char* nam
 	}
 	snprintf(prio_buf, sizeof(prio_buf), "%d", prio);
 	script->args[script->num_args+3] = prio_buf;
+	script->num_args += 4;
 
 	/* Launch the script */
 	if (state_num == VRRP_STATE_STOP)
 		system_call_script(master, child_killed_thread, NULL, TIMER_HZ, script);
 	else
 		notify_exec(script);
+	script->num_args -= 4;
 }
 
 /* SMTP alert notifier */
@@ -253,11 +262,13 @@ send_instance_notifies(vrrp_t *vrrp)
 	notify_script_t *script = get_iscript(vrrp);
 	notify_script_t *gscript = get_igscript(vrrp);
 
-	if (vrrp->sync && vrrp->state == vrrp->sync->state) {
+	if (vrrp->notifies_sent && vrrp->sync && vrrp->state == vrrp->sync->state) {
 		/* We are already in the required state due to our sync group,
 		 * so don't send further notifies. */
 		return;
 	}
+
+	vrrp->notifies_sent = true;
 
 	/* Launch the notify_* script */
 	if (script) {
@@ -313,6 +324,15 @@ send_group_notifies(vrrp_sgroup_t *vgroup)
 	vrrp_snmp_group_trap(vgroup);
 #endif
 	vrrp_sync_smtp_notifier(vgroup);
+}
+
+void
+send_instance_priority_notifies(vrrp_t *vrrp)
+{
+	notify_fifo(vrrp->iname,
+		    vrrp->state == VRRP_STATE_MAST ? VRRP_EVENT_MASTER_PRIORITY_CHANGE : VRRP_EVENT_BACKUP_PRIORITY_CHANGE,
+		    false,
+		    vrrp->effective_priority);
 }
 
 /* handle terminate state */
