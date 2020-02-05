@@ -60,7 +60,7 @@ int bfd_checker_event_pipe[2] = { -1, -1};
 /* Local variables */
 static const char *bfd_syslog_ident;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static int reload_bfd_thread(thread_ref_t);
 #endif
 
@@ -179,18 +179,14 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* Set the process priority and non swappable if configured */
 // TODO - measure max stack usage
 	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
 			global_data->bfd_realtime_priority,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			global_data->bfd_rlimit_rt,
 #endif
-#endif
 			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
 
-#ifdef _HAVE_SCHED_RT_
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->bfd_cpu_mask, "bfd");
-#endif
 }
 
 void
@@ -199,13 +195,28 @@ bfd_validate_config(void)
 	start_bfd(NULL);
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
+static int
+print_bfd_thread(__attribute__((unused)) thread_ref_t thread)
+{
+        bfd_print_data();
+        return 0;
+}
+
 /* Reload handler */
 static void
 sigreload_bfd(__attribute__ ((unused)) void *v,
 	   __attribute__ ((unused)) int sig)
 {
 	thread_add_event(master, reload_bfd_thread, NULL, 0);
+}
+
+static void
+sigdump_bfd(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+        log_message(LOG_INFO, "Printing BFD data for process(%d) on signal",
+                    getpid());
+        thread_add_event(master, print_bfd_thread, NULL, 0);
 }
 
 /* Terminate handler */
@@ -224,6 +235,10 @@ bfd_signal_init(void)
 	signal_set(SIGHUP, sigreload_bfd, NULL);
 	signal_set(SIGINT, sigend_bfd, NULL);
 	signal_set(SIGTERM, sigend_bfd, NULL);
+	signal_set(SIGUSR1, sigdump_bfd, NULL);
+#ifdef THREAD_DUMP
+	signal_set(SIGTDUMP, thread_dump_signal, NULL);
+#endif
 	signal_ignore(SIGPIPE);
 }
 
@@ -285,7 +300,7 @@ bfd_respawn_thread(thread_ref_t thread)
 }
 #endif
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 #ifdef THREAD_DUMP
 static void
 register_bfd_thread_addresses(void)
@@ -297,8 +312,10 @@ register_bfd_thread_addresses(void)
 
 	register_thread_address("bfd_dispatcher_init", bfd_dispatcher_init);
 	register_thread_address("reload_bfd_thread", reload_bfd_thread);
+	register_thread_address("print_bfd_thread", print_bfd_thread);
 
 	register_signal_handler_address("sigreload_bfd", sigreload_bfd);
+	register_signal_handler_address("sigdump_bfd", sigdump_bfd);
 	register_signal_handler_address("sigend_bfd", sigend_bfd);
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
 }
@@ -308,7 +325,7 @@ register_bfd_thread_addresses(void)
 int
 start_bfd_child(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	pid_t pid;
 	int ret;
 	const char *syslog_ident;
@@ -411,7 +428,7 @@ start_bfd_child(void)
 	 */
 	UNSET_RELOAD;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	bfd_signal_init();
 #endif
@@ -419,7 +436,7 @@ start_bfd_child(void)
 	/* Start BFD daemon */
 	start_bfd(NULL);
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 	return 0;
 #else
 
@@ -446,7 +463,7 @@ start_bfd_child(void)
 void
 register_bfd_parent_addresses(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("bfd_respawn_thread", bfd_respawn_thread);
 #endif
 }

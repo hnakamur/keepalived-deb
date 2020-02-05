@@ -518,6 +518,9 @@ pgr_handler(const vector_t *strvec)
 			return;
 		}
 
+		/* It would seem sensible to force a solid netmask, but ipvsadm doesn't
+		   and the kernel doesn't require it either. */
+#if 0
 		/* Ensure the netmask is solid */
 		uint32_t haddr = ntohl(addr.s_addr);
 		while (!(haddr & 1))
@@ -526,6 +529,7 @@ pgr_handler(const vector_t *strvec)
 			report_config_error(CONFIG_GENERAL_ERROR, "IPv4 persistence_granularity netmask is not solid - %s", strvec_slot(strvec, 1));
 			return;
 		}
+#endif
 
 		vs->persistence_granularity = addr.s_addr;
 	}
@@ -960,6 +964,8 @@ init_check_keywords(bool active)
 	install_keyword("flag-3", &lbflags_handler);
 	install_keyword("sh-port", &lbflags_handler);
 	install_keyword("sh-fallback", &lbflags_handler);
+	install_keyword("mh-port", &lbflags_handler);
+	install_keyword("mh-fallback", &lbflags_handler);
 #endif
 	install_keyword("lb_kind", &forwarding_handler);
 	install_keyword("lvs_method", &forwarding_handler);

@@ -79,12 +79,6 @@ vsge_iseq(const virtual_server_group_entry_t *vsge_a, const virtual_server_group
 	return true;
 }
 
-static bool __attribute((pure))
-rs_iseq(const real_server_t *rs_a, const real_server_t *rs_b)
-{
-	return sockstorage_equal(&rs_a->addr, &rs_b->addr);
-}
-
 /* Returns the sum of all alive RS weight in a virtual server. */
 static unsigned long __attribute__ ((pure))
 weigh_live_realservers(virtual_server_t * vs)
@@ -300,13 +294,17 @@ clear_service_vs(virtual_server_t * vs, bool stopping)
 	if (global_data->lvs_flush_onstop == LVS_NO_FLUSH) {
 		/* Processing real server queue */
 		if (vs->s_svr && vs->s_svr->set) {
-			/* Ensure removed if inhibit_on_failure set */
-			sav_inhibit = vs->s_svr->inhibit;
-			vs->s_svr->inhibit = false;
+			if (vs->s_svr_duplicates_rs)
+				vs->s_svr->set = false;
+			else {
+				/* Ensure removed if inhibit_on_failure set */
+				sav_inhibit = vs->s_svr->inhibit;
+				vs->s_svr->inhibit = false;
 
-			ipvs_cmd(LVS_CMD_DEL_DEST, vs, vs->s_svr);
+				ipvs_cmd(LVS_CMD_DEL_DEST, vs, vs->s_svr);
 
-			vs->s_svr->inhibit = sav_inhibit;
+				vs->s_svr->inhibit = sav_inhibit;
+			}
 
 			UNSET_ALIVE(vs->s_svr);
 		}
@@ -465,9 +463,7 @@ update_quorum_state(virtual_server_t * vs, bool init)
 				    , weight_sum
 				    , FMT_VS(vs));
 		if (vs->s_svr && ISALIVE(vs->s_svr)) {
-			/* Adding back alive real servers */
-			perform_quorum_state(vs, true);
-
+			/* Removing sorry server since we don't need it anymore */
 			log_message(LOG_INFO, "%s sorry server %s from VS %s"
 					    , (vs->s_svr->inhibit ? "Disabling" : "Removing")
 					    , FMT_RS(vs->s_svr, vs)
@@ -475,6 +471,9 @@ update_quorum_state(virtual_server_t * vs, bool init)
 
 			ipvs_cmd(LVS_CMD_DEL_DEST, vs, vs->s_svr);
 			vs->s_svr->alive = false;
+
+			/* Adding back alive real servers */
+			perform_quorum_state(vs, true);
 		}
 
 		do_vs_notifies(vs, init, threshold, weight_sum, false);
@@ -505,12 +504,12 @@ update_quorum_state(virtual_server_t * vs, bool init)
 					    , FMT_RS(vs->s_svr, vs)
 					    , FMT_VS(vs));
 
+			/* Remove remaining alive real servers */
+			perform_quorum_state(vs, false);
+
 			/* the sorry server is now up in the pool, we flag it alive */
 			ipvs_cmd(LVS_CMD_ADD_DEST, vs, vs->s_svr);
 			vs->s_svr->alive = true;
-
-			/* Remove remaining alive real servers */
-			perform_quorum_state(vs, false);
 		}
 
 		do_vs_notifies(vs, init, threshold, weight_sum, false);
@@ -581,12 +580,16 @@ init_service_vs(virtual_server_t * vs)
 
 	/* If we have a sorry server with inhibit, add it now */
 	if (vs->s_svr && vs->s_svr->inhibit && !vs->s_svr->set) {
-		/* Make sure the sorry server is configured with weight 0 */
-		vs->s_svr->num_failed_checkers = 1;
+		if (vs->s_svr_duplicates_rs)
+			vs->s_svr->set = true;
+		else {
+			/* Make sure the sorry server is configured with weight 0 */
+			vs->s_svr->num_failed_checkers = 1;
 
-		ipvs_cmd(LVS_CMD_ADD_DEST, vs, vs->s_svr);
+			ipvs_cmd(LVS_CMD_ADD_DEST, vs, vs->s_svr);
 
-		vs->s_svr->num_failed_checkers = 0;
+			vs->s_svr->num_failed_checkers = 0;
+		}
 	}
 
 	return true;

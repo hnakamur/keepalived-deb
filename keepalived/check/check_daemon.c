@@ -22,9 +22,7 @@
 
 #include "config.h"
 
-#ifdef _HAVE_SCHED_RT_
 #include <sched.h>
-#endif
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
@@ -122,6 +120,7 @@ checker_dispatcher_release(void)
 	checker_bfd_dispatcher_release();
 #endif
 	cancel_signal_read_thread();
+	cancel_kernel_netlink_threads();
 }
 
 
@@ -240,7 +239,7 @@ checker_terminate_phase1(bool schedule_next_thread)
 	}
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static int
 start_checker_termination_thread(__attribute__((unused)) thread_ref_t thread)
 {
@@ -334,8 +333,7 @@ start_check(list old_checkers_queue, data_t *prev_global_data)
 	if (using_ha_suspend || __test_bit(LOG_ADDRESS_CHANGES, &debug)) {
 		if (reload)
 			kernel_netlink_set_recv_bufs();
-		else
-			kernel_netlink_init();
+		kernel_netlink_init();
 	}
 	else if (reload)
 		kernel_netlink_close();
@@ -374,19 +372,14 @@ start_check(list old_checkers_queue, data_t *prev_global_data)
 	register_checkers_thread();
 
 	/* Set the process priority and non swappable if configured */
-	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-			       global_data->checker_realtime_priority,
+	set_process_priorities(global_data->checker_realtime_priority,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			       global_data->checker_rlimit_rt,
 #endif
-#endif
 			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
 
-#ifdef _HAVE_SCHED_RT_
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->checker_cpu_mask, "checker");
-#endif
 }
 
 void
@@ -395,7 +388,7 @@ check_validate_config(void)
 	start_check(NULL, NULL);
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 /* Reload thread */
 static int
 reload_check_thread(__attribute__((unused)) thread_ref_t thread)
@@ -419,7 +412,7 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 	/* Remove the notify fifo - we don't know if it will be the same after a reload */
 	notify_fifo_close(&global_data->notify_fifo, &global_data->lvs_notify_fifo);
 
-#if !defined _DEBUG_ && defined _WITH_SNMP_CHECKER_
+#if !defined _ONE_PROCESS_DEBUG_ && defined _WITH_SNMP_CHECKER_
 	if (prog_type == PROG_TYPE_CHECKER && global_data->enable_snmp_checker)
 		with_snmp = true;
 #endif
@@ -491,6 +484,9 @@ check_signal_init(void)
 	signal_set(SIGINT, sigend_check, NULL);
 	signal_set(SIGTERM, sigend_check, NULL);
 	signal_set(SIGUSR1, sigusr1_check, NULL);
+#ifdef THREAD_DUMP
+	signal_set(SIGTDUMP, thread_dump_signal, NULL);
+#endif
 	signal_ignore(SIGPIPE);
 }
 
@@ -536,14 +532,14 @@ register_check_thread_addresses(void)
 	register_check_bfd_addresses();
 #endif
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("reload_check_thread", reload_check_thread);
 	register_thread_address("start_checker_termination_thread", start_checker_termination_thread);
 #endif
 	register_thread_address("lvs_notify_fifo_script_exit", lvs_notify_fifo_script_exit);
 	register_thread_address("checker_shutdown_backstop_thread", checker_shutdown_backstop_thread);
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_signal_handler_address("sigreload_check", sigreload_check);
 	register_signal_handler_address("sigend_check", sigend_check);
 #endif
@@ -554,7 +550,7 @@ register_check_thread_addresses(void)
 int
 start_check_child(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	pid_t pid;
 	const char *syslog_ident;
 
@@ -652,7 +648,7 @@ start_check_child(void)
 	 */
 	UNSET_RELOAD;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	check_signal_init();
 #endif
@@ -660,7 +656,7 @@ start_check_child(void)
 	/* Start Healthcheck daemon */
 	start_check(NULL, NULL);
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 	return 0;
 #endif
 
@@ -689,7 +685,7 @@ start_check_child(void)
 void
 register_check_parent_addresses(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("print_check_data", print_check_data);
 	register_thread_address("check_respawn_thread", check_respawn_thread);
 #endif
