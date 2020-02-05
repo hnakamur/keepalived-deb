@@ -22,9 +22,7 @@
 
 #include "config.h"
 
-#ifdef _HAVE_SCHED_RT_
 #include <sched.h>
-#endif
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -90,7 +88,7 @@
 bool non_existent_interface_specified;
 
 /* Forward declarations */
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static int print_vrrp_data(thread_ref_t);
 static int print_vrrp_stats(thread_ref_t);
 static int reload_vrrp_thread(thread_ref_t);
@@ -104,7 +102,7 @@ perf_t perf_run = PERF_NONE;
 
 /* local variables */
 static const char *vrrp_syslog_ident;
-#ifndef _DEBUG_
+#ifndef __ONE_PROCESSDEBUG_
 static bool two_phase_terminate;
 #endif
 
@@ -112,7 +110,7 @@ static bool two_phase_terminate;
 bool do_vrrp_fd_debug;
 #endif
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 #ifdef _VRRP_FD_DEBUG_
 static void
 dump_vrrp_fd(void)
@@ -406,7 +404,7 @@ vrrp_terminate_phase1(bool schedule_next_thread)
 	}
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static int
 start_vrrp_termination_thread(__attribute__((unused)) thread_ref_t thread)
 {
@@ -619,25 +617,20 @@ start_vrrp(data_t *prev_global_data)
 		thread_add_event(master, vrrp_dispatcher_init, NULL, 0);
 
 	/* Set the process priority and non swappable if configured */
-	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-			       global_data->vrrp_realtime_priority,
+	set_process_priorities(global_data->vrrp_realtime_priority,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			       global_data->vrrp_rlimit_rt,
 #endif
-#endif
 			       global_data->vrrp_process_priority, global_data->vrrp_no_swap ? 4096 : 0);
 
-#ifdef _HAVE_SCHED_RT_
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->vrrp_cpu_mask, "vrrp");
-#endif
 
 	/* Ensure we can open sufficient file descriptors */
 	set_vrrp_max_fds();
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static int
 send_reload_advert_thread(thread_ref_t thread)
 {
@@ -730,6 +723,9 @@ vrrp_signal_init(void)
 #ifdef _WITH_JSON_
 	signal_set(SIGJSON, sigjson_vrrp, NULL);
 #endif
+#ifdef THREAD_DUMP
+	signal_set(SIGTDUMP, thread_dump_signal, NULL);
+#endif
 	signal_ignore(SIGPIPE);
 }
 
@@ -755,7 +751,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 
 	vrrp_initialised = false;
 
-#if !defined _DEBUG_ && defined _WITH_SNMP_VRRP_
+#if !defined _ONE_PROCESS_DEBUG_ && defined _WITH_SNMP_VRRP_
 	if (
 #ifdef _WITH_SNMP_VRRP_
 	    global_data->enable_snmp_vrrp ||
@@ -774,6 +770,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 #ifdef _WITH_BFD_
 	cancel_vrrp_threads();
 #endif
+	cancel_kernel_netlink_threads();
 	thread_cleanup_master(master);
 	thread_add_base_threads(master, with_snmp);
 
@@ -893,7 +890,7 @@ register_vrrp_thread_addresses(void)
 	register_process_monitor_addresses();
 #endif
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("print_vrrp_data", print_vrrp_data);
 	register_thread_address("print_vrrp_stats", print_vrrp_stats);
 	register_thread_address("reload_vrrp_thread", reload_vrrp_thread);
@@ -903,7 +900,7 @@ register_vrrp_thread_addresses(void)
 	register_thread_address("vrrp_shutdown_backstop_thread", vrrp_shutdown_backstop_thread);
 	register_thread_address("vrrp_shutdown_timer_thread", vrrp_shutdown_timer_thread);
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_signal_handler_address("sigreload_vrrp", sigreload_vrrp);
 	register_signal_handler_address("sigend_vrrp", sigend_vrrp);
 	register_signal_handler_address("sigusr1_vrrp", sigusr1_vrrp);
@@ -919,7 +916,7 @@ register_vrrp_thread_addresses(void)
 int
 start_vrrp_child(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	pid_t pid;
 	const char *syslog_ident;
 
@@ -1026,7 +1023,7 @@ start_vrrp_child(void)
 	 */
 	UNSET_RELOAD;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	vrrp_signal_init();
 #endif
@@ -1034,7 +1031,7 @@ start_vrrp_child(void)
 	/* Start VRRP daemon */
 	start_vrrp(NULL);
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 	return 0;
 #endif
 
@@ -1070,7 +1067,7 @@ vrrp_validate_config(void)
 void
 register_vrrp_parent_addresses(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("vrrp_respawn_thread", vrrp_respawn_thread);
 #endif
 }

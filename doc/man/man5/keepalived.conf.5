@@ -673,7 +673,7 @@ To force a route/rule to be IPv6, add the keyword "inet6".
         <IPADDR>[/<MASK>] [brd <IPADDR>] [dev <STRING>] [scope <SCOPE>]
                           [label <LABEL>] [peer <IPADDR>] [home]
                           [-nodad] [mngtmpaddr] [noprefixroute]
-                          [autojoin] [track_group GROUP]
+                          [autojoin] [track_group GROUP] [preferred_lft nn|forever]
         192.168.1.1/24 dev eth0 scope global
         ...
     }
@@ -974,7 +974,7 @@ The syntax for the vrrp script is:
 .PP
 .SH VRRP track files
 .PP
-Adds a file to be monitored. The script will be read whenever it is
+Adds a file to be monitored. The file will be read whenever it is
 modified. The value in the file will be recorded for all VRRP instances
 and sync groups which monitor it.
 Note that the file will only be read if at least one VRRP instance
@@ -1425,11 +1425,14 @@ The syntax for vrrp_instance is :
                be of the form <realdev>:<anytext>, for example
                eth0:1 for an alias on eth0.
     # <SCOPE>: ("site"|"link"|"host"|"nowhere"|"global")
+    # preferred_lft is set to 0 to deprecate IPv6 addresses (this is the
+    # default if the address mask is /128). Use "preferred_lft forever"
+    # to specify that a /128 address should not be deprecated.
     \fBvirtual_ipaddress \fR{
         <IPADDR>[/<MASK>] [brd <IPADDR>] [dev <STRING>] [scope <SCOPE>]
                           [label <LABEL>] [peer <IPADDR>] [home]
                           [-nodad] [mngtmpaddr] [noprefixroute]
-                          [autojoin] [no_track]
+                          [autojoin] [no_track] [preferred_lft nn|forever]
         192.168.200.17/24 dev eth1
         192.168.200.18/24 dev eth2 label eth2:1
     }
@@ -1492,17 +1495,22 @@ The syntax for vrrp_instance is :
     # Drop packets to non address-owner.
     \fBno_accept\fR
 
-    # VRRP will normally preempt a lower priority machine when a higher priority
-    # machine comes online.  "nopreempt" allows the lower priority machine to
-    # maintain the master role, even when a higher priority machine comes back
-    # online.
-    # NOTE: For this to work, the initial state of this
-    # entry must be BACKUP.
+    # A higher priority VRRP instance will normally preempt a lower priority instance
+    # when it comes online.  "nopreempt" stops the higher priority machine taking
+    # over the master role, and allows the lower priority machine to remain as
+    # master.
+    # NOTE: For this to work, the initial state must not be MASTER.
     # --
     \fBnopreempt\fR
 
     # for backwards compatibility
     \fBpreempt\fR
+
+    # Seconds after startup or seeing a lower priority master until preemption
+    # (if not disabled by "nopreempt").
+    # Range: 0 (default) to 1000 (e.g. 4.12)
+    # NOTE: For this to work, the initial state must not be MASTER.
+    \fBpreempt_delay \fR300    # waits 5 minutes
 
     # See description of global vrrp_skip_check_adv_addr, which
     # sets the default value. Defaults to vrrp_skip_check_adv_addr
@@ -1512,13 +1520,6 @@ The syntax for vrrp_instance is :
     # If vrrp_strict is not specified, it takes the value of vrrp_strict
     # If strict_mode without a parameter is specified, it defaults to on
     \fBstrict_mode \fR[on|off|true|false|yes|no]
-
-    # Seconds after startup or seeing a lower priority master until preemption
-    # (if not disabled by "nopreempt").
-    # Range: 0 (default) to 1000 (e.g. 4.12)
-    # NOTE: For this to work, the initial state of this
-    # entry must be BACKUP.
-    \fBpreempt_delay \fR300    # waits 5 minutes
 
     # Debug level, not implemented yet.
     # LEVEL is a number in the range 0 to 4
@@ -1533,7 +1534,7 @@ The syntax for vrrp_instance is :
     \fBnotify \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
     # The notify_master_rx_lower_pri script is executed if a master
-    #  receives an advert with priority lower than the master's advert.
+    #  receives an advert with priority lower than the master's priority.
     \fBnotify_master_rx_lower_pri \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
     # Send vrrp instance priority notifications on notify FIFOs.
@@ -1712,7 +1713,8 @@ The syntax for virtual_server is :
     # Script to execute when quorum is lost.
     \fBquorum_down \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
-    # IP family for a fwmark service (optional)
+    # IP family for a fwmark service (only needed if all real servers are tunnelled
+    # and persistence_granularity is not specified). Defaults to inet if not specified.
     \fBip_family \fRinet|inet6
 
     # setup realserver(s)

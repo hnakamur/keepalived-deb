@@ -43,12 +43,6 @@
 #include "layer4.h"
 #include "scheduler.h"
 
-#ifdef _DEBUG_
-#define DNS_DBG(args...) dns_log_message(thread, LOG_DEBUG, ## args)
-#else
-#define DNS_DBG(args...)
-#endif
-
 const dns_type_t DNS_TYPE[] = {
 	{DNS_TYPE_A, "A"},
 	{DNS_TYPE_NS, "NS"},
@@ -117,8 +111,11 @@ dns_final(thread_ref_t thread, int error, const char *fmt, ...)
 
 	checker_t *checker = THREAD_ARG(thread);
 
-	DNS_DBG("final error=%d attempts=%d retry=%d", error,
-		checker->retry_it, checker->retry);
+#ifdef _CHECKER_DEBUG
+	if (do_checker_debug)
+		dns_log_message(thread, LOG_DEBUG, "final error=%d attempts=%u retry=%u", error,
+				checker->retry_it, checker->retry);
+#endif
 
 	if (thread->type != THREAD_TIMER)
 		thread_close_fd(thread);
@@ -202,7 +199,10 @@ dns_recv_thread(thread_ref_t thread)
 	}
 
 	if (ret < (ssize_t) sizeof (r_header)) {
-		DNS_DBG("too small message. (%d bytes)", ret);
+#ifdef _CHECKER_DEBUG
+		if (do_checker_debug)
+			dns_log_message(thread, LOG_DEBUG, "too small message. (%ld bytes)", ret);
+#endif
 		thread_add_read(thread->master, dns_recv_thread, checker,
 				thread->u.f.fd, timeout, true);
 		return 0;
@@ -212,8 +212,11 @@ dns_recv_thread(thread_ref_t thread)
 	r_header = (dns_header_t *) rbuf;
 
 	if (s_header->id != r_header->id) {
-		DNS_DBG("ID does not match. (%04x != %04x)",
-			ntohs(s_header->id), ntohs(r_header->id));
+#ifdef _CHECKER_DEBUG
+		if (do_checker_debug)
+			dns_log_message(thread, LOG_DEBUG, "ID does not match. (%04x != %04x)",
+					ntohs(s_header->id), ntohs(r_header->id));
+#endif
 		thread_add_read(thread->master, dns_recv_thread, checker,
 				thread->u.f.fd, timeout, true);
 		return 0;
@@ -222,7 +225,10 @@ dns_recv_thread(thread_ref_t thread)
 	flags = ntohs(r_header->flags);
 
 	if (!DNS_QR(flags)) {
-		DNS_DBG("receive query message?");
+#ifdef _CHECKER_DEBUG
+		if (do_checker_debug)
+			dns_log_message(thread, LOG_DEBUG, "receive query message?");
+#endif
 		thread_add_read(thread->master, dns_recv_thread, checker,
 				thread->u.f.fd, timeout, true);
 		return 0;
@@ -277,10 +283,7 @@ dns_make_query(thread_ref_t thread)
 		memcpy(p, s, n);
 		p += n;
 	}
-	n = strlen(dns_check->name);
-	if (n && dns_check->name[--n] != '.') {
-		*(p++) = 0;
-	}
+	*(p++) = 0;	/* Terminate the name */
 
 	APPEND16(p, dns_check->type);
 	APPEND16(p, 1);		/* IN */

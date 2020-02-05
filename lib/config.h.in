@@ -5,9 +5,6 @@
 #define _CONFIG_H
   
 
-/* Define to enable checksum debugging */
-#undef CHECKSUM_DIAGNOSTICS
-
 /* Define if need to check for EINTR errno */
 #undef CHECK_EINTR
 
@@ -16,10 +13,6 @@
 
 /* Define to 1 if need to call g_type_init() */
 #undef DBUS_NEED_G_TYPE_INIT
-
-/* Define to test for and log errno == EINTR when no asynchronous signal
-   handlers */
-#undef DEBUG_EINTR
 
 /* The default configuration file */
 #undef DEFAULT_CONFIG_FILE
@@ -274,10 +267,6 @@
    if you don't. */
 #undef HAVE_DECL_SCHED_RESET_ON_FORK
 
-/* Define to 1 if you have the declaration of `SCHED_RR', and to 0 if you
-   don't. */
-#undef HAVE_DECL_SCHED_RR
-
 /* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
    don't. */
 #undef HAVE_DECL_SOCK_CLOEXEC
@@ -439,8 +428,8 @@
 /* Define to 1 if you have the <net-snmp/agent/util_funcs.h> header file. */
 #undef HAVE_NET_SNMP_AGENT_UTIL_FUNCS_H
 
-/* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined */
-#undef HAVE_NFTNL_EXPR_LOOKUP_FLAGS
+/* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS and NFT_LOOKUP_F_INV defined */
+#undef HAVE_NFTNL_EXPR_LOOKUP_FLAG_INV
 
 /* Define to 1 if nftnl_udata_put_u32 declared */
 #undef HAVE_NFTNL_UDATA_PUT_U32
@@ -660,6 +649,9 @@
 /* Parent directory of /run */
 #undef PID_DIR_ROOT
 
+/* Define to zu if msghdr.msg_controllen is size_t, else u */
+#undef PRI_MSG_CONTROLLEN
+
 /* Define printf format specifier for rlim_t */
 #undef PRI_rlim_t
 
@@ -688,11 +680,18 @@
 /* Define if <linux/netfilter/x_tables.h> doesnt define it */
 #undef XT_EXTENSION_MAXNAMELEN
 
-/* Define to 1 to build with debugging support */
-#undef _DEBUG_
+/* Define to enable checker debugging */
+#undef _CHECKER_DEBUG_
+
+/* Define to enable checksum debugging */
+#undef _CHECKSUM_DEBUG_
 
 /* Define to enable keyword dumping */
 #undef _DUMP_KEYWORDS_
+
+/* Define to test for and log errno == EINTR when no asynchronous signal
+   handlers */
+#undef _EINTR_DEBUG_
 
 /* Define to 1 to enable asserts */
 #undef _ENABLE_ASSERT_
@@ -705,6 +704,9 @@
 
 /* Consider ${with_fixed_if_type} interfaces to be unchangeable */
 #undef _FIXED_IF_TYPE_
+
+/* Define to enable genhash debugging */
+#undef _GENHASH_DEBUG_
 
 /* Define to 1 if can have _Pragma GCC diagnostic push/pop */
 #undef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
@@ -763,9 +765,6 @@
    supported */
 #undef _HAVE_PRAGMA_WARN_STRICT_OVERFLOW_1_
 
-/* Define to 1 if have SCHED_RR */
-#undef _HAVE_SCHED_RT_
-
 /* Define to 1 if have SSL_set_tlsext_host_name() */
 #undef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 
@@ -793,6 +792,9 @@
 /* Define to 1 to log malloc/free checks to syslog */
 #undef _MEM_CHECK_LOG_
 
+/* Define to enable memory alloc/free error debugging */
+#undef _MEM_ERR_DEBUG_
+
 /* Define to 1 to build with netlink command timers support */
 #undef _NETLINK_TIMERS_
 
@@ -802,6 +804,9 @@
 /* Define to 1 if unaligned memory access not supported */
 #undef _NO_UNALIGNED_ACCESS_
 
+/* Define to 1 to build with debugging support */
+#undef _ONE_PROCESS_DEBUG_
+
 /* Define to enable parser debugging */
 #undef _PARSER_DEBUG_
 
@@ -810,6 +815,9 @@
 
 /* Define to 1 to build with smtp-alert debugging support */
 #undef _SMTP_ALERT_DEBUG_
+
+/* Define to enable SMTP connection debugging */
+#undef _SMTP_CONNECT_DEBUG_
 
 /* Define to 1 to have keepalived send RFC6527 SNMP responses for VRRPv2
    instances */

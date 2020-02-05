@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.0.19], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.0.20], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -231,7 +231,7 @@ AC_ARG_ENABLE(mem-check-log,
 AC_ARG_ENABLE(timer-check,
   [AS_HELP_STRING([--enable-timer-check], [compile with set time logging])])
 AC_ARG_ENABLE(debug,
-  [AS_HELP_STRING([--enable-debug], [compile with debugging flags])])
+  [AS_HELP_STRING([--enable-debug], [compile with most debugging options])])
 AC_ARG_ENABLE(netlink-timers,
   [AS_HELP_STRING([--enable-netlink-timers], [compile with netlink command timers])])
 AC_ARG_ENABLE(smtp-alert-debug,
@@ -255,13 +255,23 @@ AC_ARG_ENABLE(tsm-debug,
 AC_ARG_ENABLE(vrrp-fd-debug,
   [AS_HELP_STRING([--enable-vrrp-fd-debug], [compile with vrrp fd debugging support])])
 AC_ARG_ENABLE(eintr-debug,
-  [AS_HELP_STRING([--enable-eintr-debug], [compile with EINTR debugging support, set to check/nocheck to check/not check for EINTR])])
+  [AS_HELP_STRING([--enable-eintr-debug], [compile with EINTR debugging support, set to check/not check for EINTR])])
 AC_ARG_ENABLE(track-process-debug,
   [AS_HELP_STRING([--enable-track-process-debug], [compile with track process debugging support, set to log all process connector events])])
 AC_ARG_ENABLE(parser-debug,
   [AS_HELP_STRING([--enable-parser-debug], [compile with parser debugging support])])
 AC_ARG_ENABLE(checksum-debug,
   [AS_HELP_STRING([--enable-checksum-debug], [compile with checksum debugging support])])
+AC_ARG_ENABLE(genhash-debug,
+  [AS_HELP_STRING([--enable-genhash-debug], [compile with genhash debugging support])])
+AC_ARG_ENABLE(checker-debug,
+  [AS_HELP_STRING([--enable-checker-debug], [compile with checker debugging support])])
+AC_ARG_ENABLE(smtp-connect-debug,
+  [AS_HELP_STRING([--enable-smtp-connect-debug], [compile with smtp connect debugging support])])
+AC_ARG_ENABLE(mem-err-debug,
+  [AS_HELP_STRING([--enable-mem-err-debug], [compile with MALLOC/FREE error debugging support])])
+AC_ARG_ENABLE(one-process-debug,
+  [AS_HELP_STRING([--enable-one-process-debug], [compile with all functionality running in a single process])])
 AC_ARG_ENABLE(dump-keywords,
   [AS_HELP_STRING([--enable-dump-keywords], [compile with keyword dumping support])])
 AC_ARG_ENABLE(network-timestamp,
@@ -378,7 +388,8 @@ AS_IF([test .$enable_vrrp = .no],
     AS_IF([test .$enable_iptables != .no], [AC_MSG_ERROR([enable-iptables requires vrrp])])
     AS_IF([test .$enable_nftables != .no], [AC_MSG_ERROR([enable-nftables requires vrrp])])
     AS_IF([test .$enable_track_process != .], [AC_MSG_ERROR([enable-track-process requires vrrp])])
-    AS_IF([test .$enable_network_timestamp != .], [AC_MSG_ERROR([enable-network_timestamp requires vrrp])])
+    AS_IF([test .$enable_network_timestamp != .], [AC_MSG_ERROR([enable-network-timestamp requires vrrp])])
+    AS_IF([test .$enable_netlink_timers != .], [AC_MSG_ERROR([enable-netlink-timers requires vrrp])])
   )
 AS_IF([test .$enable_iptables = .no],
     AS_IF([test .$enable_libiptc != .], [AC_MSG_ERROR([disable-libiptc requires vrrp and iptables])])
@@ -404,8 +415,9 @@ AS_IF([test .$enable_lvs = .no],
     AS_IF([test .$enable_lvs_syncd != .], [AC_MSG_ERROR([disable-lvs-syncd requires lvs])])
     AS_IF([test .$enable_lvs_64bit_stats != .], [AC_MSG_ERROR([disable-lvs-64bit-stats requires lvs])])
     AS_IF([test .$enable_fwmark != .], [AC_MSG_ERROR([enable-fwmark requires lvs])])
+    AS_IF([test .$enable_checker_debug != .], [AC_MSG_ERROR([enable-checker-debug requires lvs])])
   )
-AS_IF([test .$enable_lvs = .no],
+AS_IF([test .$enable_libnl = .no],
     AS_IF([test .$enable_libnl_dynamic != .], [AC_MSG_ERROR([enable-libnl-dynamic requires lvs and libnl])])
   )
 AS_IF([test .$enable_regex != .yes],
@@ -415,6 +427,76 @@ AS_IF([test .$enable_regex != .yes],
 AS_IF([test .$enable_track_process = .no],
     AS_IF([test .$enable_track_process_debug != .], [AC_MSG_ERROR([enable-track-process-debug incompatible with disable-track-process])])
   )
+AS_IF([test .$enable_mem_check != .yes],
+    AS_IF([test .$enable_mem_err_debug != .], [AC_MSG_ERROR([enable-mem-err-debug requires --enable-mem-check])])
+  )
+
+# --enable-debug enables most debugging if not explicitly disabled, but NOT one-process-debug or genhash-debug
+AS_IF([test .$enable_debug = .yes],
+  [
+    # If we are debugging, we want to be able to write logs to files
+    AS_IF([test .$enable_log_file = .], [enable_log_file=yes])
+
+    AS_IF([test .$enable_assert = .], [enable_assert=yes])
+    AS_IF([test .$enable_epoll_debug = .], [enable_epoll_debug=yes])
+    AS_IF([test .$enable_epoll_thread_dump = .], [enable_epoll_thread_dump=yes])
+    AS_IF([test .$enable_eintr_debug = .], [enable_eintr_debug=yes])
+    AS_IF([test .$enable_parser_debug = .], [enable_parser_debug=yes])
+    AS_IF([test .$enable_timer_check = .], [enable_timer_check=yes])
+    AS_IF([test .$enable_smtp_alert_debug = .], [enable_smtp_alert_debug=yes])
+    AS_IF([test .$enable_smtp_connect_debug = .], [enable_smtp_connect_debug=yes])
+    AS_IF([test .$enable_dump_keywords = .], [enable_dump_keywords=yes])
+
+    AS_IF([test .$enable_vrrp != .no],
+      [
+	AS_IF([test .$enable_vrrp_fd_debug = .], [enable_vrrp_fd_debug=yes])
+	AS_IF([test .$enable_tsm_debug = .], [enable_tsm_debug=yes])
+	AS_IF([test .$enable_track_process_debug = .], [enable_track_process_debug=yes])
+	AS_IF([test .$enable_checksum_debug = .], [enable_checksum_debug=yes])
+	AS_IF([test .$enable_netlink_timers = .], [enable_netlink_timers=yes])
+	AS_IF([test .$enable_network_timestamp = .], [enable_network_timestamp=yes])
+      ])
+
+    AS_IF([test .$enable_lvs != .no],
+      [
+	AS_IF([test .$enable_checker_debug = .], [enable_checker_debug=yes])
+	AS_IF([test .$enable_regex = .yes],
+	  [
+	    AS_IF([test .$enable_regex_timers = .], [enable_regex_timers=yes])
+	    AS_IF([test .$enable_regex_debug = .], [enable_regex_debug=yes])
+	  ])
+      ])
+
+    AS_IF([test .$enable_mem_check = .yes],
+      [
+	AS_IF([test .$enable_mem_err_debug = .], [enable_mem_err_debug=yes])
+      ])
+  ])
+
+dnl -- ulibc/glibc differences
+ AC_MSG_CHECKING([msghdr.msg_controllen is size_t])
+SAV_CFLAGS=$CFLAGS
+CFLAGS="$CFLAGS -Werror"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+  #include <sys/socket.h>
+  #include <stdio.h>
+
+  int main(int argc, char**argv)
+  {
+    struct msghdr msgh = { .msg_controllen = 0 };
+
+    printf("%zu", msgh.msg_controllen);
+  }
+  ]])],
+  [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([PRI_MSG_CONTROLLEN], [ "zu" ], [Define to zu if msghdr.msg_controllen is size_t, else u])
+  ],
+  [
+    AC_MSG_RESULT([no])
+    AC_DEFINE([PRI_MSG_CONTROLLEN], [ "u" ], [Define to zu if msghdr.msg_controllen is size_t, else u])
+  ])
+CFLAGS=$SAV_CFLAGS
 
 dnl -- Check for diagnostic pragmas in functions - GCC 4.6.0
 AC_MSG_CHECKING([diagnostic pragmas in functions])
@@ -431,6 +513,7 @@ _Pragma("GCC diagnostic warning \"-Wall\"")
   [
     AC_MSG_RESULT([no])
   ])
+AM_CONDITIONAL([DEBUG], [test .$enable_debug = .yes])
 
 dnl -- Check for diagnostic push/pop pragmas - GCC 4.6.0
 AC_MSG_CHECKING([diagnostic push/pop pragmas])
@@ -1546,17 +1629,19 @@ if test .${enable_nftables} != .no; then
       add_pkg_config([libmnl])
       AC_DEFINE([_WITH_NFTABLES_], [ 1 ], [Define to 1 if want nftables support])
       add_config_opt([NFTABLES])
-      AC_MSG_CHECKING([whether NFTNL_EXPR_LOOKUP_FLAGS is defined])
+      AC_MSG_CHECKING([whether NFTNL_EXPR_LOOKUP_FLAGS and NFT_LOOKUP_F_INV are defined])
       AC_LINK_IFELSE([AC_LANG_SOURCE([[
+	#include <stdio.h>	// libnftnl/expr.h requires this
 	#include <libnftnl/expr.h>
+	#include <linux/netfilter/nf_tables.h>
 	int main(void)
 	{
-	  int i = NFTNL_EXPR_LOOKUP_FLAGS;
+	  int i = NFTNL_EXPR_LOOKUP_FLAGS | NFT_LOOKUP_F_INV;
 	  return 0;
 	}
 	]])], [
 	  AC_MSG_RESULT(yes)
-	  AC_DEFINE([HAVE_NFTNL_EXPR_LOOKUP_FLAGS], [ 1 ], [Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined])
+	  AC_DEFINE([HAVE_NFTNL_EXPR_LOOKUP_FLAG_INV], [ 1 ], [Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS and NFT_LOOKUP_F_INV defined])
 	],[
 	  AC_MSG_RESULT(no)
 	])
@@ -1684,7 +1769,7 @@ if test "$enable_lvs" != no; then
   dnl -- Since Linux 3.18
   AC_CHECK_DECLS([IPVS_DEST_ATTR_ADDR_FAMILY], [add_system_opt([IPVS_DEST_ATTR_ADDR_FAMILY])], [], [#include <linux/ip_vs.h>])
 
-  dnl -- Since Linux ?.?.?
+  dnl -- Since Linux 4.3
   IPVS_SYNCD_ATTRIBUTES=Yes
   AC_CHECK_DECLS([
     IPVS_DAEMON_ATTR_SYNC_MAXLEN,
@@ -1698,7 +1783,6 @@ if test "$enable_lvs" != no; then
     ],
     [[#include <linux/ip_vs.h>]])
 
-  dnl -- Since Linux 4.3
   if test $IPVS_SYNCD_ATTRIBUTES = Yes; then
     AC_DEFINE([_HAVE_IPVS_SYNCD_ATTRIBUTES_], [ 1 ], [Define to 1 if have IPVS syncd attributes])
     add_system_opt([IPVS_SYNCD_ATTRIBUTES])
@@ -2280,26 +2364,14 @@ AS_IF([test $ac_cv_func_setns = no],
 CFLAGS="$SAV_CFLAGS"
 AM_CONDITIONAL([WITH_NAMESPACES], [test $ac_cv_have_decl_CLONE_NEWNET = yes])
 
-dnl ----[ check for realtime scheduling support ]----
-dnl -- from Linux ?.?.?
-AC_CHECK_DECLS([SCHED_RR],
-  [
-    SCHED_RT_SUPPORT=Yes
-    AC_DEFINE([_HAVE_SCHED_RT_], [ 1 ], [Define to 1 if have SCHED_RR])
-    add_system_opt([SCHED_RT])
+dnl -- RLIMIT_RTTIME since Linux 2.6.25 - not supported with musl libc
+AC_CHECK_DECLS([RLIMIT_RTTIME], [], [], [[#include <sys/resource.h>]])
 
-    dnl -- RLIMIT_RTTIME since Linux 2.6.25 - not supported wwith musl libc
-    AC_CHECK_DECLS([RLIMIT_RTTIME], [], [], [[#include <sys/resource.h>]])
-
-    dnl -- SCHED_RESET_ON_FORK since Linux 2.6.32
-    AC_CHECK_DECLS([SCHED_RESET_ON_FORK],
-      [add_system_opt([SCHED_RESET_ON_FORK])],
-      [AC_DEFINE([SCHED_RESET_ON_FORK], [ 0 ], [Dummy definition if not defined in system headers])],
-      [[#include <sched.h>]])
-  ],
-  [
-    SCHED_RT_SUPPORT=No
-  ], [[#include <sched.h>]])
+dnl -- SCHED_RESET_ON_FORK since Linux 2.6.32
+AC_CHECK_DECLS([SCHED_RESET_ON_FORK],
+  [add_system_opt([SCHED_RESET_ON_FORK])],
+  [AC_DEFINE([SCHED_RESET_ON_FORK], [ 0 ], [Dummy definition if not defined in system headers])],
+  [[#include <sched.h>]])
 
 dnl -- Do we want GNU standard paths (moves .pid files)
 GNU_STD_PATHS=No
@@ -2361,7 +2433,7 @@ if test "${enable_mem_check}" = "yes"; then
   fi
 fi
 
-dnl ----[ Memory alloc check or not ? ]----
+dnl ----[ Log calls to set_time or not ? ]----
 TIMER_CHECK=No
 if test "${enable_timer_check}" = "yes"; then
   TIMER_CHECK=Yes
@@ -2369,15 +2441,15 @@ if test "${enable_timer_check}" = "yes"; then
   add_config_opt([TIMER_CHECK])
 fi
 
-dnl ----[ Debug or not ? ]----
-if test "${enable_debug}" = yes; then
-  AC_DEFINE([_DEBUG_], [ 1 ], [Define to 1 to build with debugging support])
-  ENABLE_DEBUG=Yes
-  add_config_opt([DEBUG])
+dnl ----[ Debug in one process or not ? ]----
+if test "${enable_one_process_debug}" = yes; then
+  AC_DEFINE([_ONE_PROCESS_DEBUG_], [ 1 ], [Define to 1 to build with debugging support])
+  ENABLE_ONE_PROCESS_DEBUG=Yes
+  add_config_opt([ONE_PROCESS_DEBUG])
 else
-  ENABLE_DEBUG=No
+  ENABLE_ONE_PROCESS_DEBUG=No
 fi
-AM_CONDITIONAL([DEBUG], [test $ENABLE_DEBUG = Yes])
+AM_CONDITIONAL([ONE_PROCESS_DEBUG], [test $ENABLE_ONE_PROCESS_DEBUG = Yes])
 
 dnl ----[ Netlink command timers or not ? ]----
 if test "${enable_netlink_timers}" = yes; then
@@ -2519,10 +2591,12 @@ if test ${ENABLE_LOG_FILE_APPEND} = Yes; then
 fi
 
 dnl ----[ Do we need to check for EINTR, or enable EINTR debugging code]----
+ENABLE_EINTR_DEBUG=No
 AS_IF([test .$enable_eintr_debug = .yes],
   [
-    AC_DEFINE([DEBUG_EINTR], [ 1 ], [Define to test for and log errno == EINTR when no asynchronous signal handlers])
+    AC_DEFINE([_EINTR_DEBUG_], [ 1 ], [Define to test for and log errno == EINTR when no asynchronous signal handlers])
     add_config_opt([EINTR_DEBUG])
+    ENABLE_EINTR_DEBUG=Yes
   ],
   [
     dnl --- We need to check for EINTR if we are not using signalfd
@@ -2534,24 +2608,66 @@ AS_IF([test .$enable_eintr_debug = .yes],
   ])
 
 dnl ----[ Do we want to enable track process debugging code]----
+ENABLE_TRACK_PROCESS_DEBUG=No
 AS_IF([test .$enable_track_process_debug = .yes],
   [
     AC_DEFINE([_TRACK_PROCESS_DEBUG_], [ 1 ], [Define to enable logging all process connector events])
     add_config_opt([TRACK_PROCESS_DEBUG])
+    ENABLE_TRACK_PROCESS_DEBUG=Yes
   ])
 
 dnl ----[ Do we want to enable parser debugging code]----
+ENABLE_PARSER_DEBUG=No
 AS_IF([test .$enable_parser_debug = .yes],
   [
     AC_DEFINE([_PARSER_DEBUG_], [ 1 ], [Define to enable parser debugging])
     add_config_opt([PARSER_DEBUG])
+    ENABLE_PARSER_DEBUG=Yes
   ])
 
 dnl ----[ Do we want to enable checksum debugging code]----
+ENABLE_CHECKSUM_DEBUG=No
 AS_IF([test .$enable_checksum_debug = .yes],
   [
-    AC_DEFINE([CHECKSUM_DIAGNOSTICS], [ 1 ], [Define to enable checksum debugging])
+    AC_DEFINE([_CHECKSUM_DEBUG_], [ 1 ], [Define to enable checksum debugging])
     add_config_opt([CHECKSUM_DEBUG])
+    ENABLE_CHECKSUM_DEBUG=Yes
+  ])
+
+dnl ----[ Do we want to enable genhash debugging code]----
+ENABLE_GENHASH_DEBUG=No
+AS_IF([test .$enable_genhash_debug = .yes],
+  [
+    AC_DEFINE([_GENHASH_DEBUG_], [ 1 ], [Define to enable genhash debugging])
+    add_config_opt([GENHASH_DEBUG])
+    ENABLE_GENHASH_DEBUG=Yes
+  ])
+
+dnl ----[ Do we want to enable checker debugging code]----
+ENABLE_CHECKER_DEBUG=No
+AS_IF([test .$enable_checker_debug = .yes],
+  [
+    AC_DEFINE([_CHECKER_DEBUG_], [ 1 ], [Define to enable checker debugging])
+    add_config_opt([CHECKER_DEBUG])
+    ENABLE_CHECKER_DEBUG=Yes
+  ])
+
+dnl ----[ Do we want to enable SMTP connect debugging code]----
+ENABLE_SMTP_CONNECT_DEBUG=No
+AS_IF([test .$enable_smtp_connect_debug = .yes],
+  [
+    AC_DEFINE([_SMTP_CONNECT_DEBUG_], [ 1 ], [Define to enable SMTP connection debugging])
+    add_config_opt([SMTP_CONNECT_DEBUG])
+    ENABLE_SMTP_CONNECT_DEBUG=Yes
+  ])
+
+dnl ----[ Do we want to enable memory alloc/free error debugging code]----
+ENABLE_MEM_ERR_DEBUG=No
+AS_IF([test .$enable_mem_err_debug = .yes],
+  [
+    AC_DEFINE([_MEM_ERR_DEBUG_], [ 1 ], [Define to enable memory alloc/free error debugging])
+    add_config_opt([MEM_ERR_DEBUG])
+    ENABLE_MEM_ERR_DEBUG=Yes
   ])
 
 dnl ----[ Do we want to enable dump keywords code]----
@@ -2729,50 +2845,74 @@ echo "Strict config checks     : ${STRICT_CONFIG}"
 echo "Build genhash            : ${BUILD_GENHASH}"
 echo "Build documentation      : ${HAVE_SPHINX_BUILD}"
 if test ${ENABLE_STACKTRACE} = Yes; then
-  echo "Stacktrace support       : ${ENABLE_STACKTRACE}"
+  echo "Stacktrace support       : Yes"
 fi
 if test ${ENABLE_PERF} = Yes; then
-  echo "Perf support             : ${ENABLE_PERF}"
+  echo "Perf support             : Yes"
 fi
 if test ${MEM_CHECK} = Yes; then
-  echo "Memory alloc check       : ${MEM_CHECK}"
+  echo "Memory alloc check       : Yes"
   echo "Memory alloc check log   : ${MEM_CHECK_LOG}"
 fi
 if test ${TIMER_CHECK} = Yes; then
-  echo "Set time logging         : ${TIMER_CHECK}"
+  echo "Set time logging         : Yes"
 fi
 if test ${ENABLE_DUMP_THREADS} = Yes; then
-  echo "Thread debugging         : ${ENABLE_DUMP_THREADS}"
+  echo "Thread debugging         : Yes"
 fi
 if test ${ENABLE_EPOLL_DEBUG} = Yes; then
-  echo "epoll_wait() debugging   : ${ENABLE_EPOLL_DEBUG}"
+  echo "epoll_wait() debugging   : Yes"
 fi
 if test ${ENABLE_EPOLL_THREAD_DUMP} = Yes; then
-  echo "epoll thread dumping     : ${ENABLE_EPOLL_THREAD_DUMP}"
+  echo "epoll thread dumping     : Yes"
 fi
 if test ${ENABLE_REGEX_DEBUG} = Yes; then
-  echo "regex debugging          : ${ENABLE_REGEX_DEBUG}"
+  echo "regex debugging          : Yes"
 fi
 if test ${ENABLE_TSM_DEBUG} = Yes; then
-  echo "TSM debugging            : ${ENABLE_TSM_DEBUG}"
+  echo "TSM debugging            : Yes"
 fi
 if test ${ENABLE_VRRP_FD_DEBUG} = Yes; then
-  echo "VRRP_FD debugging        : ${ENABLE_VRRP_FD_DEBUG}"
+  echo "VRRP_FD debugging        : Yes"
 fi
 if test ${ENABLE_NETWORK_TIMESTAMP} = Yes; then
-  echo "network timestamping     : ${ENABLE_NETWORK_TIMESTAMP}"
+  echo "network timestamping     : Yes"
 fi
 if test ${ENABLE_ASSERT} = Yes; then
-  echo "asserts enabled          : ${ENABLE_ASSERT}"
+  echo "asserts enabled          : Yes"
 fi
-if test ${ENABLE_DEBUG} = Yes; then
-  echo "Use Debug flags          : ${ENABLE_DEBUG}"
+if test ${ENABLE_ONE_PROCESS_DEBUG} = Yes; then
+  echo "Use one process debuging : Yes"
 fi
 if test ${ENABLE_NETLINK_TIMERS} = Yes; then
-  echo "Netlink command timers   : ${ENABLE_NETLINK_TIMERS}"
+  echo "Netlink command timers   : Yes"
 fi
 if test ${ENABLE_SMTP_ALERT_DEBUG} = Yes; then
-  echo "smtp-alert debugging     : ${ENABLE_SMTP_ALERT_DEBUG}"
+  echo "smtp-alert debugging     : Yes"
+fi
+if test ${ENABLE_EINTR_DEBUG} = Yes; then
+  echo "EINTR debugging          : Yes"
+fi
+if test ${ENABLE_TRACK_PROCESS_DEBUG} = Yes; then
+  echo "track process debugging  : Yes"
+fi
+if test ${ENABLE_PARSER_DEBUG} = Yes; then
+  echo "Parser debugging         : Yes"
+fi
+if test ${ENABLE_CHECKSUM_DEBUG} = Yes; then
+  echo "Checksum debugging       : Yes"
+fi
+if test ${ENABLE_GENHASH_DEBUG} = Yes; then
+  echo "genhash debugging        : Yes"
+fi
+if test ${ENABLE_CHECKER_DEBUG} = Yes; then
+  echo "checker debugging        : Yes"
+fi
+if test ${ENABLE_SMTP_CONNECT_DEBUG} = Yes; then
+  echo "SMTP connect debugging   : Yes"
+fi
+if test ${ENABLE_MEM_ERR_DEBUG} = Yes; then
+  echo "memory alloc error debug : Yes"
 fi
 if test "${FIXED_IF_TYPE}"; then
   echo "Fixed interface type     : ${FIXED_IF_TYPE}"
@@ -2789,8 +2929,8 @@ if test ${IPVS_SUPPORT} = Yes -a ${IPVS_USE_NL} = No; then
   echo
 fi
 
-if test ${ENABLE_DEBUG} = Yes; then
+if test ${ENABLE_ONE_PROCESS_DEBUG} = Yes; then
   echo
-  echo "*** WARNING --enable-debug is only for debugging purposes and isn't expected to work properly"
+  echo "*** WARNING --enable-one-process-debug is only for debugging purposes and isn't expected to work properly"
   echo
 fi

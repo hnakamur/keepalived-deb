@@ -46,6 +46,9 @@
 #include "utils.h"
 #include "vrrp_notify.h"
 #include "bitops.h"
+#ifdef _WITH_CN_PROC_
+#include "track_process.h"
+#endif
 
 static int inotify_fd = -1;
 static thread_ref_t inotify_thread;
@@ -381,7 +384,10 @@ alloc_track_process(const char *name, list track_process, const vector_t *strvec
 
 	/* Ignoring if no process found */
 	if (!vsp) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) track process %s not found, ignoring...", name, tracked);
+		if (proc_events_not_supported)
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) track process not supported by kernel", name);
+		else
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) track process %s not found, ignoring...", name, tracked);
 		return;
 	}
 
@@ -808,7 +814,7 @@ initialise_vrrp_tracking_priorities(vrrp_t *vrrp)
 	 * an appropriate address, put the interface into fault state */
 	if (vrrp->saddr.ss_family == AF_UNSPEC) {
 		/* The instance is down */
-		log_message(LOG_INFO, "(%s) entering FAULT state (no IPv4 address for interface)", vrrp->iname);
+		log_message(LOG_INFO, "(%s) entering FAULT state (no IPv%d address for interface)", vrrp->iname, vrrp->family == AF_INET ? 4 : 6);
 		vrrp->state = VRRP_STATE_FAULT;
 		vrrp->num_script_if_fault++;
 	}
@@ -909,12 +915,21 @@ process_update_track_file_status(vrrp_tracked_file_t *tfile, int new_status, tra
 	if (new_status == -254) {
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
 			log_message(LOG_INFO, "(%s): tracked file %s now FAULT state", tvp->vrrp->iname, tfile->fname);
+		if (tvp->weight)
+			tvp->vrrp->total_priority -= previous_status;
 		down_instance(tvp->vrrp);
 	} else if (previous_status == -254) {
-		if (__test_bit(LOG_DETAIL_BIT, &debug))
+		if (tvp->weight) {
+			tvp->vrrp->total_priority += new_status;
+			tvp->vrrp->effective_priority = tvp->vrrp->total_priority >= VRRP_PRIO_OWNER ? VRRP_PRIO_OWNER - 1 : tvp->vrrp->total_priority < 1 ? 1 : tvp->vrrp->total_priority;
+		}
+		if (__test_bit(LOG_DETAIL_BIT, &debug)) {
 			log_message(LOG_INFO, "(%s): tracked file %s leaving FAULT state", tvp->vrrp->iname, tfile->fname);
+			if (new_status)
+				log_message(LOG_INFO, "(%s) Setting effective priority to %d", tvp->vrrp->iname, tvp->vrrp->effective_priority);
+		}
 		try_up_instance(tvp->vrrp, false);
-	} else if (tvp->vrrp->base_priority != VRRP_PRIO_OWNER) {
+	} else {
 		tvp->vrrp->total_priority += new_status - previous_status;
 		vrrp_set_effective_priority(tvp->vrrp);
 	}

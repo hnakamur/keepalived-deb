@@ -54,7 +54,6 @@
 #include "logger.h"
 #include "parser.h"
 #include "notify.h"
-#include "utils.h"
 #ifdef _WITH_LVS_
 #include "check_parser.h"
 #include "check_daemon.h"
@@ -91,17 +90,26 @@
 #ifdef _TIMER_CHECK_
 #include "timer.h"
 #endif
-#ifdef _SMTP_ALERT_DEBUG_
+#if defined _SMTP_ALERT_DEBUG_ || defined _SMTP_CONNECT_DEBUG_
 #include "smtp.h"
 #endif
 #if defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_
 #include "check_http.h"
+#endif
+#if defined _NETWORK_TIMESTAMP_ || defined _CHECKSUM_DEBUG_
+#include "vrrp.h"
 #endif
 #ifdef _TSM_DEBUG_
 #include "vrrp_scheduler.h"
 #endif
 #if defined _PARSER_DEBUG_ || defined _DUMP_KEYWORDS_
 #include "parser.h"
+#endif
+#ifdef _CHECKER_DEBUG_
+#include "check_api.h"
+#endif
+#ifdef _MEM_ERR_DEBUG_
+#include "memory.h"
 #endif
 #include "warnings.h"
 
@@ -175,7 +183,24 @@ static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
 
 /* debug flags */
-#if defined _TIMER_CHECK_ || defined _SMTP_ALERT_DEBUG_ || defined _EPOLL_DEBUG_ || defined _EPOLL_THREAD_DUMP_ || defined _REGEX_DEBUG_ || defined _WITH_REGEX_TIMERS_ || defined _TSM_DEBUG_ || defined _VRRP_FD_DEBUG_ || defined _NETLINK_TIMERS_ || defined _NETWORK_TIMESTAMP_ || defined _TRACK_PROCESS_DEBUG_ || defined _PARSER_DEBUG_ || defined _DUMP_KEYWORDS_
+#if defined _TIMER_CHECK_ || \
+    defined _SMTP_ALERT_DEBUG_ || \
+    defined _SMTP_CONNECT_DEBUG_ || \
+    defined _EPOLL_DEBUG_ || \
+    defined _EPOLL_THREAD_DUMP_ || \
+    defined _REGEX_DEBUG_ || \
+    defined _WITH_REGEX_TIMERS_ || \
+    defined _TSM_DEBUG_ || \
+    defined _VRRP_FD_DEBUG_ || \
+    defined _NETLINK_TIMERS_ || \
+    defined _NETWORK_TIMESTAMP_ || \
+    defined _CHECKSUM_DEBUG_ || \
+    defined _TRACK_PROCESS_DEBUG_ || \
+    defined _PARSER_DEBUG_ || \
+    defined _DUMP_KEYWORDS_ || \
+    defined _CHECKER_DEBUG_ || \
+    defined _MEM_ERR_DEBUG_ || \
+    defined _EINTR_DEBUG_
 #define WITH_DEBUG_OPTIONS 1
 #endif
 
@@ -184,6 +209,9 @@ static char timer_debug;
 #endif
 #ifdef _SMTP_ALERT_DEBUG_
 static char smtp_debug;
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+static char smtp_connect_debug;
 #endif
 #ifdef _EPOLL_DEBUG_
 static char epoll_debug;
@@ -209,11 +237,24 @@ static char netlink_timer_debug;
 #ifdef _NETWORK_TIMESTAMP_
 static char network_timestamp_debug;
 #endif
+#ifdef _CHECKSUM_DEBUG_
+static char checksum_debug;
+#endif
 #ifdef _TRACK_PROCESS_DEBUG_
 static char track_process_debug;
+static char track_process_debug_detail;
 #endif
 #ifdef _PARSER_DEBUG_
 static char parser_debug;
+#endif
+#ifdef _CHECKER_DEBUG_
+static char checker_debug;
+#endif
+#ifdef _MEM_ERR_DEBUG_
+static char mem_err_debug;
+#endif
+#ifdef _EINTR_DEBUG_
+static char eintr_debug;
 #endif
 #ifdef _DUMP_KEYWORDS_
 static char dump_keywords;
@@ -407,7 +448,7 @@ read_config_file(void)
 void
 stop_keepalived(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	/* Just cleanup memory & exit */
 	thread_destroy_master(master);
 
@@ -475,21 +516,21 @@ validate_config(void)
 
 #ifdef _WITH_LVS_
 	/* validate healthchecker config */
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	prog_type = PROG_TYPE_CHECKER;
 #endif
 	check_validate_config();
 #endif
 #ifdef _WITH_VRRP_
 	/* validate vrrp config */
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	prog_type = PROG_TYPE_VRRP;
 #endif
 	vrrp_validate_config();
 #endif
 #ifdef _WITH_BFD_
 	/* validate bfd config */
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	prog_type = PROG_TYPE_BFD;
 #endif
 	bfd_validate_config();
@@ -515,7 +556,7 @@ config_test_exit(void)
 	}
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static bool reload_config(void)
 {
 	bool unsupported_change = false;
@@ -600,23 +641,41 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 	else if (sig == SIGHUP && running_vrrp())
 		start_vrrp_child();
 #endif
+
+	/* Only the VRRP process consumes SIGUSR2 and SIGJSON */
+	if (sig == SIGUSR2)
+		return;
+#ifdef _WITH_JSON_
+	if (sig == SIGJSON)
+		return;
+#endif
+
 #ifdef _WITH_LVS_
-	if (sig == SIGHUP || sig == SIGUSR1) {
-		if (checkers_child > 0)
-			kill(checkers_child, sig);
-		else if (running_checker())
-			start_check_child();
-	}
+	if (checkers_child > 0)
+		kill(checkers_child, sig);
+	else if (running_checker())
+		start_check_child();
 #endif
 #ifdef _WITH_BFD_
-	if (sig == SIGHUP) {
-		if (bfd_child > 0)
-			kill(bfd_child, sig);
-		else if (running_bfd())
-			start_bfd_child();
-	}
+	if (bfd_child > 0)
+		kill(bfd_child, sig);
+	else if (running_bfd())
+		start_bfd_child();
 #endif
 }
+
+#ifdef THREAD_DUMP
+void
+thread_dump_signal(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+#ifndef _ONE_PROCESS_DEBUG_
+	if (prog_type == PROG_TYPE_PARENT)
+		propagate_signal(NULL, sig);
+#endif
+
+	dump_thread_data(master, NULL);
+}
+#endif
 
 /* Terminate handler */
 static void
@@ -862,7 +921,7 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 static void
 signal_init(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	signal_set(SIGHUP, propagate_signal, NULL);
 	signal_set(SIGUSR1, propagate_signal, NULL);
 	signal_set(SIGUSR2, propagate_signal, NULL);
@@ -871,13 +930,16 @@ signal_init(void)
 #endif
 	signal_set(SIGINT, sigend, NULL);
 	signal_set(SIGTERM, sigend, NULL);
+#ifdef THREAD_DUMP
+	signal_set(SIGTDUMP, thread_dump_signal, NULL);
+#endif
 #endif
 	signal_ignore(SIGPIPE);
 }
 
 static void
 signals_ignore(void) {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	signal_ignore(SIGHUP);
 	signal_ignore(SIGUSR1);
 	signal_ignore(SIGUSR2);
@@ -987,7 +1049,7 @@ RELAX_SUGGEST_ATTRIBUTE_CONST_START
 void
 initialise_debug_options(void)
 {
-#if defined WITH_DEBUG_OPTIONS && !defined _DEBUG_
+#if defined WITH_DEBUG_OPTIONS && !defined _ONE_PROCESS_DEBUG_
 	char mask = 0;
 
 	if (prog_type == PROG_TYPE_PARENT)
@@ -1010,6 +1072,9 @@ initialise_debug_options(void)
 #endif
 #ifdef _SMTP_ALERT_DEBUG_
 	do_smtp_alert_debug = !!(smtp_debug & mask);
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+	do_smtp_connect_debug = !!(smtp_connect_debug & mask);
 #endif
 #ifdef _EPOLL_DEBUG_
 	do_epoll_debug = !!(epoll_debug & mask);
@@ -1035,13 +1100,26 @@ initialise_debug_options(void)
 #ifdef _NETWORK_TIMESTAMP_
 	do_network_timestamp = !!(network_timestamp_debug & mask);
 #endif
+#ifdef _CHECKSUM_DEBUG_
+	do_checksum_debug = !!(checksum_debug & mask);
+#endif
 #ifdef _WITH_CN_PROC_
 #ifdef _TRACK_PROCESS_DEBUG_
-	do_track_process_debug = !!(track_process_debug & mask);
+	do_track_process_debug_detail = !!(track_process_debug_detail & mask);
+	do_track_process_debug = !!(track_process_debug & mask) | do_track_process_debug_detail;
 #endif
 #endif
 #ifdef _PARSER_DEBUG_
 	do_parser_debug = !!(parser_debug & mask);
+#endif
+#ifdef _CHECKER_DEBUG_
+	do_checker_debug = !!(checker_debug & mask);
+#endif
+#ifdef _MEM_ERR_DEBUG_
+	do_mem_err_debug = !!(mem_err_debug & mask);
+#endif
+#ifdef _EINTR_DEBUG_
+	do_eintr_debug = !!(eintr_debug & mask);
 #endif
 #ifdef _DUMP_KEYWORDS_
 	do_dump_keywords = !!(dump_keywords & mask);
@@ -1058,7 +1136,7 @@ set_debug_options(const char *options)
 	char opt;
 	const char *opt_p = options;
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 	all_processes = 1;
 #else
 	all_processes = (1 << PROG_TYPE_PARENT);
@@ -1079,6 +1157,9 @@ set_debug_options(const char *options)
 #endif
 #ifdef _SMTP_ALERT_DEBUG_
 		smtp_debug = all_processes;
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+		smtp_connect_debug = all_processes;
 #endif
 #ifdef _EPOLL_DEBUG_
 		epoll_debug = all_processes;
@@ -1104,11 +1185,24 @@ set_debug_options(const char *options)
 #ifdef _NETWORK_TIMESTAMP_
 		network_timestamp_debug = all_processes;
 #endif
+#ifdef _CHECKSUM_DEBUG_
+		checksum_debug = all_processes;
+#endif
 #ifdef _TRACK_PROCESS_DEBUG_
 		track_process_debug = all_processes;
+		track_process_debug_detail = all_processes;
 #endif
 #ifdef _PARSER_DEBUG_
 		parser_debug = all_processes;
+#endif
+#ifdef _CHECKER_DEBUG_
+		checker_debug = all_processes;
+#endif
+#ifdef _MEM_ERR_DEBUG_
+		mem_err_debug = all_processes;
+#endif
+#ifdef _EINTR_DEBUG_
+		eintr_debug = all_processes;
 #endif
 #ifdef _DUMP_KEYWORDS_
 		dump_keywords = all_processes;
@@ -1125,7 +1219,7 @@ set_debug_options(const char *options)
 		}
 		opt = *opt_p++;
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 		processes = all_processes;
 #else
 		if (!*opt_p || isupper(*opt_p))
@@ -1161,6 +1255,7 @@ set_debug_options(const char *options)
 		}
 #endif
 
+		/* Letters used - ABCDEFIHKMNOPRSTUXZ */
 		switch (opt) {
 #ifdef _TIMER_CHECK_
 		case 'T':
@@ -1170,6 +1265,11 @@ set_debug_options(const char *options)
 #ifdef _SMTP_ALERT_DEBUG_
 		case 'M':
 			smtp_debug = processes;
+			break;
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+		case 'B':
+			smtp_connect_debug = processes;
 			break;
 #endif
 #ifdef _EPOLL_DEBUG_
@@ -1212,14 +1312,37 @@ set_debug_options(const char *options)
 			network_timestamp_debug = processes;
 			break;
 #endif
+#ifdef _CHECKSUM_DEBUG_
+		case 'U':
+			checksum_debug = processes;
+			break;
+#endif
 #ifdef _TRACK_PROCESS_DEBUG_
 		case 'O':
 			track_process_debug = processes;
+			break;
+		case 'A':
+			track_process_debug_detail = processes;
 			break;
 #endif
 #ifdef _PARSER_DEBUG_
 		case 'C':
 			parser_debug = processes;
+			break;
+#endif
+#ifdef _CHECKER_DEBUG_
+		case 'H':
+			checker_debug = processes;
+			break;
+#endif
+#ifdef _MEM_ERR_DEBUG_
+		case 'Z':
+			mem_err_debug = processes;
+			break;
+#endif
+#ifdef _EINTR_DEBUG_
+		case 'I':
+			eintr_debug = processes;
 			break;
 #endif
 #ifdef _DUMP_KEYWORDS_
@@ -1298,6 +1421,9 @@ usage(const char *prog)
 #ifdef _WITH_JSON_
 								", JSON"
 #endif
+#ifdef THREAD_DUMP
+								", TDUMP"
+#endif
 								"\n");
 	fprintf(stderr, "  -t, --config-test[=LOG_FILE] Check the configuration for obvious errors, output to\n"
 			"                                stderr by default\n");
@@ -1306,11 +1432,15 @@ usage(const char *prog)
 #endif
 #ifdef WITH_DEBUG_OPTIONS
 	fprintf(stderr, "      --debug[=...]            Enable debug options. p, b, c, v specify parent, bfd, checker and vrrp processes\n");
+	fprintf(stderr, "                                If no process(es) specified, the option will apply to all processes\n");
 #ifdef _TIMER_CHECK_
 	fprintf(stderr, "                                   T - timer debug\n");
 #endif
 #ifdef _SMTP_ALERT_DEBUG_
 	fprintf(stderr, "                                   M - email alert debug\n");
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+	fprintf(stderr, "                                   H - smtp connect debug\n");
 #endif
 #ifdef _EPOLL_DEBUG_
 	fprintf(stderr, "                                   E - epoll debug\n");
@@ -1336,11 +1466,24 @@ usage(const char *prog)
 #ifdef _NETWORK_TIMESTAMP_
 	fprintf(stderr, "                                   P - network timestamp debug\n");
 #endif
+#ifdef _CHECKSUM_DEBUG_
+	fprintf(stderr, "                                   U - checksum diagnostics\n");
+#endif
 #ifdef _TRACK_PROCESS_DEBUG_
 	fprintf(stderr, "                                   O - track process debug\n");
+	fprintf(stderr, "                                   A - track process debug with extra detail\n");
 #endif
 #ifdef _PARSER_DEBUG_
 	fprintf(stderr, "                                   C - parser (config) debug\n");
+#endif
+#ifdef _CHECKER_DEBUG_
+	fprintf(stderr, "                                   H - checker debug\n");
+#endif
+#ifdef _MEM_ERR_DEBUG_
+	fprintf(stderr, "                                   Z - memory alloc/free error debug\n");
+#endif
+#ifdef _EINTR_DEBUG_
+	fprintf(stderr, "                                   I - EINTR debugging\n");
 #endif
 #ifdef _DUMP_KEYWORDS_
 	fprintf(stderr, "                                   K - dump keywords\n");
@@ -1732,11 +1875,12 @@ register_parent_thread_addresses(void)
 	register_bfd_parent_addresses();
 #endif
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_signal_handler_address("propagate_signal", propagate_signal);
 	register_signal_handler_address("sigend", sigend);
 #endif
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
+	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
 }
 #endif
 
@@ -1769,7 +1913,7 @@ keepalived_main(int argc, char **argv)
 	debug = 0;
 
 	/* We are the parent process */
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	prog_type = PROG_TYPE_PARENT;
 #endif
 
@@ -1862,9 +2006,7 @@ keepalived_main(int argc, char **argv)
 		}
 	}
 
-#ifndef _DEBUG_
 	log_command_line(0);
-#endif
 
 	/* Check we can read the configuration file(s).
 	   NOTE: the working directory will be / if we

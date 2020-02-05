@@ -70,7 +70,7 @@ typedef struct _func_det {
 
 /* global vars */
 thread_master_t *master = NULL;
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 prog_type_t prog_type;		/* Parent/VRRP/Checker process */
 #endif
 #ifdef _WITH_SNMP_
@@ -116,7 +116,8 @@ get_thread_type_str(thread_type_t id)
 	if (id == THREAD_CHILD_TERMINATED) return "CHILD_TERMINATED";
 	if (id == THREAD_TERMINATE_START) return "TERMINATE_START";
 	if (id == THREAD_TERMINATE) return "TERMINATE";
-	if (id == THREAD_READY_FD) return "READY_FD";
+	if (id == THREAD_READY_READ_FD) return "READY_READ_FD";
+	if (id == THREAD_READY_WRITE_FD) return "READY_WRITE_FD";
 	if (id == THREAD_READ_ERROR) return "READ_ERROR";
 	if (id == THREAD_WRITE_ERROR) return "WRITE_ERROR";
 #ifdef USE_SIGNAL_THREADS
@@ -213,8 +214,6 @@ static int
 thread_move_ready(thread_master_t *m, rb_root_cached_t *root, thread_t *thread, int type)
 {
 	rb_erase_cached(&thread->n, root);
-	if (type == THREAD_CHILD_TIMEOUT)
-		rb_erase(&thread->rb_data, &master->child_pid);
 	INIT_LIST_HEAD(&thread->next);
 	list_add_tail(&thread->next, &m->ready);
 	if (thread->type != THREAD_TIMER_SHUTDOWN)
@@ -354,7 +353,6 @@ save_cmd_line_options(int argc, char * const *argv)
 	sav_argv = argv;
 }
 
-#ifndef _DEBUG_
 static const char *
 get_end(const char *str, size_t max_len)
 {
@@ -426,6 +424,7 @@ RELAX_STRICT_OVERFLOW_END
 	FREE(log_str);
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
 /* report_child_status returns true if the exit is a hard error, so unable to continue */
 bool
 report_child_status(int status, pid_t pid, char const *prog_name)
@@ -440,7 +439,7 @@ report_child_status(int status, pid_t pid, char const *prog_name)
 		prog_id = child_finder_name(pid);
 
 	if (!prog_id) {
-		snprintf(pid_buf, sizeof(pid_buf), "pid %hd", pid);
+		snprintf(pid_buf, sizeof(pid_buf), "pid %d", pid);
 		prog_id = pid_buf;
 	}
 
@@ -859,7 +858,8 @@ thread_destroy_rb(thread_master_t *m, rb_root_cached_t *root)
 
 		if (thread->type == THREAD_READ ||
 		    thread->type == THREAD_WRITE ||
-		    thread->type == THREAD_READY_FD ||
+		    thread->type == THREAD_READY_READ_FD ||
+		    thread->type == THREAD_READY_WRITE_FD ||
 		    thread->type == THREAD_READ_TIMEOUT ||
 		    thread->type == THREAD_WRITE_TIMEOUT ||
 		    thread->type == THREAD_READ_ERROR ||
@@ -1409,14 +1409,18 @@ thread_cancel(thread_ref_t thread_cp)
 		rb_erase_cached(&thread->n, &m->child);
 		rb_erase(&thread->rb_data, &m->child_pid);
 		break;
-	case THREAD_READY_FD:
+	case THREAD_READY_READ_FD:
 	case THREAD_READ_TIMEOUT:
+		if (thread->event)
+			thread_event_del(thread, THREAD_FL_EPOLL_READ_BIT);
+		list_head_del(&thread->next);
+		break;
+	case THREAD_READY_WRITE_FD:
 	case THREAD_WRITE_TIMEOUT:
-		if (thread->event) {
-			rb_erase(&thread->event->n, &m->io_events);
-			FREE(thread->event);
-		}
-		/* ... falls through ... */
+		if (thread->event)
+			thread_event_del(thread, THREAD_FL_EPOLL_WRITE_BIT);
+		list_head_del(&thread->next);
+		break;
 	case THREAD_EVENT:
 	case THREAD_READY:
 #ifdef USE_SIGNAL_THREADS
@@ -1735,7 +1739,7 @@ thread_fetch_next_queue(thread_master_t *m)
 						      , ev->fd, ep_ev->events);
 					continue;
 				}
-				thread_move_ready(m, &m->read, ev->read, THREAD_READY_FD);
+				thread_move_ready(m, &m->read, ev->read, THREAD_READY_READ_FD);
 				ev->read = NULL;
 			}
 
@@ -1746,7 +1750,7 @@ thread_fetch_next_queue(thread_master_t *m)
 						      , ev->fd, ep_ev->events);
 					continue;
 				}
-				thread_move_ready(m, &m->write, ev->write, THREAD_READY_FD);
+				thread_move_ready(m, &m->write, ev->write, THREAD_READY_WRITE_FD);
 				ev->write = NULL;
 			}
 		}
@@ -1785,8 +1789,9 @@ process_threads(thread_master_t *m)
 	 */
 	while ((thread_list = thread_fetch_next_queue(m))) {
 		/* Run until error, used for debuging only */
-#if defined _DEBUG_ && defined _MEM_CHECK_
-		if (__test_bit(MEM_ERR_DETECT_BIT, &debug)
+#ifdef _MEM_ERR_DEBUG_
+		if (do_mem_err_debug &&
+		    __test_bit(MEM_ERR_DETECT_BIT, &debug)
 #ifdef _WITH_VRRP_
 		    && __test_bit(DONT_RELEASE_VRRP_BIT, &debug)
 #endif
@@ -1803,8 +1808,17 @@ process_threads(thread_master_t *m)
 		 * We only want timer and signal fd, and don't want inotify, vrrp socket,
 		 * snmp_read, bfd_receiver, bfd pipe in vrrp/check, dbus pipe or netlink fds. */
 		thread = thread_trim_head(thread_list);
+
+		if (thread && thread->type == THREAD_CHILD_TIMEOUT) {
+			/* We remove the thread from the child_pid queue here so that
+			 * if the termination arrives before we processed the timeout
+			 * we can still handle the termination. */
+			rb_erase(&thread->rb_data, &master->child_pid);
+		}
+
 		if (!shutting_down ||
-		    (thread->type == THREAD_READY_FD &&
+		    ((thread->type == THREAD_READY_READ_FD ||
+		      thread->type == THREAD_READY_WRITE_FD) &&
 		     (thread->u.f.fd == m->timer_fd ||
 		      thread->u.f.fd == m->signal_fd
 #ifdef _WITH_SNMP_
@@ -1823,7 +1837,7 @@ process_threads(thread_master_t *m)
 				shutting_down = true;
 		}
 
-		m->current_event = (thread->type == THREAD_READY_FD) ? thread->event : NULL;
+		m->current_event = (thread->type == THREAD_READY_READ_FD || thread->type == THREAD_READY_WRITE_FD) ? thread->event : NULL;
 		thread_type = thread->type;
 		thread_add_unuse(master, thread);
 
@@ -1846,7 +1860,7 @@ process_child_termination(pid_t pid, int status)
 	thread_t *thread;
 	bool permanent_vrrp_checker_error = false;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	if (prog_type == PROG_TYPE_PARENT)
 		permanent_vrrp_checker_error = report_child_status(status, pid, NULL);
 #endif
@@ -1872,6 +1886,12 @@ process_child_termination(pid_t pid, int status)
 		thread_add_unuse(m, thread);
 
 		thread_add_terminate_event(m);
+	}
+	else if (thread->type == THREAD_CHILD_TIMEOUT) {
+		/* The child had been timed out, but we have not processed the timeout
+		 * and it is still on the thread->ready queue. Since we have now got
+		 * the termination, just handle the termination instead. */
+		thread->type = THREAD_CHILD_TERMINATED;
 	}
 	else
 		thread_move_ready(m, &m->child, thread, THREAD_CHILD_TERMINATED);

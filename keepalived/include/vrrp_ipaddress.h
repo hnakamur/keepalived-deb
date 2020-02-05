@@ -76,6 +76,7 @@ typedef struct _ip_address {
 	bool			nftable_rule_set;	/* TRUE if in nftables set */
 #endif
 	bool			garp_gna_pending;	/* Is a gratuitous ARP/NA message still to be sent */
+	uint32_t		preferred_lft;		/* IPv6 preferred_lft (0 means address deprecated) */
 } ip_address_t;
 
 #define IPADDRESS_DEL 0
@@ -105,6 +106,8 @@ typedef struct _ip_address {
 			 IPcommon_ISEQ((X),(Y)))
 
 #define IP_ISEQ(X,Y)    (!(X) && !(Y) ? true : !(X) != !(Y) ? false : (IP_FAMILY(X) != IP_FAMILY(Y) ? false : IP_IS6(X) ? IP6_ISEQ(X, Y) : IP4_ISEQ(X, Y)))
+
+#define	IPADDRESSTOS_BUF_LEN	(INET6_ADDRSTRLEN + 4)     /* allow for subnet */
 
 /* Forward reference */
 struct ipt_handle;

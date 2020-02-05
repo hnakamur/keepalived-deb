@@ -106,6 +106,10 @@ static bool monitor_ipv6_rules;
 bool do_network_timestamp;
 #endif
 
+#ifdef _CHECKSUM_DEBUG_
+bool do_checksum_debug;
+#endif
+
 static int
 vrrp_notify_fifo_script_exit(__attribute__((unused)) thread_ref_t thread)
 {
@@ -635,7 +639,7 @@ vrrp_in_chk_vips(const vrrp_t *vrrp, const ip_address_t *ipaddress, const unsign
 	return 0;
 }
 
-#ifdef CHECKSUM_DIAGNOSTICS
+#ifdef _CHECKSUM_DEBUG_
 static void
 check_tx_checksum(vrrp_t *vrrp, unicast_peer_t *peer)
 {
@@ -1057,15 +1061,17 @@ vrrp_check_packet(vrrp_t *vrrp, const vrrphdr_t *hd, const char *buffer, ssize_t
 				}
 			}
 
-#ifdef CHECKSUM_DIAGNOSTICS
-			check_rx_checksum(vrrp, &ipv4_phdr, ip, buflen, hd, csum_calc, acc_csum);
+#ifdef _CHECKSUM_DEBUG_
+			if (do_checksum_debug)
+				check_rx_checksum(vrrp, &ipv4_phdr, ip, buflen, hd, csum_calc, acc_csum);
 #endif
 		} else {
 			vrrppkt_len += VRRP_AUTH_LEN;
 			csum_calc = in_csum((const uint16_t *) hd, vrrppkt_len, 0, &acc_csum);
 
-#ifdef CHECKSUM_DIAGNOSTICS
-			check_rx_checksum(vrrp, NULL, ip, buflen, hd, csum_calc, acc_csum);
+#ifdef _CHECKSUM_DEBUG_
+			if (do_checksum_debug)
+				check_rx_checksum(vrrp, NULL, ip, buflen, hd, csum_calc, acc_csum);
 #endif
 
 			if (csum_calc) {
@@ -1466,8 +1472,8 @@ vrrp_send_pkt(vrrp_t * vrrp, unicast_peer_t *peer)
 		vrrp_build_ancillary_data(&msg, cbuf, src, vrrp);
 	}
 
-#ifdef CHECKSUM_DIAGNOSTICS
-	if (vrrp->family == AF_INET)
+#ifdef _CHECKSUM_DEBUG_
+	if (vrrp->family == AF_INET && do_checksum_debug)
 		check_tx_checksum(vrrp, peer);
 #endif
 
@@ -3180,13 +3186,25 @@ vrrp_complete_instance(vrrp_t * vrrp)
 	LIST_FOREACH(vrrp->vip, vip, e) {
 		if (!vip->ifp)
 			vip->ifp = vrrp->ifp;
-		if (!vip->dont_track)
+
+		/* If the vrrp instance doesn't track its primary interface,
+		 * ensure that VIPs don't cause it to be tracked. */
+		if (!vip->dont_track &&
+		    (!vrrp->dont_track_primary ||
+		     (vip->ifp != vrrp->ifp &&
+		      vip->ifp != IF_BASE_IFP(vrrp->ifp))))
 			add_vrrp_to_interface(vrrp, vip->ifp, 0, false, false, TRACK_ADDR);
 	}
 	LIST_FOREACH(vrrp->evip, vip, e) {
 		if (!vip->ifp)
 			vip->ifp = vrrp->ifp;
-		if (!vip->dont_track)
+
+		/* If the vrrp instance doesn't track its primary interface,
+		 * ensure that eVIPs don't cause it to be tracked. */
+		if (!vip->dont_track &&
+		    (!vrrp->dont_track_primary ||
+		     (vip->ifp != vrrp->ifp &&
+		      vip->ifp != IF_BASE_IFP(vrrp->ifp))))
 			add_vrrp_to_interface(vrrp, vip->ifp, 0, false, false, TRACK_ADDR);
 
 		if (vip->ifa.ifa_family == AF_INET)
@@ -3631,7 +3649,7 @@ vrrp_complete_init(void)
 	/* Mark any scripts as insecure */
 	check_vrrp_script_security();
 
-#if !defined _DEBUG_ && defined _WITH_LVS_
+#if !defined _ONE_PROCESS_DEBUG_ && defined _WITH_LVS_
 	/* Only one process must run the script to process the global fifo,
 	 * so let the checker process do so. */
 	if (running_checker())
@@ -4121,7 +4139,7 @@ clear_diff_bfd(void)
 	LIST_FOREACH(old_vrrp_data->vrrp_track_bfds, vbfd, e) {
 		nvbfd = find_vrrp_tracked_bfd_by_name(vbfd->bname);
 		if (nvbfd)
-			vbfd->bfd_up = nvbfd->bfd_up;
+			nvbfd->bfd_up = vbfd->bfd_up;
 	}
 }
 #endif
