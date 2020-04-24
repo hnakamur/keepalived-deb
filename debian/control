@@ -1,7 +1,7 @@
 Source: keepalived
 Section: admin
 Priority: optional
-Maintainer: Alexander Wirt <formorer@debian.org>
+Maintainer: Hiroaki Nakamura <hnakamur@gmail.com>
 Build-Depends: autoconf,
                debhelper-compat (=12),
                libglib2.0-dev,
