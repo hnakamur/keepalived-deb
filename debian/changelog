@@ -1,3 +1,9 @@
+keepalived (1:2.0.20-1ubuntu1ppa2~focal) focal; urgency=medium
+
+  * Port to Ubuntu 20.04 LTS. 
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Sat, 25 Apr 2020 04:38:49 +0900
+
 keepalived (1:2.0.20-1ubuntu1ppa2~bionic) bionic; urgency=medium
 
   * Add libnftnl-dev to Build-Depends
