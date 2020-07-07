@@ -45,8 +45,8 @@
 #include "scheduler.h"
 #endif
 
-static int misc_check_thread(thread_ref_t);
-static int misc_check_child_thread(thread_ref_t);
+static void misc_check_thread(thread_ref_t);
+static void misc_check_child_thread(thread_ref_t);
 
 static bool script_user_set;
 static misc_checker_t *new_misck_checker;
@@ -83,7 +83,7 @@ dump_misc_check(FILE *fp, const checker_t *checker)
 }
 
 static bool
-misc_check_compare(const checker_t *old_c, const checker_t *new_c)
+misc_check_compare(const checker_t *old_c, checker_t *new_c)
 {
 	const misc_checker_t *old = old_c->data;
 	const misc_checker_t *new = new_c->data;
@@ -219,23 +219,16 @@ install_misc_check_keyword(void)
 }
 
 /* Check that the scripts are secure */
-int
+unsigned
 check_misc_script_security(magic_t magic)
 {
-	element e, next;
-	checker_t *checker;
+	checker_t *checker, *checker_tmp;
 	misc_checker_t *misc_script;
-	int script_flags = 0;
-	int flags;
+	unsigned script_flags = 0;
+	unsigned flags;
 	bool insecure;
 
-	if (LIST_ISEMPTY(checkers_queue))
-		return 0;
-
-	for (e = LIST_HEAD(checkers_queue); e; e = next) {
-		next = e->next;
-		checker = ELEMENT_DATA(e);
-
+	list_for_each_entry_safe(checker, checker_tmp, &checkers_queue, e_list) {
 		if (checker->launch != misc_check_thread)
 			continue;
 
@@ -258,14 +251,14 @@ check_misc_script_security(magic_t magic)
 
 		if (insecure) {
 			/* Remove the script */
-			free_list_element(checkers_queue, e);
+			free_checker(checker);
 		}
 	}
 
 	return script_flags;
 }
 
-static int
+static void
 misc_check_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -282,7 +275,7 @@ misc_check_thread(thread_ref_t thread)
 		/* Register next timer checker */
 		thread_add_timer(thread->master, misc_check_thread, checker,
 				 checker->delay_loop);
-		return 0;
+		return;
 	}
 
 	/* Execute the script in a child process. Parent returns, child doesn't */
@@ -293,11 +286,9 @@ misc_check_thread(thread_ref_t thread)
 		misck_checker->last_ran = time_now;
 		misck_checker->state = SCRIPT_STATE_RUNNING;
 	}
-
-	return ret;
 }
 
-static int
+static void
 misc_check_child_thread(thread_ref_t thread)
 {
 	int wait_status;
@@ -358,7 +349,7 @@ misc_check_child_thread(thread_ref_t thread)
 		if (timeout)
 			thread_add_child(thread->master, misc_check_child_thread, checker, pid, timeout * TIMER_HZ);
 
-		return 0;
+		return;
 	}
 
 	wait_status = THREAD_CHILD_STATUS(thread);
@@ -490,8 +481,6 @@ misc_check_child_thread(thread_ref_t thread)
 	misck_checker->state = SCRIPT_STATE_IDLE;
 
 	checker->has_run = true;
-
-	return 0;
 }
 
 #ifdef THREAD_DUMP

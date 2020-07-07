@@ -49,11 +49,10 @@ typedef struct list_head {
 	struct list_head *next, *prev;
 } list_head_t;
 
-#define LIST_HEAD_INIT(name) { &(name), &(name) }
-
-// TODO
-#define LH_LIST_HEAD(name) \
-	struct list_head name = LIST_HEAD_INIT(name)
+/* Simple initializer */
+#define LIST_HEAD_INITIALIZER(name) { &(name), &(name) }
+#define LIST_HEAD_INITIALIZE(name) \
+	list_head_t name = LIST_HEAD_INITIALIZER(name)
 
 #define INIT_LIST_HEAD(ptr) do { \
 	(ptr)->next = (ptr); (ptr)->prev = (ptr); \
@@ -192,6 +191,22 @@ static inline int list_empty(const struct list_head *head)
 	return head->next == head;
 }
 
+/**
+ * list_copy - copy one list to another
+ * @dst: the destination list
+ * @src: the source list
+ */
+static inline void list_copy(struct list_head *dst, struct list_head *src)
+{
+	if (list_empty(src))
+		INIT_LIST_HEAD(dst);
+	else {
+		*dst = *src;
+		dst->next->prev = dst;
+		dst->prev->next = dst;
+	}
+}
+
 static inline void __list_splice(struct list_head *lst,
 				 struct list_head *head)
 {
@@ -323,7 +338,7 @@ void list_sort(struct list_head *head,
  */
 #define list_for_each_entry(pos, head, member)				\
 	for (pos = list_entry((head)->next, typeof(*pos), member);	\
-	     &pos->member != (head); 					\
+	     &pos->member != (head);					\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
 
 /**
@@ -334,7 +349,7 @@ void list_sort(struct list_head *head,
  */
 #define list_for_each_entry_reverse(pos, head, member)			\
 	for (pos = list_entry((head)->prev, typeof(*pos), member);	\
-	     &pos->member != (head); 					\
+	     &pos->member != (head);					\
 	     pos = list_entry(pos->member.prev, typeof(*pos), member))
 
 /**
@@ -344,7 +359,7 @@ void list_sort(struct list_head *head,
  * @head:	the head for your list.
  * @member:	the name of the list_struct within the struct.
  */
-#define list_for_each_entry_continue(pos, head, member) 		\
+#define list_for_each_entry_continue(pos, head, member)			\
 	for (pos = list_entry(pos->member.next, typeof(*pos), member);	\
 	     &pos->member != (head);					\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
@@ -371,7 +386,7 @@ void list_sort(struct list_head *head,
  *
  * Iterate over list of given type, continuing from current position.
  */
-#define list_for_each_entry_from(pos, head, member) 			\
+#define list_for_each_entry_from(pos, head, member)			\
 	for (; &pos->member != (head);					\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
 
@@ -398,7 +413,7 @@ void list_sort(struct list_head *head,
 #define list_for_each_entry_safe(pos, n, head, member)			\
 	for (pos = list_entry((head)->next, typeof(*pos), member),	\
 		n = list_entry(pos->member.next, typeof(*pos), member);	\
-	     &pos->member != (head); 					\
+	     &pos->member != (head);					\
 	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
 
 
@@ -417,8 +432,9 @@ typedef struct hlist_node {
 	struct hlist_node *next, **pprev;
 } hlist_node_t;
 
-#define HLIST_HEAD_INIT { .first = NULL }
-#define HLIST_HEAD(name) struct hlist_head name = {  .first = NULL }
+#define HLIST_HEAD_INITIALIZER { .first = NULL }
+#define HLIST_HEAD_INITIALIZE(name) \
+	hlist_head_t name = { .first = NULL }
 #define INIT_HLIST_HEAD(ptr) ((ptr)->first = NULL)
 #define INIT_HLIST_NODE(ptr) ((ptr)->next = NULL, (ptr)->pprev = NULL)
 
@@ -537,9 +553,9 @@ static __inline__ void hlist_add_after(struct hlist_node *n,
  * @head:	the head for your list.
  * @member:	the name of the hlist_node within the struct.
  */
-#define hlist_for_each_entry_safe(tpos, pos, n, head, member) 		 \
+#define hlist_for_each_entry_safe(tpos, pos, n, head, member)		 \
 	for (pos = (head)->first;					 \
-	     pos && ({ n = pos->next; 1; }) && 				 \
+	     pos && ({ n = pos->next; 1; }) &&				 \
 		({ tpos = hlist_entry(pos, typeof(*tpos), member); 1;}); \
 	     pos = n)
 

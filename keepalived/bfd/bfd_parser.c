@@ -41,6 +41,9 @@
 #include "vrrp_track.h"
 #include "vrrp_data.h"
 #endif
+#if defined _WITH_VRRP_ || defined _WITH_LVS_
+#include "track_file.h"
+#endif
 #include "main.h"
 #include "assert_debug.h"
 
@@ -80,7 +83,7 @@ bfd_nbrip_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!strcmp(vector_slot(strvec, 1), "neighbour_ip"))
@@ -91,7 +94,7 @@ bfd_nbrip_handler(const vector_t *strvec)
 			    "Configuration error: BFD instance %s has"
 			    " malformed %s address %s, ignoring instance",
 			    bfd->iname, neighbor_str, strvec_slot(strvec, 1));
-		list_del(bfd_data->bfd, bfd);
+		free_bfd(bfd);
 		skip_block(false);
 		return;
 	} else
@@ -107,7 +110,7 @@ bfd_srcip_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &src_addr)) {
@@ -128,7 +131,7 @@ bfd_minrx_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN, BFD_MINRX_MAX, false))
@@ -154,7 +157,7 @@ bfd_mintx_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN, BFD_MINTX_MAX, false))
@@ -180,7 +183,7 @@ bfd_idletx_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_unsigned_strvec(strvec, 1, &value,BFD_IDLETX_MIN, BFD_IDLETX_MAX, false))
@@ -206,7 +209,7 @@ bfd_multiplier_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MULTIPLIER_MIN, BFD_MULTIPLIER_MAX, false))
@@ -225,7 +228,7 @@ bfd_passive_handler(__attribute__((unused)) const vector_t *strvec)
 
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	bfd->passive = true;
@@ -240,7 +243,7 @@ bfd_ttl_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_unsigned_strvec(strvec, 1, &value, 1, BFD_TTL_MAX, false))
@@ -261,7 +264,7 @@ bfd_maxhops_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(bfd_data);
 
-	bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
 	if (!read_int_strvec(strvec, 1, &value, -1, BFD_TTL_MAX, false))
@@ -278,8 +281,10 @@ bfd_maxhops_handler(const vector_t *strvec)
 static void
 bfd_vrrp_end_handler(void)
 {
+	vrrp_tracked_bfd_t *tbfd = list_last_entry(&vrrp_data->vrrp_track_bfds, vrrp_tracked_bfd_t, e_list);
+
 	if (specified_event_processes && !__test_bit(DAEMON_VRRP, &specified_event_processes))
-		list_del(vrrp_data->vrrp_track_bfds, LIST_TAIL_DATA(vrrp_data->vrrp_track_bfds));
+		free_vrrp_tracked_bfd(tbfd);
 }
 #endif
 
@@ -287,15 +292,17 @@ bfd_vrrp_end_handler(void)
 static void
 bfd_checker_end_handler(void)
 {
+	checker_tracked_bfd_t *cbfd = list_last_entry(&check_data->track_bfds, checker_tracked_bfd_t, e_list);
+
 	if (specified_event_processes && !__test_bit(DAEMON_CHECKERS, &specified_event_processes))
-		list_del(check_data->track_bfds, LIST_TAIL_DATA(check_data->track_bfds));
+		free_checker_bfd(cbfd);
 }
 #endif
 
 static void
 bfd_end_handler(void)
 {
-	bfd_t *bfd = LIST_TAIL_DATA(bfd_data->bfd);
+	bfd_t *bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 
 	assert(bfd);
 
@@ -304,7 +311,7 @@ bfd_end_handler(void)
 			    "Configuration error: BFD instance %s has"
 			    " no %s address set, disabling instance",
 			    bfd->iname, neighbor_str);
-		list_del(bfd_data->bfd, bfd);
+		free_bfd(bfd);
 		return;
 	}
 
@@ -316,7 +323,7 @@ bfd_end_handler(void)
 			    " are not of the same family, disabling instance",
 			    bfd->iname, inet_sockaddrtos(&bfd->src_addr),
 			    neighbor_str, inet_sockaddrtos(&bfd->nbr_addr));
-		list_del(bfd_data->bfd, bfd);
+		free_bfd(bfd);
 		return;
 	}
 
@@ -333,7 +340,7 @@ bfd_end_handler(void)
 				    "Configuration error: BFD instance %s has"
 				    " duplicate %s address %s, ignoring instance",
 				    bfd->iname, neighbor_str, inet_sockaddrtos(&bfd->nbr_addr));
-		list_del(bfd_data->bfd, bfd);
+		free_bfd(bfd);
 		return;
 	}
 
@@ -367,35 +374,13 @@ bfd_end_handler(void)
 static void
 bfd_vrrp_handler(const vector_t *strvec)
 {
-	vrrp_tracked_bfd_t *tbfd;
 	const char *name;
-	element e;
 
 	if (!strvec)
 		return;
 
 	name = strvec_slot(strvec, 1);
-
-	if (strlen(name) >= sizeof tbfd->bname) {
-		report_config_error(CONFIG_GENERAL_ERROR, "BFD name %s too long", name);
-		skip_block(true);
-		return;
-	}
-
-	LIST_FOREACH(vrrp_data->vrrp_track_bfds, tbfd, e) {
-		if (!strcmp(name, tbfd->bname)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "BFD %s already specified", name);
-			skip_block(true);
-			return;
-		}
-	}
-
-	PMALLOC(tbfd);
-	strcpy(tbfd->bname, name);
-	tbfd->weight = 0;
-	tbfd->weight_reverse = false;
-	tbfd->bfd_up = false;
-	list_add(vrrp_data->vrrp_track_bfds, tbfd);
+	alloc_vrrp_tracked_bfd(name, &vrrp_data->vrrp_track_bfds);
 }
 #endif
 
@@ -408,7 +393,7 @@ bfd_vrrp_weight_handler(const vector_t *strvec)
 	assert(strvec);
 	assert(vrrp_data);
 
-	tbfd = LIST_TAIL_DATA(vrrp_data->vrrp_track_bfds);
+	tbfd = list_last_entry(&vrrp_data->vrrp_track_bfds, vrrp_tracked_bfd_t, e_list);
 	assert(tbfd);
 
 	if (!read_int_strvec(strvec, 1, &value, -253, 253, true)) {
@@ -440,28 +425,27 @@ bfd_event_vrrp_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 bfd_checker_handler(const vector_t *strvec)
 {
-	checker_tracked_bfd_t *tbfd;
+	checker_tracked_bfd_t *cbfd;
 	char *name;
-	element e;
 
 	if (!strvec)
 		return;
 
 	name = vector_slot(strvec, 1);
 
-	LIST_FOREACH(check_data->track_bfds, tbfd, e) {
-		if (!strcmp(name, tbfd->bname)) {
+	list_for_each_entry(cbfd, &check_data->track_bfds, e_list) {
+		if (!strcmp(name, cbfd->bname)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "BFD %s already specified", name);
 			skip_block(true);
 			return;
 		}
 	}
 
-	PMALLOC(tbfd);
-	tbfd->bname = STRDUP(name);
-//	tbfd->weight = 0;
-
-	list_add(check_data->track_bfds, tbfd);
+	PMALLOC(cbfd);
+	INIT_LIST_HEAD(&cbfd->e_list);
+	INIT_LIST_HEAD(&cbfd->tracking_rs);
+	cbfd->bname = STRDUP(name);
+	list_add_tail(&cbfd->e_list, &check_data->track_bfds);
 }
 #endif
 
@@ -553,6 +537,9 @@ bfd_init_keywords(void)
 #endif
 #ifdef _WITH_VRRP_
 	init_vrrp_keywords(false);
+#endif
+#if defined _WITH_VRRP_ || defined _WITH_LVS_
+	add_track_file_keywords(false);
 #endif
 
 	return keywords;

@@ -31,6 +31,8 @@
 #include <netlink/genl/genl.h>
 #include <netlink/genl/ctrl.h>
 
+//#define LIBNL_DEBUG
+
 #ifdef _HAVE_LIBNL1_
 #define nl_sock		nl_handle
 #ifndef _LIBNL_DYNAMIC_
@@ -53,6 +55,10 @@
 #include "logger.h"
 #include "utils.h"
 
+#if HAVE_DECL_CLONE_NEWNET
+#include "namespaces.h"
+#include "global_data.h"
+#endif
 
 typedef struct ipvs_servicedest_s {
 	struct ip_vs_service_user	svc;
@@ -62,11 +68,12 @@ typedef struct ipvs_servicedest_s {
 static int sockfd = -1;
 static void* ipvs_func = NULL;
 
-
 #ifdef LIBIPVS_USE_NL
 static struct nl_sock *sock = NULL;
+static nl_recvmsg_msg_cb_t cur_nl_sock_cb_func;
 static int family;
 static bool try_nl = true;
+static int nl_ack_flag;
 
 /* Policy definitions */
 #ifdef _WITH_SNMP_CHECKER_
@@ -87,7 +94,7 @@ static struct nla_policy ipvs_service_policy[IPVS_SVC_ATTR_MAX + 1] = {
 	[IPVS_SVC_ATTR_PORT]		= { .type = NLA_U16 },
 	[IPVS_SVC_ATTR_FWMARK]		= { .type = NLA_U32 },
 	[IPVS_SVC_ATTR_SCHED_NAME]	= { .type = NLA_STRING,
-					    .maxlen = IP_VS_SCHEDNAME_MAXLEN },
+					    .maxlen = IP_VS_SCHEDNAME_MAXLEN - 1 },
 	[IPVS_SVC_ATTR_FLAGS]		= { .type = NLA_UNSPEC,
 					    .minlen = sizeof(struct ip_vs_flags),
 					    .maxlen = sizeof(struct ip_vs_flags) },
@@ -236,61 +243,154 @@ static struct nl_msg *ipvs_nl_message(uint8_t cmd, int flags)
 	return msg;
 }
 
+#ifdef LIBNL_DEBUG
+static void
+dump_nl_msg(const char *msg, struct nl_msg *nlmsg)
+{
+	FILE *fp;
+
+	fp = fopen("/tmp/nlmsg.dmp", "a");
+	fprintf(fp, "\n%s\n\n", msg);
+	if (nlmsg)
+		nl_msg_dump(nlmsg, fp);
+	fclose(fp);
+}
+#endif
+
 static int ipvs_nl_noop_cb(__attribute__((unused)) struct nl_msg *msg, __attribute__((unused)) void *arg)
 {
+#ifdef LIBNL_DEBUG
+	dump_nl_msg("Noop CB", msg);
+#endif
+
 	return NL_OK;
+}
+
+#ifdef LIBNL_DEBUG
+static int recv_cb(struct nl_msg *msg, __attribute__((unused)) void *arg)
+{
+	dump_nl_msg("Receive message", msg);
+
+	return NL_OK;
+}
+#endif
+
+static int recv_ack_cb(__attribute__((unused)) struct nl_msg *msg, void *arg)
+{
+	int *ack_flag = arg;
+
+#ifdef LIBNL_DEBUG
+	dump_nl_msg("That was an ACK message", NULL);
+#endif
+
+	*ack_flag = 1;
+
+	return NL_STOP;
+}
+
+static int finish_cb(__attribute__((unused)) struct nl_msg *msg, void *arg)
+{
+	int *ack_flag = arg;
+
+#ifdef LIBNL_DEBUG
+	dump_nl_msg("That was a multi done message", NULL);
+#endif
+
+	*ack_flag = 1;
+
+	return NL_STOP;
+}
+
+static int
+ipvs_nl_err_cb(__attribute__((unused)) struct sockaddr_nl *nla, __attribute__((unused)) struct nlmsgerr *nlerr, void *arg)
+{
+	int *ack_flag = arg;
+
+#ifdef LIBNL_DEBUG
+	dump_nl_msg("That was an ERROR message", NULL);
+#endif
+
+	*ack_flag = 1;
+
+	return NL_STOP;
+}
+
+static int
+open_nl_sock(void)
+{
+	if (!(sock = nl_socket_alloc()))
+		return -1;
+
+	if (
+#if HAVE_DECL_CLONE_NEWNET
+	    nl_ipvs_connect(global_data->network_namespace_ipvs, sock)
+#else
+	    genl_connect(sock)
+#endif
+				    < 0 ||
+	    (family = genl_ctrl_resolve(sock, IPVS_GENL_NAME)) < 0) {
+		nl_socket_free(sock);
+		sock = NULL;
+
+		return -1;
+	}
+
+	/* We finish receiving if we get an error, an ACK, or a DONE for a multipart message */
+	if (nl_socket_modify_err_cb(sock, NL_CB_CUSTOM, ipvs_nl_err_cb, &nl_ack_flag) != 0)
+		log_message(LOG_INFO, "Setting err_cb failed");
+
+	nl_socket_modify_cb(sock, NL_CB_ACK, NL_CB_CUSTOM, recv_ack_cb, &nl_ack_flag);
+	nl_socket_modify_cb(sock, NL_CB_FINISH, NL_CB_CUSTOM, finish_cb, &nl_ack_flag);
+
+#ifdef LIBNL_DEBUG
+	nl_socket_modify_cb(sock, NL_CB_MSG_IN, NL_CB_CUSTOM, recv_cb, 0);
+#endif
+
+	return 0;
 }
 
 static int ipvs_nl_send_message(struct nl_msg *msg, nl_recvmsg_msg_cb_t func, void *arg)
 {
 	int err = EINVAL;
+	int ret = 0;
 
-	sock = nl_socket_alloc();
-	if (!sock) {
-		if (msg)
-			nlmsg_free(msg);
+	if (!sock && open_nl_sock()) {
+		nlmsg_free(msg);
 		return -1;
 	}
 
-	if (genl_connect(sock) < 0)
-		goto fail_genl;
-
-	family = genl_ctrl_resolve(sock, IPVS_GENL_NAME);
-	if (family < 0)
-		goto fail_genl;
-
-	/* To test connections and set the family */
-	if (msg == NULL) {
-		nl_socket_free(sock);
-		sock = NULL;
+	if (!msg)
 		return 0;
+
+	if (func != cur_nl_sock_cb_func) {
+		if (!nl_socket_modify_cb(sock, NL_CB_VALID, NL_CB_CUSTOM, func, arg))
+			cur_nl_sock_cb_func = func;
+		else
+			log_message(LOG_INFO, "Setting libnl callback function failed");
 	}
 
-	if (nl_socket_modify_cb(sock, NL_CB_VALID, NL_CB_CUSTOM, func, arg) != 0)
-		goto fail_genl;
-
-	if (nl_send_auto_complete(sock, msg) < 0)
-		goto fail_genl;
-
-	if ((err = -nl_recvmsgs_default(sock)) > 0)
-		goto fail_genl;
-
-	nlmsg_free(msg);
-
-	nl_socket_free(sock);
-
-	return 0;
-
-fail_genl:
-	nl_socket_free(sock);
-	sock = NULL;
-	nlmsg_free(msg);
-#ifdef _HAVE_LIBNL1_
-	errno = err;
-#else
-	errno = nlerr2syserr(err);
+#ifdef LIBNL_DEBUG
+	dump_nl_msg("Sending message", msg);
 #endif
-	return -1;
+
+	if (nl_send_auto(sock, msg) >= 0) {
+		nl_ack_flag = 0;
+		do {
+			if ((err = -nl_recvmsgs_default(sock)) > 0) {
+#ifdef _HAVE_LIBNL1_
+				errno = err;
+#else
+				errno = nlerr2syserr(err);
+#endif
+
+				ret = -1;
+			}
+		} while (!nl_ack_flag);
+	}
+
+	nlmsg_free(msg);
+
+	return ret;
 }
 #endif
 
@@ -301,11 +401,11 @@ static int ipvs_getinfo_parse_cb(struct nl_msg *msg, __attribute__((unused)) voi
 	struct nlattr *attrs[IPVS_INFO_ATTR_MAX + 1];
 
 	if (genlmsg_parse(nlh, 0, attrs, IPVS_INFO_ATTR_MAX, ipvs_info_policy) != 0)
-		return -1;
+		return NL_STOP;
 
 	if (!(attrs[IPVS_INFO_ATTR_VERSION] &&
 	      attrs[IPVS_INFO_ATTR_CONN_TAB_SIZE]))
-		return -1;
+		return NL_STOP;
 
 	return NL_OK;
 }
@@ -319,10 +419,10 @@ static int ipvs_getinfo(void)
 
 	if (try_nl) {
 		struct nl_msg *msg;
-		msg = ipvs_nl_message(IPVS_CMD_GET_INFO, 0);
-		if (msg)
-			return ipvs_nl_send_message(msg, ipvs_getinfo_parse_cb, NULL);
-		return -1;
+		if (!(msg = ipvs_nl_message(IPVS_CMD_GET_INFO, 0)))
+			return -1;
+
+		return ipvs_nl_send_message(msg, ipvs_getinfo_parse_cb, NULL);
 	}
 
 	len = sizeof(ipvs_info);
@@ -353,12 +453,18 @@ int ipvs_init(void)
 	try_nl = false;
 #endif
 
-	if ((sockfd = socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW)) == -1)
+#if HAVE_DECL_CLONE_NEWNET
+	sockfd = socket_netns_name(global_data->network_namespace_ipvs, AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW);
+#else
+	sockfd = socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW);
+#endif
+	if (sockfd == -1)
 		return -1;
 
 #if !HAVE_DECL_SOCK_CLOEXEC
 	if (set_sock_flags(sockfd, F_SETFD, FD_CLOEXEC)) {
 		close(sockfd);
+		sockfd = -1;
 		return -1;
 	}
 #endif
@@ -366,6 +472,7 @@ int ipvs_init(void)
 	len = sizeof(ipvs_info);
 	if (getsockopt(sockfd, IPPROTO_IP, IP_VS_SO_GET_INFO, (char *)&ipvs_info, &len)) {
 		close(sockfd);
+		sockfd = -1;
 		return -1;
 	}
 
@@ -490,7 +597,7 @@ out_err:
 	return -1;
 }
 
-
+#ifdef _INCLUDE_UNUSED_CODE_
 int ipvs_zero_service(ipvs_service_t *svc)
 {
 	ipvs_func = ipvs_zero_service;
@@ -516,6 +623,7 @@ int ipvs_zero_service(ipvs_service_t *svc)
 out_err:
 	return -1;
 }
+#endif
 
 #ifdef LIBIPVS_USE_NL
 static int ipvs_nl_fill_dest_attr(struct nl_msg *msg, ipvs_dest_t *dst)
@@ -718,9 +826,9 @@ nla_put_failure:
 	}
 #endif
 	memset(&dmk, 0, sizeof(dmk));
-	dmk.state = (int)dm->state;
+	dmk.state = dm->state;
 	strcpy(dmk.mcast_ifn, dm->mcast_ifn);
-	dmk.syncid = (int)dm->syncid;
+	dmk.syncid = dm->syncid;
 	return setsockopt(sockfd, IPPROTO_IP, IP_VS_SO_SET_STARTDAEMON,
 			  (char *)&dmk, sizeof(dmk));
 }
@@ -742,7 +850,6 @@ int ipvs_stop_daemon(ipvs_daemon_t *dm)
 			goto nla_put_failure;
 
 		NLA_PUT_S32(msg, IPVS_DAEMON_ATTR_STATE, dm->state);
-		NLA_PUT_STRING(msg, IPVS_DAEMON_ATTR_MCAST_IFN, dm->mcast_ifn);
 		NLA_PUT_S32(msg, IPVS_DAEMON_ATTR_SYNC_ID, dm->syncid);
 
 		nla_nest_end(msg, nl_daemon);
@@ -755,7 +862,7 @@ nla_put_failure:
 	}
 #endif
 	memset(&dmk, 0, sizeof(dmk));
-	dmk.state = (int)dm->state;
+	dmk.state = dm->state;
 	return setsockopt(sockfd, IPPROTO_IP, IP_VS_SO_SET_STOPDAEMON,
 			  (char *)&dmk, sizeof(dmk));
 }
@@ -906,7 +1013,7 @@ static int ipvs_services_parse_cb(struct nl_msg *msg, void *arg)
 	i++;
 
 	get->user.num_services = i;
-	get = realloc(get, sizeof(*get)
+	get = REALLOC(get, sizeof(*get)
 	      + sizeof(ipvs_service_entry_t) * (get->user.num_services + 1));
 	*getp = get;
 	return 0;
@@ -982,7 +1089,7 @@ static int ipvs_dests_parse_cb(struct nl_msg *msg, void *arg)
 	i++;
 
 	d->user.num_dests = i;
-	d = realloc(d, sizeof(*d) + sizeof(ipvs_dest_entry_t) * (d->user.num_dests + 1));
+	d = REALLOC(d, sizeof(*d) + sizeof(ipvs_dest_entry_t) * (d->user.num_dests + 1));
 	*dp = d;
 	return 0;
 }
@@ -1006,7 +1113,7 @@ struct ip_vs_get_dests_app *ipvs_get_dests(ipvs_service_entry_t *svc)
 		struct nl_msg *msg;
 		struct nlattr *nl_service;
 		if (svc->user.num_dests == 0)
-			d = realloc(d,sizeof(*d) + sizeof(ipvs_dest_entry_t));
+			d = REALLOC(d,sizeof(*d) + sizeof(ipvs_dest_entry_t));
 		d->user.fwmark = svc->user.fwmark;
 		d->user.protocol = svc->user.protocol;
 		d->nf_addr = svc->nf_addr;
@@ -1107,6 +1214,7 @@ ipvs_get_service(__u32 fwmark, __u16 af, __u16 protocol, union nf_inet_addr *add
 		tsvc.user.fwmark = fwmark;
 		tsvc.af = af;
 		tsvc.user.protocol= protocol;
+// ?IPv6
 		tsvc.nf_addr = *addr;
 		tsvc.user.port = port;
 
@@ -1169,8 +1277,13 @@ out_err:
 void ipvs_close(void)
 {
 #ifdef LIBIPVS_USE_NL
-	if (try_nl)
+	if (try_nl) {
+		if (sock) {
+			nl_socket_free(sock);
+			sock = NULL;
+		}
 		return;
+	}
 #endif
 	if (sockfd != -1) {
 		close(sockfd);
@@ -1188,29 +1301,20 @@ const char *ipvs_strerror(int err)
 	} table [] = {
 		{ ipvs_add_service, EEXIST, "Service already exists" },
 		{ ipvs_add_service, ENOENT, "Scheduler or persistence engine not found" },
-		{ ipvs_update_service, ESRCH, "No such service" },
 		{ ipvs_update_service, ENOENT, "Scheduler or persistence engine not found" },
-		{ ipvs_del_service, ESRCH, "No such service" },
-		{ ipvs_zero_service, ESRCH, "No such service" },
-		{ ipvs_add_dest, ESRCH, "Service not defined" },
 		{ ipvs_add_dest, EEXIST, "Destination already exists" },
-		{ ipvs_update_dest, ESRCH, "Service not defined" },
 		{ ipvs_update_dest, ENOENT, "No such destination" },
-		{ ipvs_del_dest, ESRCH, "Service not defined" },
 		{ ipvs_del_dest, ENOENT, "No such destination" },
 		{ ipvs_start_daemon, EEXIST, "Daemon has already run" },
 		{ ipvs_stop_daemon, ESRCH, "No daemon is running" },
-#ifdef _WITH_SNMP_CHECKER_
-		{ ipvs_get_dests, ESRCH, "No such service" },
-		{ ipvs_get_service, ESRCH, "No such service" },
-#endif
-		{ 0, EPERM, "Permission denied (you must be root)" },
-		{ 0, EINVAL, "Invalid operation.  Possibly wrong module version, address not unicast, ..." },
-		{ 0, ENOPROTOOPT, "Protocol not available" },
-		{ 0, ENOMEM, "Memory allocation problem" },
-		{ 0, EOPNOTSUPP, "Operation not supported with IPv6" },
-		{ 0, EAFNOSUPPORT, "Operation not supported with specified address family" },
-		{ 0, EMSGSIZE, "Module is wrong version" },
+		{ NULL, ESRCH, "No such service" },
+		{ NULL, EPERM, "Permission denied (you must be root)" },
+		{ NULL, EINVAL, "Invalid operation.  Possibly wrong module version, address not unicast, ..." },
+		{ NULL, ENOPROTOOPT, "Protocol not available" },
+		{ NULL, ENOMEM, "Memory allocation problem" },
+		{ NULL, EOPNOTSUPP, "Operation not supported with IPv6" },
+		{ NULL, EAFNOSUPPORT, "Operation not supported with specified address family" },
+		{ NULL, EMSGSIZE, "Module is wrong version" },
 	};
 
 	for (i = 0; i < sizeof(table)/sizeof(struct table_struct); i++) {

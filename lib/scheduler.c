@@ -42,6 +42,7 @@
 #endif
 #include <sys/utsname.h>
 #include <linux/version.h>
+#include <sched.h>
 
 #include "scheduler.h"
 #include "memory.h"
@@ -58,6 +59,7 @@
 #include "assert_debug.h"
 #include "warnings.h"
 #include "utils.h"
+#include "process.h"
 
 
 #ifdef THREAD_DUMP
@@ -93,10 +95,18 @@ static rb_root_t funcs = RB_ROOT;
 #ifdef _VRRP_FD_DEBUG_
 static void (*extra_threads_debug)(void);
 #endif
-
+#ifdef _SCRIPT_DEBUG_
+bool do_script_debug;
+#endif
 
 /* Function that returns prog_name if pid is a known child */
 static char const * (*child_finder_name)(pid_t);
+
+/* Function forward references */
+#ifdef _WITH_SNMP_
+static void snmp_epoll_reset(thread_master_t *);
+#endif
+
 
 #ifdef THREAD_DUMP
 static const char *
@@ -214,8 +224,8 @@ static int
 thread_move_ready(thread_master_t *m, rb_root_cached_t *root, thread_t *thread, int type)
 {
 	rb_erase_cached(&thread->n, root);
-	INIT_LIST_HEAD(&thread->next);
-	list_add_tail(&thread->next, &m->ready);
+	INIT_LIST_HEAD(&thread->e_list);
+	list_add_tail(&thread->e_list, &m->ready);
 	if (thread->type != THREAD_TIMER_SHUTDOWN)
 		thread->type = type;
 	return 0;
@@ -259,25 +269,25 @@ thread_update_timer(rb_root_cached_t *root, timeval_t *timer_min)
 }
 
 /* Compute the wait timer. Take care of timeouted fd */
-static void
+static timeval_t
 thread_set_timer(thread_master_t *m)
 {
-	timeval_t timer_wait;
+	timeval_t timer_wait, timer_wait_time;
 	struct itimerspec its;
 
 	/* Prepare timer */
-	timerclear(&timer_wait);
-	thread_update_timer(&m->timer, &timer_wait);
-	thread_update_timer(&m->write, &timer_wait);
-	thread_update_timer(&m->read, &timer_wait);
-	thread_update_timer(&m->child, &timer_wait);
+	timerclear(&timer_wait_time);
+	thread_update_timer(&m->timer, &timer_wait_time);
+	thread_update_timer(&m->write, &timer_wait_time);
+	thread_update_timer(&m->read, &timer_wait_time);
+	thread_update_timer(&m->child, &timer_wait_time);
 
-	if (timerisset(&timer_wait)) {
+	if (timerisset(&timer_wait_time)) {
 		/* Re-read the current time to get the maximum accuracy */
 		set_time_now();
 
 		/* Take care about monotonic clock */
-		timersub(&timer_wait, &time_now, &timer_wait);
+		timersub(&timer_wait_time, &time_now, &timer_wait);
 
 		if (timer_wait.tv_sec < 0) {
 			/* This will disable the timerfd */
@@ -302,15 +312,18 @@ thread_set_timer(thread_master_t *m)
 	/* We don't want periodic timer expiry */
 	its.it_interval.tv_sec = its.it_interval.tv_nsec = 0;
 
-	timerfd_settime(m->timer_fd, 0, &its, NULL);
+	if (timerfd_settime(m->timer_fd, 0, &its, NULL))
+		log_message(LOG_INFO, "Setting timer_fd returned errno %d - %m", errno);
 
 #ifdef _EPOLL_DEBUG_
 	if (do_epoll_debug)
 		log_message(LOG_INFO, "Setting timer_fd %ld.%9.9ld", its.it_value.tv_sec, its.it_value.tv_nsec);
 #endif
+
+	return timer_wait_time;
 }
 
-static int
+static void
 thread_timerfd_handler(thread_ref_t thread)
 {
 	thread_master_t *m = thread->master;
@@ -329,8 +342,6 @@ thread_timerfd_handler(thread_ref_t thread)
 
 	/* Register next timerfd thread */
 	m->timer_thread = thread_add_read(m, thread_timerfd_handler, NULL, m->timer_fd, TIMER_NEVER, false);
-
-	return 0;
 }
 
 /* Child PID cmp helper */
@@ -425,12 +436,40 @@ RELAX_STRICT_OVERFLOW_END
 }
 
 #ifndef _ONE_PROCESS_DEBUG_
+unsigned
+calc_restart_delay(const timeval_t *last_start_time, unsigned *next_restart_delay, const char *name)
+{
+	unsigned restart_delay = *next_restart_delay;
+
+	/* If it had been running for more than a minute,
+	 * we can restart the process immediately. */
+	if (time_now.tv_sec - last_start_time->tv_sec > 60 ||
+	    (time_now.tv_sec - last_start_time->tv_sec == 60 &&
+	     time_now.tv_usec >= last_start_time->tv_usec)) {
+		*next_restart_delay = 0;
+		return 0;
+	}
+
+	/* next restart delay starts at 1, double each subsequent time,
+	 * up to a limit of 1 minute. */
+	if (!restart_delay)
+		*next_restart_delay = 1;
+	else if (*next_restart_delay > 30)
+		*next_restart_delay = 60;
+	else
+		*next_restart_delay *= 2;
+
+	log_message(LOG_INFO, "Restart of %s process delayed %u seconds to limit respawn rate", name, restart_delay);
+
+	return restart_delay;
+}
+
 /* report_child_status returns true if the exit is a hard error, so unable to continue */
 bool
 report_child_status(int status, pid_t pid, char const *prog_name)
 {
 	char const *prog_id = NULL;
-	char pid_buf[12];	/* "pid 4194303" + '\0' - see definition of PID_MAX_LIMIT in include/linux/threads.h */
+	char pid_buf[4 + PID_MAX_DIGITS + 1];	/* "pid 4194303" + '\0' */
 	int exit_status ;
 
 	if (prog_name)
@@ -489,7 +528,7 @@ report_child_status(int status, pid_t pid, char const *prog_name)
 //				segv_termination = true;
 		}
 		else
-			log_message(LOG_INFO, "%s exited due to signal %d", prog_id, WTERMSIG(status));
+			log_message(LOG_INFO, "%s exited due to signal %d (%s)", prog_id, WTERMSIG(status), strsignal(WTERMSIG(status)));
 	}
 
 	return false;
@@ -581,7 +620,7 @@ thread_event_set(const thread_t *thread)
 		op = EPOLL_CTL_ADD;
 
 	if (epoll_ctl(m->epoll_fd, op, event->fd, &ev) < 0) {
-		log_message(LOG_INFO, "scheduler: Error performing control on EPOLL instance (%m)");
+		log_message(LOG_INFO, "scheduler: Error %d performing control on EPOLL instance for fd %d (%m)", errno, event->fd);
 		return -1;
 	}
 
@@ -604,16 +643,13 @@ thread_event_cancel(const thread_t *thread_cp)
 	/* Ignore error if it was an SNMP fd, since we don't know
 	 * if they have been closed */
 	if (m->epoll_fd != -1 &&
-	    epoll_ctl(m->epoll_fd, EPOLL_CTL_DEL, event->fd, NULL) < 0 &&
-#ifdef _WITH_SNMP_
-	    !FD_ISSET(event->fd, &m->snmp_fdset) &&
-#endif
-	    errno != EBADF)
+	    epoll_ctl(m->epoll_fd, EPOLL_CTL_DEL, event->fd, NULL) < 0)
 		log_message(LOG_INFO, "scheduler: Error performing epoll_ctl DEL op for fd:%d (%m)", event->fd);
 
 	rb_erase(&event->n, &m->io_events);
 	if (event == m->current_event)
 		m->current_event = NULL;
+	thread_events_resize(m, -1);
 	FREE(thread->event);
 	return 0;
 }
@@ -670,7 +706,7 @@ thread_make_master(void)
 
 #if !HAVE_EPOLL_CREATE1
 	if (set_sock_flags(new->epoll_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on epoll_fd - %s (%d)", strerror(errno), errno);
+		log_message(LOG_INFO, "Unable to set CLOEXEC on epoll_fd - %d (%m)", errno);
 #endif
 
 	new->read = RB_ROOT_CACHED;
@@ -690,7 +726,7 @@ thread_make_master(void)
 	/* Register timerfd thread */
 	new->timer_fd = timerfd_create(CLOCK_MONOTONIC,
 #ifdef TFD_NONBLOCK				/* Since Linux 2.6.27 */
-						        TFD_NONBLOCK | TFD_CLOEXEC
+							TFD_NONBLOCK | TFD_CLOEXEC
 #else
 							0
 #endif
@@ -703,10 +739,10 @@ thread_make_master(void)
 
 #ifndef TFD_NONBLOCK
 	if (set_sock_flags(new->timer_fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on timer_fd - %s (%d)", strerror(errno), errno);
+		log_message(LOG_INFO, "Unable to set NONBLOCK on timer_fd - %d (%m)", errno);
 
 	if (set_sock_flags(new->timer_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on timer_fd - %s (%d)", strerror(errno), errno);
+		log_message(LOG_INFO, "Unable to set CLOEXEC on timer_fd - %d (%m)", errno);
 #endif
 
 	new->signal_fd = signal_handler_init();
@@ -750,7 +786,11 @@ thread_rb_dump(const rb_root_cached_t *root, const char *tree, FILE *fp)
 	conf_write(fp, "----[ Begin rb_dump %s ]----", tree);
 
 	rb_for_each_entry_cached(thread, root, n)
-		conf_write(fp, "#%.2d Thread type %s, event_fd %d, val/fd/pid %d, fd_close %d, timer: %s, func %s(), id %lu", i++, get_thread_type_str(thread->type), thread->event ? thread->event->fd: -2, thread->u.val, thread->u.f.close_on_reload, timer_delay(thread->sands), get_function_name(thread->func), thread->id);
+		conf_write(fp, "#%.2d Thread:%p type %s, event_fd %d, val/fd/pid %d, fd_close %d, timer: %s, func %s(), id %lu"
+			     , i++, thread, get_thread_type_str(thread->type)
+			     , thread->event ? thread->event->fd: -2, thread->u.val
+			     , thread->u.f.close_on_reload, timer_delay(thread->sands)
+			     , get_function_name(thread->func), thread->id);
 
 	conf_write(fp, "----[ End rb_dump ]----");
 }
@@ -763,9 +803,11 @@ thread_list_dump(const list_head_t *l, const char *list_type, FILE *fp)
 
 	conf_write(fp, "----[ Begin list_dump %s ]----", list_type);
 
-	list_for_each_entry(thread, l, next)
-		conf_write(fp, "#%.2d Thread:%p type %s func %s() id %lu",
-				i++, thread, get_thread_type_str(thread->type), get_function_name(thread->func), thread->id);
+	list_for_each_entry(thread, l, e_list)
+		conf_write(fp, "#%.2d Thread:%p type %s val/fd/pid %d, fd_close %d, timer: %s, func %s() id %lu"
+			     , i++, thread, get_thread_type_str(thread->type), thread->u.val
+			     , thread->u.f.close_on_reload, timer_delay(thread->sands)
+			     , get_function_name(thread->func), thread->id);
 
 	conf_write(fp, "----[ End list_dump ]----");
 }
@@ -778,7 +820,9 @@ event_rb_dump(const rb_root_t *root, const char *tree, FILE *fp)
 
 	conf_write(fp, "----[ Begin rb_dump %s ]----", tree);
 	rb_for_each_entry(event, root, n)
-		conf_write(fp, "#%.2d event %p fd %d, flags: 0x%lx, read %p, write %p", i++, event, event->fd, event->flags, event->read, event->write);
+		conf_write(fp, "#%.2d event %p fd %d, flags: 0x%lx, read %p, write %p"
+			     , i++, event, event->fd, event->flags
+			     , event->read, event->write);
 	conf_write(fp, "----[ End rb_dump ]----");
 }
 
@@ -809,8 +853,8 @@ thread_clean_unuse(thread_master_t * m)
 	thread_t *thread, *thread_tmp;
 	list_head_t *l = &m->unuse;
 
-	list_for_each_entry_safe(thread, thread_tmp, l, next) {
-		list_head_del(&thread->next);
+	list_for_each_entry_safe(thread, thread_tmp, l, e_list) {
+		list_del_init(&thread->e_list);
 
 		/* free the thread */
 		FREE(thread);
@@ -828,8 +872,8 @@ thread_add_unuse(thread_master_t *m, thread_t *thread)
 
 	thread->type = THREAD_UNUSED;
 	thread->event = NULL;
-	INIT_LIST_HEAD(&thread->next);
-	list_add_tail(&thread->next, &m->unuse);
+	INIT_LIST_HEAD(&thread->e_list);
+	list_add_tail(&thread->e_list, &m->unuse);
 }
 
 /* Move list element to unuse queue */
@@ -838,12 +882,12 @@ thread_destroy_list(thread_master_t *m, list_head_t *l)
 {
 	thread_t *thread, *thread_tmp;
 
-	list_for_each_entry_safe(thread, thread_tmp, l, next) {
+	list_for_each_entry_safe(thread, thread_tmp, l, e_list) {
 		if (thread->event) {
 			thread_del_read(thread);
 			thread_del_write(thread);
 		}
-		list_head_del(&thread->next);
+		list_del_init(&thread->e_list);
 		thread_add_unuse(m, thread);
 	}
 }
@@ -896,6 +940,11 @@ thread_cleanup_master(thread_master_t * m)
 	thread_destroy_list(m, &m->ready);
 	m->child_pid = RB_ROOT;
 
+	if (m->current_thread) {
+		thread_add_unuse(m, m->current_thread);
+		m->current_thread = NULL;
+	}
+
 	/* Clean garbage */
 	thread_clean_unuse(m);
 
@@ -941,8 +990,8 @@ thread_trim_head(list_head_t *l)
 	if (list_empty(l))
 		return NULL;
 
-	thread = list_first_entry(l, thread_t, next);
-	list_del_init(&thread->next);
+	thread = list_first_entry(l, thread_t, e_list);
+	list_del_init(&thread->e_list);
 	return thread;
 }
 
@@ -966,7 +1015,7 @@ thread_new(thread_master_t *m)
 		m->alloc++;
 	}
 
-	INIT_LIST_HEAD(&new->next);
+	INIT_LIST_HEAD(&new->e_list);
 	new->id = thread_get_id(m);
 	return new;
 }
@@ -1043,16 +1092,13 @@ thread_add_read(thread_master_t *m, thread_func_t func, void *arg, int fd, unsig
 	return thread_add_read_sands(m, func, arg, fd, &sands, close_on_reload);
 }
 
-int
+void
 thread_del_read(thread_ref_t thread)
 {
 	if (!thread || !thread->event)
-		return -1;
+		return;
 
-	if (thread_event_del(thread, THREAD_FL_EPOLL_READ_BIT) < 0)
-		return -1;
-
-	return 0;
+	thread_event_del(thread, THREAD_FL_EPOLL_READ_BIT);
 }
 
 #ifdef _WITH_SNMP_
@@ -1158,16 +1204,13 @@ thread_add_write(thread_master_t *m, thread_func_t func, void *arg, int fd, unsi
 	return thread;
 }
 
-int
+void
 thread_del_write(thread_ref_t thread)
 {
 	if (!thread || !thread->event)
-		return -1;
+		return;
 
-	if (thread_event_del(thread, THREAD_FL_EPOLL_WRITE_BIT) < 0)
-		return -1;
-
-	return 0;
+	thread_event_del(thread, THREAD_FL_EPOLL_WRITE_BIT);
 }
 
 void
@@ -1243,7 +1286,7 @@ thread_add_timer_shutdown(thread_master_t *m, thread_func_t func, void *arg, uns
 		thread_t *p;
 		const thread_t *cp;
 	} thread;
-       
+
 	thread.cp = thread_add_timer(m, func, arg, timer);
 
 	thread.p->type = THREAD_TIMER_SHUTDOWN;
@@ -1311,8 +1354,8 @@ thread_add_event(thread_master_t * m, thread_func_t func, void *arg, int val)
 	thread->func = func;
 	thread->arg = arg;
 	thread->u.val = val;
-	INIT_LIST_HEAD(&thread->next);
-	list_add_tail(&thread->next, &m->event);
+	INIT_LIST_HEAD(&thread->e_list);
+	list_add_tail(&thread->e_list, &m->event);
 
 	return thread;
 }
@@ -1331,8 +1374,8 @@ thread_add_generic_terminate_event(thread_master_t * m, thread_type_t type, thre
 	thread->func = func;
 	thread->arg = NULL;
 	thread->u.val = 0;
-	INIT_LIST_HEAD(&thread->next);
-	list_add_tail(&thread->next, &m->event);
+	INIT_LIST_HEAD(&thread->e_list);
+	list_add_tail(&thread->e_list, &m->event);
 
 	return thread;
 }
@@ -1364,8 +1407,8 @@ thread_add_signal(thread_master_t *m, thread_func_t func, void *arg, int signum)
 	thread->func = func;
 	thread->arg = arg;
 	thread->u.val = signum;
-	INIT_LIST_HEAD(&thread->next);
-	list_add_tail(&thread->next, &m->signal);
+	INIT_LIST_HEAD(&thread->e_list);
+	list_add_tail(&thread->e_list, &m->signal);
 
 	/* Update signalfd accordingly */
 	if (sigismember(&m->signal_mask, signum))
@@ -1413,13 +1456,13 @@ thread_cancel(thread_ref_t thread_cp)
 	case THREAD_READ_TIMEOUT:
 		if (thread->event)
 			thread_event_del(thread, THREAD_FL_EPOLL_READ_BIT);
-		list_head_del(&thread->next);
+		list_del_init(&thread->e_list);
 		break;
 	case THREAD_READY_WRITE_FD:
 	case THREAD_WRITE_TIMEOUT:
 		if (thread->event)
 			thread_event_del(thread, THREAD_FL_EPOLL_WRITE_BIT);
-		list_head_del(&thread->next);
+		list_del_init(&thread->e_list);
 		break;
 	case THREAD_EVENT:
 	case THREAD_READY:
@@ -1428,7 +1471,7 @@ thread_cancel(thread_ref_t thread_cp)
 #endif
 	case THREAD_CHILD_TIMEOUT:
 	case THREAD_CHILD_TERMINATED:
-		list_head_del(&thread->next);
+		list_del_init(&thread->e_list);
 		break;
 	default:
 		break;
@@ -1463,9 +1506,9 @@ thread_cancel_event(thread_master_t *m, void *arg)
 	list_head_t *l = &m->event;
 
 // Why doesn't this use thread_cancel() above
-	list_for_each_entry_safe(thread, thread_tmp, l, next) {
+	list_for_each_entry_safe(thread, thread_tmp, l, e_list) {
 		if (thread->arg == arg) {
-			list_head_del(&thread->next);
+			list_del_init(&thread->e_list);
 			thread_add_unuse(m, thread);
 		}
 	}
@@ -1473,23 +1516,40 @@ thread_cancel_event(thread_master_t *m, void *arg)
 #endif
 
 #ifdef _WITH_SNMP_
-static int
+static void
 snmp_read_thread(thread_ref_t thread)
 {
 	fd_set snmp_fdset;
+	thread_event_t *event;
 
 	FD_ZERO(&snmp_fdset);
 	FD_SET(thread->u.f.fd, &snmp_fdset);
 
+	if (thread->type == THREAD_READ_ERROR) {
+		/* We need to remove the epoll entry for this fd since the snmp
+		 * code may close it. If it remains open, snmp_epoll_reset will
+		 * sort it out. */
+		thread_event_del(thread, THREAD_FL_EPOLL_READ_BIT);
+		FD_CLR(thread->u.f.fd, &master->snmp_fdset);
+	}
+
 	snmp_read(&snmp_fdset);
 	netsnmp_check_outstanding_agent_requests();
 
-	thread_add_read(thread->master, snmp_read_thread, thread->arg, thread->u.f.fd, TIMER_NEVER, false);
+	if (thread->type == THREAD_READ_ERROR)
+		snmp_epoll_reset(thread->master);
+	else {
+		snmp_epoll_info(thread->master);
 
-	return 0;
+		if (FD_ISSET(thread->u.f.fd, &master->snmp_fdset)) {
+			event = thread_event_get(thread->master, thread->u.f.fd);
+			if (!event || !event->read)
+				thread_add_read(thread->master, snmp_read_thread, thread->arg, thread->u.f.fd, TIMER_NEVER, false);
+		}
+	}
 }
 
-int
+void
 snmp_timeout_thread(thread_ref_t thread)
 {
 	snmp_timeout();
@@ -1498,11 +1558,11 @@ snmp_timeout_thread(thread_ref_t thread)
 
 	thread->master->snmp_timer_thread = thread_add_timer(thread->master, snmp_timeout_thread, thread->arg, TIMER_NEVER);
 
-	return 0;
+	snmp_epoll_info(thread->master);
 }
 
 // See https://vincent.bernat.im/en/blog/2012-snmp-event-loop
-static void
+void
 snmp_epoll_info(thread_master_t *m)
 {
 	fd_set snmp_fdset;
@@ -1527,9 +1587,9 @@ snmp_epoll_info(thread_master_t *m)
 	FD_ZERO(&snmp_fdset);
 
 	/* When SNMP is enabled, we may have to select() on additional
-	 * FD. snmp_select_info() will add them to `readfd'. The trick
+	 * FDs. snmp_select_info() will add them to `readfd'. The trick
 	 * with this function is its last argument. We need to set it
-	 * true to set its own timer that we then compare against ours. */
+	 * true to set its own timer we update * the snmp timer thread timeout */
 	snmp_select_info(&fdsetsize, &snmp_fdset, &snmp_timer_wait, &snmpblock);
 
 	if (snmpblock)
@@ -1568,18 +1628,17 @@ snmp_epoll_info(thread_master_t *m)
 /* If a file descriptor was registered with epoll, but it has been closed, the registration
  * will have been lost, even though the new fd value is the same. We therefore need to
  * unregister all the fds we had registered, and reregister them. */
-void
-snmp_epoll_reset(thread_master_t *m)
+static void
+snmp_epoll_update(thread_master_t *m, bool reset)
 {
 	fd_set snmp_fdset;
 	int fdsetsize = 0;
-	int set_words;
-	int max_fdsetsize;
+	unsigned set_words;
 	struct timeval snmp_timer_wait = { .tv_sec = TIMER_DISABLED };
 	int snmpblock = true;
 	unsigned long *old_set, *new_set;	// Must be unsigned for ffsl() to work for us
 	unsigned long bits;
-	int i;
+	unsigned i;
 	int fd;
 	int bit;
 
@@ -1587,11 +1646,7 @@ snmp_epoll_reset(thread_master_t *m)
 
 	snmp_select_info(&fdsetsize, &snmp_fdset, &snmp_timer_wait, &snmpblock);
 
-	max_fdsetsize = m->snmp_fdsetsize > fdsetsize ? m->snmp_fdsetsize : fdsetsize;
-	if (!max_fdsetsize)
-		return;
-
-	set_words = (max_fdsetsize - 1) / (sizeof(*old_set) * CHAR_BIT) + 1;
+	set_words = m->snmp_fdsetsize ? (m->snmp_fdsetsize - 1) / (sizeof(*old_set) * CHAR_BIT) + 1 : 0;
 
 	/* Clear all the fds that were registered with epoll */
 	for (i = 0, old_set = (unsigned long *)&m->snmp_fdset; i < set_words; i++, old_set++) {
@@ -1608,21 +1663,41 @@ snmp_epoll_reset(thread_master_t *m)
 		} while (bits);
 	}
 
-	/* Add the file descriptors that are now in use */
-	for (i = 0, new_set = (unsigned long *)&snmp_fdset; i < set_words; i++, new_set++) {
-		bits = *new_set;
-		fd = i * sizeof(*new_set) * CHAR_BIT - 1;
-		do {
-			bit = ffsl(bits);
-			bits >>= bit;
-			fd += bit;
+	if (reset) {
+		/* Add the file descriptors that are now in use */
+		set_words = fdsetsize ? (fdsetsize - 1) / (sizeof(*old_set) * CHAR_BIT) + 1 : 0;
 
-			/* Add the fd */
-			thread_add_read(m, snmp_read_thread, 0, fd, TIMER_NEVER, false);
-			FD_SET(fd, &m->snmp_fdset);
-		} while (bits);
-	}
+		for (i = 0, new_set = (unsigned long *)&snmp_fdset; i < set_words; i++, new_set++) {
+			bits = *new_set;
+			fd = i * sizeof(*new_set) * CHAR_BIT - 1;
+			do {
+				bit = ffsl(bits);
+				bits >>= bit;
+				fd += bit;
+
+				/* Add the fd */
+				thread_add_read(m, snmp_read_thread, 0, fd, TIMER_NEVER, false);
+				FD_SET(fd, &m->snmp_fdset);
+			} while (bits);
+		}
+	} else
+		fdsetsize = 0;
+
 	m->snmp_fdsetsize = fdsetsize;
+}
+
+static void
+snmp_epoll_reset(thread_master_t *m)
+{
+	snmp_epoll_update(m, true);
+}
+
+void
+snmp_epoll_clear(thread_master_t *m)
+{
+	snmp_epoll_update(m, false);
+	thread_cancel(m->snmp_timer_thread);
+	m->snmp_timer_thread = NULL;
 }
 #endif
 
@@ -1633,6 +1708,7 @@ thread_fetch_next_queue(thread_master_t *m)
 	int last_epoll_errno = 0;
 	int ret;
 	int i;
+	timeval_t earliest_timer;
 
 	assert(m != NULL);
 
@@ -1645,13 +1721,8 @@ thread_fetch_next_queue(thread_master_t *m)
 		return &m->ready;
 
 	do {
-#ifdef _WITH_SNMP_
-		if (snmp_running)
-			snmp_epoll_info(m);
-#endif
-
 		/* Calculate and set wait timer. Take care of timeouted fd.  */
-		thread_set_timer(m);
+		earliest_timer = thread_set_timer(m);
 
 #ifdef _VRRP_FD_DEBUG_
 		if (extra_threads_debug)
@@ -1693,7 +1764,7 @@ thread_fetch_next_queue(thread_master_t *m)
 				last_epoll_errno = errno;
 
 				/* Log the error first time only */
-				log_message(LOG_INFO, "scheduler: epoll_wait error: %s", strerror(errno));
+				log_message(LOG_INFO, "scheduler: epoll_wait error: %d (%m)", errno);
 			}
 
 			/* Make sure we don't sit it a tight loop */
@@ -1701,6 +1772,36 @@ thread_fetch_next_queue(thread_master_t *m)
 				sleep(1);
 
 			continue;
+		}
+
+		/* Check to see if we are long overdue. This can happen on a very heavily loaded system */
+		if (min_auto_priority_delay && timerisset(&earliest_timer)) {
+			/* Re-read the current time to get the maximum accuracy */
+			set_time_now();
+
+			/* Take care about monotonic clock */
+			timersub(&earliest_timer, &time_now, &earliest_timer);
+
+			/* If it is over min_auto_increment_delay usecs after the timer should have expired,
+			 * we are not running soon enough. */
+			if (earliest_timer.tv_sec < 0) {
+				if (earliest_timer.tv_sec * -1000000 - earliest_timer.tv_usec > min_auto_priority_delay) {
+					if (earliest_timer.tv_usec) {
+						earliest_timer.tv_sec++;
+						earliest_timer.tv_usec = 1000000 - earliest_timer.tv_usec;
+					}
+					log_message(LOG_INFO, "A thread timer expired %ld.%6.6ld seconds ago", -earliest_timer.tv_sec, earliest_timer.tv_usec);
+
+					/* Set realtime scheduling if not already using it, or if already in use,
+					 * increase the priority. */
+					increment_process_priority();
+
+#ifdef _EPOLL_THREAD_DUMP_
+					if (do_epoll_thread_dump)
+						dump_thread_data(m, NULL);
+#endif
+				}
+			}
 		}
 
 		/* Handle epoll events */
@@ -1712,7 +1813,6 @@ thread_fetch_next_queue(thread_master_t *m)
 			ev = ep_ev->data.ptr;
 
 			/* Error */
-// TODO - no thread processing function handles THREAD_READ_ERROR/THREAD_WRITE_ERROR yet
 			if (ep_ev->events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
 				if (ev->read) {
 					thread_move_ready(m, &m->read, ev->read, THREAD_READ_ERROR);
@@ -1800,14 +1900,18 @@ process_threads(thread_master_t *m)
 #ifdef _WITH_VRRP_
 			__clear_bit(DONT_RELEASE_VRRP_BIT, &debug);
 #endif
-			thread_add_terminate_event(master);
+			thread_add_terminate_event(m);
 		}
 #endif
 
 		/* If we are shutting down, only process relevant thread types.
 		 * We only want timer and signal fd, and don't want inotify, vrrp socket,
 		 * snmp_read, bfd_receiver, bfd pipe in vrrp/check, dbus pipe or netlink fds. */
-		thread = thread_trim_head(thread_list);
+		if (!(thread = thread_trim_head(thread_list)))
+			continue;
+
+		m->current_thread = thread;
+		thread_type = thread->type;
 
 		if (thread && thread->type == THREAD_CHILD_TIMEOUT) {
 			/* We remove the thread from the child_pid queue here so that
@@ -1818,11 +1922,13 @@ process_threads(thread_master_t *m)
 
 		if (!shutting_down ||
 		    ((thread->type == THREAD_READY_READ_FD ||
-		      thread->type == THREAD_READY_WRITE_FD) &&
+		      thread->type == THREAD_READY_WRITE_FD ||
+		      thread->type == THREAD_READ_ERROR ||
+		      thread->type == THREAD_WRITE_ERROR) &&
 		     (thread->u.f.fd == m->timer_fd ||
 		      thread->u.f.fd == m->signal_fd
 #ifdef _WITH_SNMP_
-		      || FD_ISSET(thread->u.f.fd, &m->snmp_fdset)
+		      || (snmp_running && FD_ISSET(thread->u.f.fd, &m->snmp_fdset))
 #endif
 							       )) ||
 		    thread->type == THREAD_CHILD ||
@@ -1833,13 +1939,20 @@ process_threads(thread_master_t *m)
 			if (thread->func)
 				thread_call(thread);
 
-			if (thread->type == THREAD_TERMINATE_START)
+			/* If m->current_thread has been cleared, the thread
+			 * has been freed. This happens during a reload. */
+			thread = m->current_thread;
+
+			if (thread_type == THREAD_TERMINATE_START)
 				shutting_down = true;
 		}
 
-		m->current_event = (thread->type == THREAD_READY_READ_FD || thread->type == THREAD_READY_WRITE_FD) ? thread->event : NULL;
-		thread_type = thread->type;
-		thread_add_unuse(master, thread);
+		if (thread) {
+			m->current_event = (thread_type == THREAD_READY_READ_FD || thread_type == THREAD_READY_WRITE_FD) ? thread->event : NULL;
+			thread_add_unuse(m, thread);
+			m->current_thread = NULL;
+		} else
+			m->current_event = NULL;
 
 		/* If we are shutting down, and the shutdown timer is not running and
 		 * all children have terminated, then we can terminate */
@@ -1858,12 +1971,6 @@ process_child_termination(pid_t pid, int status)
 	thread_master_t * m = master;
 	thread_t th = { .u.c.pid = pid };
 	thread_t *thread;
-	bool permanent_vrrp_checker_error = false;
-
-#ifndef _ONE_PROCESS_DEBUG_
-	if (prog_type == PROG_TYPE_PARENT)
-		permanent_vrrp_checker_error = report_child_status(status, pid, NULL);
-#endif
 
 	thread = rb_search(&master->child_pid, &th, rb_data, thread_child_pid_cmp);
 
@@ -1879,15 +1986,7 @@ process_child_termination(pid_t pid, int status)
 
 	thread->u.c.status = status;
 
-	if (permanent_vrrp_checker_error)
-	{
-		/* The child had a permanant error, so no point in respawning */
-		rb_erase_cached(&thread->n, &m->child);
-		thread_add_unuse(m, thread);
-
-		thread_add_terminate_event(m);
-	}
-	else if (thread->type == THREAD_CHILD_TIMEOUT) {
+	if (thread->type == THREAD_CHILD_TIMEOUT) {
 		/* The child had been timed out, but we have not processed the timeout
 		 * and it is still on the thread->ready queue. Since we have now got
 		 * the termination, just handle the termination instead. */
@@ -1908,11 +2007,17 @@ thread_child_handler(__attribute__((unused)) void *v, __attribute__((unused)) in
 		if (pid == -1) {
 			if (errno == ECHILD)
 				return;
-			log_message(LOG_DEBUG, "waitpid error %d: %s", errno, strerror(errno));
+			log_message(LOG_DEBUG, "waitpid error %d (%m)", errno);
 			assert(0);
 
 			return;
 		}
+
+#ifdef _SCRIPT_DEBUG_
+		if (do_script_debug)
+			log_message(LOG_INFO, "waitpid for %d returned 0x%x", pid, (unsigned)status);
+#endif
+
 		process_child_termination(pid, status);
 	}
 }

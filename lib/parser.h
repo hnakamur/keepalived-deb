@@ -62,6 +62,7 @@ typedef enum {
 	CONFIG_MISSING_PARAMETER,
 	CONFIG_INVALID_NUMBER,
 	CONFIG_GENERAL_ERROR,
+	CONFIG_WARNING,
 
 	/* The following is for script security not enabled when needed */
 	CONFIG_SECURITY_ERROR,
@@ -91,12 +92,12 @@ extern bool do_dump_keywords;
 static inline const char * __attribute__((malloc))
 set_value_r(const vector_t *strvec)
 {
-        return STRDUP(strvec_slot(strvec, 1));
+	return STRDUP(strvec_slot(strvec, 1));
 }
 
 #ifdef _MEM_CHECK_
 #define alloc_strvec(str)	(memcheck_log("alloc_strvec", str, (__FILE__), (__func__), (__LINE__)), \
-                                 alloc_strvec_r(str))
+				 alloc_strvec_r(str))
 
 #define set_value(str)		(memcheck_log("set_value", strvec_slot(str,1), (__FILE__), (__func__), (__LINE__)), \
 				 set_value_r(str))
@@ -129,7 +130,7 @@ extern const vector_t *alloc_strvec_quoted_escaped(const char *);
 extern vector_t *alloc_strvec_r(const char *);
 extern bool check_conf_file(const char*);
 extern const vector_t *read_value_block(const vector_t *);
-extern void alloc_value_block(void (*alloc_func) (const vector_t *), const char *);
+extern void alloc_value_block(void (*alloc_func) (const vector_t *), const vector_t *);
 extern bool read_timer(const vector_t *, size_t, unsigned long *, unsigned long, unsigned long, bool);
 extern int check_true_false(const char *) __attribute__ ((pure));
 extern void skip_block(bool);

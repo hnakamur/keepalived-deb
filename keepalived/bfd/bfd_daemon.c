@@ -39,7 +39,6 @@
 #include "pidfile.h"
 #include "logger.h"
 #include "signals.h"
-#include "list.h"
 #include "main.h"
 #include "parser.h"
 #include "time.h"
@@ -61,7 +60,9 @@ int bfd_checker_event_pipe[2] = { -1, -1};
 static const char *bfd_syslog_ident;
 
 #ifndef _ONE_PROCESS_DEBUG_
-static int reload_bfd_thread(thread_ref_t);
+static void reload_bfd_thread(thread_ref_t);
+static timeval_t bfd_start_time;
+static unsigned bfd_next_restart_delay;
 #endif
 
 /* Daemon stop sequence */
@@ -113,15 +114,14 @@ stop_bfd(int status)
 }
 
 /* Daemon init sequence */
-void
+bool
 open_bfd_pipes(void)
 {
 #ifdef _WITH_VRRP_
 	/* Open BFD VRRP control pipe */
 	if (open_pipe(bfd_vrrp_event_pipe) == -1) {
 		log_message(LOG_ERR, "Unable to create BFD vrrp event pipe: %m");
-		stop_keepalived();
-		return;
+		return false;
 	}
 #endif
 
@@ -129,10 +129,11 @@ open_bfd_pipes(void)
 	/* Open BFD checker control pipe */
 	if (open_pipe(bfd_checker_event_pipe) == -1) {
 		log_message(LOG_ERR, "Unable to create BFD checker event pipe: %m");
-		stop_keepalived();
-		return;
+		return false;
 	}
 #endif
+
+	return true;
 }
 
 /* Daemon init sequence */
@@ -179,7 +180,7 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* Set the process priority and non swappable if configured */
 // TODO - measure max stack usage
 	set_process_priorities(
-			global_data->bfd_realtime_priority,
+			global_data->bfd_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			global_data->bfd_rlimit_rt,
 #endif
@@ -196,11 +197,10 @@ bfd_validate_config(void)
 }
 
 #ifndef _ONE_PROCESS_DEBUG_
-static int
+static void
 print_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 {
-        bfd_print_data();
-        return 0;
+	bfd_print_data();
 }
 
 /* Reload handler */
@@ -214,9 +214,9 @@ sigreload_bfd(__attribute__ ((unused)) void *v,
 static void
 sigdump_bfd(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 {
-        log_message(LOG_INFO, "Printing BFD data for process(%d) on signal",
-                    getpid());
-        thread_add_event(master, print_bfd_thread, NULL, 0);
+	log_message(LOG_INFO, "Printing BFD data for process(%d) on signal",
+		    getpid());
+	thread_add_event(master, print_bfd_thread, NULL, 0);
 }
 
 /* Terminate handler */
@@ -243,7 +243,7 @@ bfd_signal_init(void)
 }
 
 /* Reload thread */
-static int
+static void
 reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	timeval_t timer;
@@ -278,33 +278,46 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 
 	set_time_now();
 	log_message(LOG_INFO, "Reload finished in %lu usec", -timer_long(timer_sub_now(timer)));
-
-	return 0;
 }
 
-/* BFD Child respawning thread */
-static int
+/* This function runs in the parent process. */
+static void
+delayed_restart_bfd_child_thread(__attribute__((unused)) thread_ref_t thread)
+{
+	start_bfd_child();
+}
+
+/* BFD Child respawning thread. This function runs in the parent process. */
+static void
 bfd_respawn_thread(thread_ref_t thread)
 {
+	unsigned restart_delay;
+
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
 
-	if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
+	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
+		thread_add_terminate_event(thread->master);
+	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
-		start_bfd_child();
+		restart_delay = calc_restart_delay(&bfd_start_time, &bfd_next_restart_delay, "BFD");
+		if (!restart_delay)
+			start_bfd_child();
+		else
+			thread_add_timer(thread->master, delayed_restart_bfd_child_thread, NULL, restart_delay * TIMER_HZ);
 	} else {
 		log_message(LOG_ALERT, "BFD child process(%d) died: Exiting", thread->u.c.pid);
 		raise(SIGTERM);
 	}
-	return 0;
 }
-#endif
 
-#ifndef _ONE_PROCESS_DEBUG_
 #ifdef THREAD_DUMP
 static void
 register_bfd_thread_addresses(void)
 {
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 
@@ -343,6 +356,8 @@ start_bfd_child(void)
 		return -1;
 	} else if (pid) {
 		bfd_child = pid;
+		bfd_start_time = time_now;
+
 		log_message(LOG_INFO, "Starting BFD child process, pid=%d",
 			    pid);
 
@@ -351,6 +366,7 @@ start_bfd_child(void)
 				 pid, TIMER_NEVER);
 		return 0;
 	}
+
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
 	prog_type = PROG_TYPE_BFD;
@@ -465,6 +481,7 @@ register_bfd_parent_addresses(void)
 {
 #ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("bfd_respawn_thread", bfd_respawn_thread);
+	register_thread_address("delayed_restart_bfd_child_thread", delayed_restart_bfd_child_thread);
 #endif
 }
 #endif

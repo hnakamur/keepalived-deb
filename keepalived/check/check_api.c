@@ -41,6 +41,9 @@
 #include "check_http.h"
 #include "check_ssl.h"
 #include "check_dns.h"
+#include "check_ping.h"
+#include "check_udp.h"
+#include "check_file.h"
 #include "ipwrapper.h"
 #include "check_daemon.h"
 #ifdef _WITH_BFD_
@@ -48,30 +51,56 @@
 #include "bfd_event.h"
 #include "bfd_daemon.h"
 #endif
+#include "track_file.h"
 
 /* Global vars */
-list checkers_queue;
+list_head_t checkers_queue;
 #ifdef _CHECKER_DEBUG_
 bool do_checker_debug;
 #endif
 
 /* free checker data */
-static void
-free_checker(void *data)
+void
+free_checker(checker_t *checker)
 {
-	checker_t *checker = data;
+	list_del_init(&checker->e_list);
 	(*checker->free_func) (checker);
+}
+void
+free_checker_list(list_head_t *l)
+{
+	checker_t *checker, *checker_tmp;
+
+	list_for_each_entry_safe(checker, checker_tmp, l, e_list)
+		free_checker(checker);
 }
 
 /* dump checker data */
 static void
-dump_checker(FILE *fp, const void *data)
+dump_checker(FILE *fp, const checker_t *checker)
 {
-	const checker_t *checker = data;
-
 	conf_write(fp, " %s -> %s", FMT_VS(checker->vs), FMT_CHK(checker));
+	conf_write(fp, "   Enabled = %s", checker->enabled ? "yes" : "no");
+	conf_write(fp, "   Up = %s", checker->is_up ? "yes" : "no");
+	conf_write(fp, "   Has run = %s", checker->has_run ? "yes" : "no");
+	conf_write(fp, "   Alpha = %s", checker->has_run ? "yes" : "no");
+	conf_write(fp, "   Delay loop = %lu", checker->delay_loop);
+	conf_write(fp, "   Warmup = %lu", checker->warmup);
+	conf_write(fp, "   Retries = %u", checker->retry);
+	conf_write(fp, "   Delay before retry = %lu", checker->delay_before_retry);
+	conf_write(fp, "   Retries iterations = %u", checker->retry_it);
+	conf_write(fp, "   Default delay before retry = %lu", checker->default_delay_before_retry);
+	conf_write(fp, "   Log all failures = %s", checker->log_all_failures ? "yes" : "no");
 
 	(*checker->dump_func) (fp, checker);
+}
+static void
+dump_checker_list(FILE *fp, const list_head_t *l)
+{
+	checker_t *checker;
+
+	list_for_each_entry(checker, l, e_list)
+		dump_checker(fp, checker);
 }
 
 void
@@ -89,6 +118,8 @@ dump_connection_opts(FILE *fp, const void *data)
 		conf_write(fp, "     Mark = %u", conn->fwmark);
 #endif
 	conf_write(fp, "     Timeout = %f", (double)conn->connection_to / TIMER_HZ);
+	if (conn->last_errno)
+		conf_write(fp, "     Last errno = %d", conn->last_errno);
 }
 
 void
@@ -122,14 +153,14 @@ dump_checker_opts(FILE *fp, const void *data)
 checker_t *
 queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const checker_t *)
 	      , thread_func_t launch
-	      , bool (*compare) (const checker_t *, const checker_t *)
+	      , bool (*compare) (const checker_t *, checker_t *)
 	      , void *data
 	      , conn_opts_t *co
 	      , bool fd_required)
 {
-	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
-	checker_t *checker = (checker_t *) MALLOC(sizeof (checker_t));
+	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
+	real_server_t *rs = list_last_entry(&vs->rs, real_server_t, e_list);
+	checker_t *checker;
 
 	/* Set default dst = RS, timeout = default */
 	if (co) {
@@ -137,6 +168,8 @@ queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const 
 		co->connection_to = UINT_MAX;
 	}
 
+	PMALLOC(checker);
+	INIT_LIST_HEAD(&checker->e_list);
 	checker->free_func = free_func;
 	checker->dump_func = dump_func;
 	checker->launch = launch;
@@ -157,7 +190,7 @@ queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const 
 	checker->default_retry = 1 ;
 
 	/* queue the checker */
-	list_add(checkers_queue, checker);
+	list_add_tail(&checker->e_list, &checkers_queue);
 
 	if (fd_required)
 		check_data->num_checker_fd_required++;
@@ -168,12 +201,12 @@ queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const 
 void
 dequeue_new_checker(void)
 {
-	checker_t *checker = ELEMENT_DATA(checkers_queue->tail);
+	checker_t *checker = CHECKER_GET_CURRENT();
 
 	if (!checker->is_up)
 		set_checker_state(checker, true);
 
-	free_list_element(checkers_queue, checkers_queue->tail);
+	free_checker(checker);
 }
 
 bool
@@ -443,9 +476,9 @@ install_checker_common_keywords(bool connection_keywords)
 void
 dump_checkers_queue(FILE *fp)
 {
-	if (!LIST_ISEMPTY(checkers_queue)) {
+	if (!list_empty(&checkers_queue)) {
 		conf_write(fp, "------< Health checkers >------");
-		dump_list(fp, checkers_queue);
+		dump_checker_list(fp, &checkers_queue);
 	}
 }
 
@@ -453,28 +486,34 @@ dump_checkers_queue(FILE *fp)
 void
 init_checkers_queue(void)
 {
-	checkers_queue = alloc_list(free_checker, dump_checker);
+	INIT_LIST_HEAD(&checkers_queue);
 }
 
 /* release the checkers for a virtual server */
 void
-free_vs_checkers(virtual_server_t *vs)
+free_vs_checkers(const virtual_server_t *vs)
 {
-	element e;
-	element next;
-	checker_t *checker;
+	checker_t *checker, *checker_tmp;
 
-	if (LIST_ISEMPTY(checkers_queue))
-		return;
-
-	for (e = LIST_HEAD(checkers_queue); e; e = next) {
-		next = e->next;
-
-		checker = ELEMENT_DATA(e);
+	list_for_each_entry_safe(checker, checker_tmp, &checkers_queue, e_list) {
 		if (checker->vs != vs)
 			continue;
 
-		free_list_element(checkers_queue, e);
+		free_checker(checker);
+	}
+}
+
+/* release the checkers for a virtual server */
+void
+free_rs_checkers(const real_server_t *rs)
+{
+	checker_t *checker, *checker_tmp;
+
+	list_for_each_entry_safe(checker, checker_tmp, &checkers_queue, e_list) {
+		if (checker->rs != rs)
+			continue;
+
+		free_checker(checker);
 	}
 }
 
@@ -482,10 +521,7 @@ free_vs_checkers(virtual_server_t *vs)
 void
 free_checkers_queue(void)
 {
-	if (!checkers_queue)
-		return;
-
-	free_list(&checkers_queue);
+	free_checker_list(&checkers_queue);
 }
 
 /* register checkers to the global I/O scheduler */
@@ -493,10 +529,9 @@ void
 register_checkers_thread(void)
 {
 	checker_t *checker;
-	element e;
 	unsigned long warmup;
 
-	LIST_FOREACH(checkers_queue, checker, e) {
+	list_for_each_entry(checker, &checkers_queue, e_list) {
 		if (checker->launch)
 		{
 			if (checker->vs->ha_suspend && !checker->vs->ha_suspend_addr_count)
@@ -532,8 +567,11 @@ register_checkers_thread(void)
 static bool __attribute__ ((pure))
 addr_matches(const virtual_server_t *vs, void *address)
 {
-	const void *addr;
 	virtual_server_group_entry_t *vsg_entry;
+	struct in_addr mask_addr = {0};
+	struct in6_addr mask_addr6 = {{{0}}};
+	unsigned addr_base;
+	const void *addr;
 
 	if (vs->addr.ss_family != AF_UNSPEC) {
 		if (vs->addr.ss_family == AF_INET6)
@@ -544,70 +582,60 @@ addr_matches(const virtual_server_t *vs, void *address)
 		return inaddr_equal(vs->addr.ss_family, addr, address);
 	}
 
-	if (!vs->vsg)
+	if (!vs->vsg || list_empty(&vs->vsg->addr_range))
 		return false;
 
-	if (vs->vsg->addr_range) {
-		element e;
-		struct in_addr mask_addr = {0};
-		struct in6_addr mask_addr6 = {{{0}}};
-		unsigned addr_base;
+	if (vs->af == AF_INET) {
+		mask_addr = *(struct in_addr*)address;
+		addr_base = ntohl(mask_addr.s_addr) & 0xFF;
+		mask_addr.s_addr &= htonl(0xFFFFFF00);
+	} else {
+		mask_addr6 = *(struct in6_addr*)address;
+		addr_base = ntohs(mask_addr6.s6_addr16[7]);
+		mask_addr6.s6_addr16[7] = 0;
+	}
 
-		if (vs->af == AF_INET) {
-			mask_addr = *(struct in_addr*)address;
-			addr_base = ntohl(mask_addr.s_addr) & 0xFF;
-			mask_addr.s_addr &= htonl(0xFFFFFF00);
-		}
-		else {
-			mask_addr6 = *(struct in6_addr*)address;
-			addr_base = ntohs(mask_addr6.s6_addr16[7]);
-			mask_addr6.s6_addr16[7] = 0;
-		}
+	list_for_each_entry(vsg_entry, &vs->vsg->addr_range, e_list) {
+		struct sockaddr_storage range_addr = vsg_entry->addr;
+		uint32_t ra_base;
 
-		for (e = LIST_HEAD(vs->vsg->addr_range); e; ELEMENT_NEXT(e)) {
-			vsg_entry = ELEMENT_DATA(e);
-			struct sockaddr_storage range_addr = vsg_entry->addr;
-			uint32_t ra_base;
+		if (!vsg_entry->range) {
+			if (vsg_entry->addr.ss_family == AF_INET6)
+				addr = (void *) &((struct sockaddr_in6 *)&vsg_entry->addr)->sin6_addr;
+			else
+				addr = (void *) &((struct sockaddr_in *)&vsg_entry->addr)->sin_addr;
 
-			if (!vsg_entry->range) {
-				if (vsg_entry->addr.ss_family == AF_INET6)
-					addr = (void *) &((struct sockaddr_in6 *)&vsg_entry->addr)->sin6_addr;
-				else
-					addr = (void *) &((struct sockaddr_in *)&vsg_entry->addr)->sin_addr;
-
-				if (inaddr_equal(vsg_entry->addr.ss_family, addr, address))
-					return true;
-			}
-			else {
-				if (range_addr.ss_family == AF_INET) {
-					struct in_addr ra;
-
-					ra = ((struct sockaddr_in *)&range_addr)->sin_addr;
-					ra_base = ntohl(ra.s_addr) & 0xFF;
-
-					if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
-						continue;
-
-					ra.s_addr &= htonl(0xFFFFFF00);
-					if (ra.s_addr != mask_addr.s_addr)
-						continue;
-				}
-				else
-				{
-					struct in6_addr ra = ((struct sockaddr_in6 *)&range_addr)->sin6_addr;
-					ra_base = ntohs(ra.s6_addr16[7]);
-
-					if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
-						continue;
-
-					ra.s6_addr16[7] = 0;
-					if (!inaddr_equal(AF_INET6, &ra, &mask_addr6))
-						continue;
-				}
-
+			if (inaddr_equal(vsg_entry->addr.ss_family, addr, address))
 				return true;
-			}
+
+			continue;
 		}
+
+		if (range_addr.ss_family == AF_INET) {
+			struct in_addr ra;
+
+			ra = ((struct sockaddr_in *)&range_addr)->sin_addr;
+			ra_base = ntohl(ra.s_addr) & 0xFF;
+
+			if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
+				continue;
+
+			ra.s_addr &= htonl(0xFFFFFF00);
+			if (ra.s_addr != mask_addr.s_addr)
+				continue;
+		} else {
+			struct in6_addr ra = ((struct sockaddr_in6 *)&range_addr)->sin6_addr;
+			ra_base = ntohs(ra.s6_addr16[7]);
+
+			if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
+				continue;
+
+			ra.s6_addr16[7] = 0;
+			if (!inaddr_equal(AF_INET6, &ra, &mask_addr6))
+				continue;
+		}
+
+		return true;
 	}
 
 	return false;
@@ -618,7 +646,6 @@ update_checker_activity(sa_family_t family, void *address, bool enable)
 {
 	checker_t *checker;
 	virtual_server_t *vs;
-	element e, e1;
 	char addr_str[INET6_ADDRSTRLEN];
 	bool address_logged = false;
 
@@ -632,11 +659,11 @@ update_checker_activity(sa_family_t family, void *address, bool enable)
 	if (!using_ha_suspend)
 		return;
 
-	if (LIST_ISEMPTY(checkers_queue))
+	if (list_empty(&checkers_queue))
 		return;
 
 	/* Check if any of the virtual servers are using this address, and have ha_suspend */
-	LIST_FOREACH(check_data->vs, vs, e) {
+	list_for_each_entry(vs, &check_data->vs, e_list) {
 		if (!vs->ha_suspend)
 			continue;
 
@@ -664,7 +691,7 @@ update_checker_activity(sa_family_t family, void *address, bool enable)
 			vs->ha_suspend_addr_count--;
 
 		/* Processing Healthcheckers queue for this vs */
-		LIST_FOREACH(checkers_queue, checker, e1) {
+		list_for_each_entry(checker, &checkers_queue, e_list) {
 			if (checker->vs != vs)
 				continue;
 
@@ -686,9 +713,12 @@ install_checkers_keyword(void)
 	install_misc_check_keyword();
 	install_smtp_check_keyword();
 	install_tcp_check_keyword();
+	install_ping_check_keyword();
+	install_udp_check_keyword();
 	install_http_check_keyword();
 	install_ssl_check_keyword();
 	install_dns_check_keyword();
+	install_file_check_keyword();
 #ifdef _WITH_BFD_
 	install_bfd_check_keyword();
 #endif

@@ -31,6 +31,7 @@
 /* local includes */
 #include "scheduler.h"
 
+
 enum connect_result {
 	connect_error,
 	connect_in_progress,
@@ -49,16 +50,18 @@ typedef struct _conn_opts {
 #ifdef _WITH_SO_MARK_
 	unsigned int			fwmark; /* to mark packets going out of the socket using SO_MARK */
 #endif
+	int				last_errno;	/* Errno from last call to connect */
 } conn_opts_t;
 
 /* Prototypes defs */
 #ifdef _WITH_LVS_
+extern void set_buf(char *, size_t);
 extern enum connect_result
 socket_bind_connect(int, conn_opts_t *);
 #endif
 
 extern enum connect_result
-socket_connect(int, struct sockaddr_storage *);
+socket_connect(int, const struct sockaddr_storage *);
 
 extern enum connect_result
 socket_state(thread_ref_t, thread_func_t);
@@ -80,7 +83,7 @@ tcp_bind_connect(int fd, conn_opts_t *co)
 #endif
 
 static inline enum connect_result
-tcp_connect(int fd, struct sockaddr_storage *addr)
+tcp_connect(int fd, const struct sockaddr_storage *addr)
 {
 	return socket_connect(fd, addr);
 }
@@ -98,6 +101,10 @@ tcp_connection_state(int fd, enum connect_result status, thread_ref_t thread,
 {
 	return socket_connection_state(fd, status, thread, func, timeout);
 }
+
+extern enum connect_result udp_bind_connect(int, conn_opts_t *);
+extern enum connect_result udp_socket_state(int, thread_ref_t, bool);
+extern bool udp_icmp_check_state(int, enum connect_result, thread_ref_t, thread_func_t, unsigned long);
 #endif
 
 #endif

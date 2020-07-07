@@ -31,7 +31,7 @@
 #include <sys/socket.h>
 
 /* local includes */
-#include "list.h"
+#include "list_head.h"
 #include "check_data.h"
 #include "vector.h"
 #include "layer4.h"
@@ -41,7 +41,7 @@ typedef struct _checker {
 	void				(*free_func) (struct _checker *);
 	void				(*dump_func) (FILE *, const struct _checker *);
 	thread_func_t			launch;
-	bool				(*compare) (const struct _checker *, const struct _checker *);
+	bool				(*compare) (const struct _checker *, struct _checker *);
 	virtual_server_t		*vs;			/* pointer to the checker thread virtualserver */
 	real_server_t			*rs;			/* pointer to the checker thread realserver */
 	void				*data;
@@ -58,16 +58,26 @@ typedef struct _checker {
 	unsigned			default_retry;		/* number of retries before failing */
 	unsigned long			default_delay_before_retry; /* interval between retries */
 	bool				log_all_failures;	/* Log all failures when checker up */
+
+	/* Linked list member */
+	list_head_t			e_list;
 } checker_t;
 
+typedef struct _checker_ref {
+	checker_t			*checker;
+
+	/* Linked list member */
+	list_head_t			e_list;
+} checker_ref_t;
+
 /* Checkers queue */
-extern list checkers_queue;
+extern list_head_t checkers_queue;
 
 /* utility macro */
 #define CHECKER_ARG(X) ((X)->data)
 #define CHECKER_CO(X) (((checker_t *)X)->co)
 #define CHECKER_DATA(X) (((checker_t *)X)->data)
-#define CHECKER_GET_CURRENT() (LIST_TAIL_DATA(checkers_queue))
+#define CHECKER_GET_CURRENT() (list_last_entry(&checkers_queue, checker_t, e_list))
 #define CHECKER_GET() (CHECKER_DATA(CHECKER_GET_CURRENT()))
 #define CHECKER_GET_CO() (((checker_t *)CHECKER_GET_CURRENT())->co)
 #define CHECKER_HA_SUSPEND(C) ((C)->vs->ha_suspend)
@@ -79,13 +89,16 @@ extern bool do_checker_debug;
 #endif
 
 /* Prototypes definition */
+extern void free_checker(checker_t *);
+extern void free_checker_list(list_head_t *);
 extern void init_checkers_queue(void);
-extern void free_vs_checkers(virtual_server_t *);
+extern void free_vs_checkers(const virtual_server_t *);
+extern void free_rs_checkers(const real_server_t *);
 extern void dump_connection_opts(FILE *, const void *);
 extern void dump_checker_opts(FILE *, const void *);
 extern checker_t *queue_checker(void (*) (checker_t *), void (*) (FILE *, const checker_t *)
 			  , thread_func_t
-			  , bool (*) (const checker_t *, const checker_t *)
+			  , bool (*) (const checker_t *, checker_t *)
 			  , void *
 			  , conn_opts_t *
 			  , bool);

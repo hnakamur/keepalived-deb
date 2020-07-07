@@ -39,6 +39,7 @@
 #include "parser.h"
 #include "libipvs.h"
 #include "keepalived_magic.h"
+#include "track_file.h"
 #ifdef _WITH_BFD_
 #include "check_bfd.h"
 #endif
@@ -93,37 +94,20 @@ dump_ssl(FILE *fp)
 
 /* Virtual server group facility functions */
 static void
-free_vsg(void *data)
+free_vsg_entry_list(list_head_t *l)
 {
-	virtual_server_group_t *vsg = data;
-	FREE_PTR(vsg->gname);
-	free_list(&vsg->addr_range);
-	free_list(&vsg->vfwmark);
-	FREE(vsg);
-}
-static void
-dump_vsg(FILE *fp, const void *data)
-{
-	const virtual_server_group_t *vsg = data;
+	virtual_server_group_entry_t *vsge, *vsge_tmp;
 
-	conf_write(fp, " ------< Virtual server group >------");
-	conf_write(fp, " Virtual Server Group = %s", vsg->gname);
-	dump_list(fp, vsg->addr_range);
-	dump_list(fp, vsg->vfwmark);
+	list_for_each_entry_safe(vsge, vsge_tmp, l, e_list)
+		FREE(vsge);
 }
 static void
-free_vsg_entry(void *data)
+dump_vsg_entry(FILE *fp, const virtual_server_group_entry_t *vsg_entry)
 {
-	FREE(data);
-}
-static void
-dump_vsg_entry(FILE *fp, const void *data)
-{
-	const virtual_server_group_entry_t *vsg_entry = data;
 	uint16_t start;
 
 	if (vsg_entry->is_fwmark) {
-		conf_write(fp, "   FWMARK = %u", vsg_entry->vfwmark);
+		conf_write(fp, "   FWMARK = %u%s", vsg_entry->vfwmark, vsg_entry->fwm_family == AF_INET ? " IPv4" : vsg_entry->fwm_family == AF_INET6 ? " IPv6" : "");
 		conf_write(fp, "   Alive: %u IPv4, %u IPv6",
 				vsg_entry->fwm4_alive, vsg_entry->fwm6_alive);
 	} else {
@@ -147,31 +131,73 @@ dump_vsg_entry(FILE *fp, const void *data)
 	}
 	conf_write(fp, "     reloaded = %s", vsg_entry->reloaded ? "True" : "False");
 }
+static void
+dump_vsg_entry_list(FILE *fp, const list_head_t *l)
+{
+	virtual_server_group_entry_t *vsge;
+
+	list_for_each_entry(vsge, l, e_list)
+		dump_vsg_entry(fp, vsge);
+}
+void
+free_vsg(virtual_server_group_t *vsg)
+{
+	list_del_init(&vsg->e_list);
+	FREE_PTR(vsg->gname);
+	free_vsg_entry_list(&vsg->addr_range);
+	free_vsg_entry_list(&vsg->vfwmark);
+	FREE(vsg);
+}
+static void
+free_vsg_list(list_head_t *l)
+{
+	virtual_server_group_t *vsg, *vsg_tmp;
+
+	list_for_each_entry_safe(vsg, vsg_tmp, l, e_list)
+		free_vsg(vsg);
+}
+static void
+dump_vsg(FILE *fp, const virtual_server_group_t *vsg)
+{
+	conf_write(fp, " ------< Virtual server group >------");
+	conf_write(fp, " Virtual Server Group = %s, IPv4 = %s, IPv6 = %s", vsg->gname, vsg->have_ipv4 ? "yes" : "no", vsg->have_ipv6 ? "yes" : "no");
+	dump_vsg_entry_list(fp, &vsg->addr_range);
+	dump_vsg_entry_list(fp, &vsg->vfwmark);
+}
+static void
+dump_vsg_list(FILE *fp, const list_head_t *l)
+{
+	virtual_server_group_t *vsg;
+
+	list_for_each_entry(vsg, l, e_list)
+		dump_vsg(fp, vsg);
+}
 void
 alloc_vsg(const char *gname)
 {
 	virtual_server_group_t *new;
 
-	new = (virtual_server_group_t *) MALLOC(sizeof(virtual_server_group_t));
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->e_list);
+	INIT_LIST_HEAD(&new->addr_range);
+	INIT_LIST_HEAD(&new->vfwmark);
 	new->gname = STRDUP(gname);
-	new->addr_range = alloc_list(free_vsg_entry, dump_vsg_entry);
-	new->vfwmark = alloc_list(free_vsg_entry, dump_vsg_entry);
 
-	list_add(check_data->vs_group, new);
+	list_add_tail(&new->e_list, &check_data->vs_group);
 }
 void
 alloc_vsg_entry(const vector_t *strvec)
 {
-	virtual_server_group_t *vsg = LIST_TAIL_DATA(check_data->vs_group);
+	virtual_server_group_t *vsg = list_last_entry(&check_data->vs_group, virtual_server_group_t, e_list);
 	virtual_server_group_entry_t *new;
-	virtual_server_group_entry_t *old;
 	uint32_t start;
-	element e;
 	const char *port_str;
 	uint32_t range;
 	unsigned fwmark;
+	const char *family_str;
 
-	new = (virtual_server_group_entry_t *) MALLOC(sizeof(virtual_server_group_entry_t));
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->e_list);
 
 	if (!strcmp(strvec_slot(strvec, 0), "fwmark")) {
 		if (!read_unsigned_strvec(strvec, 1, &fwmark, 0, UINT32_MAX, true)) {
@@ -179,9 +205,27 @@ alloc_vsg_entry(const vector_t *strvec)
 			FREE(new);
 			return;
 		}
+		if (vector_size(strvec) > 2) {
+			family_str = strvec_slot(strvec, 2);
+			if (!strcmp(family_str, "inet")) {
+				new->fwm_family = AF_INET;
+				vsg->have_ipv4 = true;
+			} else if (!strcmp(family_str, "inet6")) {
+				new->fwm_family = AF_INET6;
+				vsg->have_ipv6 = true;
+			} else {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s): fwmark '%u' family %s unknown - ignoring", vsg->gname, fwmark, family_str);
+				FREE(new);
+				return;
+			}
+		} else {
+			new->fwm_family = AF_UNSPEC;
+			vsg->fwmark_no_family = true;
+		}
+
 		new->vfwmark = fwmark;
 		new->is_fwmark = true;
-		list_add(vsg->vfwmark, new);
+		list_add_tail(&new->e_list, &vsg->vfwmark);
 	} else {
 		if (!inet_stor(strvec_slot(strvec, 0), &range)) {
 			FREE(new);
@@ -213,17 +257,6 @@ alloc_vsg_entry(const vector_t *strvec)
 		}
 #endif
 
-		/* Ensure the address family matches any previously configured addresses */
-		if (!LIST_ISEMPTY(vsg->addr_range)) {
-			e = LIST_HEAD(vsg->addr_range);
-			old = ELEMENT_DATA(e);
-			if (old->addr.ss_family != new->addr.ss_family) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Cannot mix IPv4 and IPv6 in virtual server group - %s", vsg->gname);
-				FREE(new);
-				return;
-			}
-		}
-
 		/* If no range specified, new->range == UINT32_MAX */
 		if (new->range == UINT32_MAX)
 			new->range = 0;
@@ -242,22 +275,13 @@ alloc_vsg_entry(const vector_t *strvec)
 		}
 
 		new->is_fwmark = false;
-		list_add(vsg->addr_range, new);
-	}
-}
+		list_add_tail(&new->e_list, &vsg->addr_range);
 
-/* Virtual server facility functions */
-static void
-free_vs(void *data)
-{
-	virtual_server_t *vs = data;
-	FREE_CONST_PTR(vs->vsgname);
-	FREE_CONST_PTR(vs->virtualhost);
-	FREE_PTR(vs->s_svr);
-	free_list(&vs->rs);
-	free_notify_script(&vs->notify_quorum_up);
-	free_notify_script(&vs->notify_quorum_down);
-	FREE(vs);
+		if (new->addr.ss_family == AF_INET)
+			vsg->have_ipv4 = true;
+		else
+			vsg->have_ipv6 = true;
+	}
 }
 
 static void
@@ -298,14 +322,207 @@ dump_forwarding_method(FILE *fp, const char *prefix, const real_server_t *rs)
 		conf_write(fp, "   %s%sTUN", prefix, fwd_method);
 #endif
 		break;
+	default:
+		conf_write(fp, "   %s 0x%x", fwd_method, rs->forwarding_method);
+		break;
 	}
 }
 
-static void
-dump_vs(FILE *fp, const void *data)
+/*
+ *	Real server facility functions
+ */
+void
+free_rs(real_server_t *rs)
 {
-	const virtual_server_t *vs = data;
+	list_del_init(&rs->e_list);
+	free_notify_script(&rs->notify_up);
+	free_notify_script(&rs->notify_down);
+	free_track_file_monitor_list(&rs->track_files);
+#ifdef _WITH_BFD_
+	free_checker_tracked_bfd_list(&rs->tracked_bfds);
+#endif
+	FREE_CONST_PTR(rs->virtualhost);
+	free_rs_checkers(rs);
+	FREE(rs);
+}
+static void
+free_rs_list(list_head_t *l)
+{
+	real_server_t *rs, *rs_tmp;
 
+	list_for_each_entry_safe(rs, rs_tmp, l, e_list)
+		free_rs(rs);
+}
+
+void
+dump_tracking_rs(FILE *fp, const void *data)
+{
+	const tracking_obj_t *top = (const tracking_obj_t *)data;
+	const checker_t *checker = top->obj.checker;
+
+	conf_write(fp, "     %s -> %s, weight %d%s", FMT_VS(checker->vs), FMT_RS(checker->rs, checker->vs), top->weight, top->weight_multiplier == -1 ? " reverse" : "");
+}
+
+static void
+dump_rs(FILE *fp, const real_server_t *rs)
+{
+#ifdef _WITH_BFD_
+	cref_tracked_bfd_t *tbfd;
+#endif
+
+	conf_write(fp, "   ------< Real server >------");
+	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d EFF WEIGHT = %d"
+			    , inet_sockaddrtos(&rs->addr)
+			    , ntohs(inet_sockaddrport(&rs->addr))
+			    , rs->weight, rs->effective_weight);
+	dump_forwarding_method(fp, "", rs);
+
+	conf_write(fp, "   Alpha is %s", rs->alpha ? "ON" : "OFF");
+	conf_write(fp, "   connection timeout = %f", ((double)rs->connection_to) / TIMER_HZ);
+	conf_write(fp, "   connection limit range = %" PRIu32 " -> %" PRIu32, rs->l_threshold, rs->u_threshold);
+	conf_write(fp, "   Delay loop = %f" , (double)rs->delay_loop / TIMER_HZ);
+	if (rs->retry != UINT_MAX)
+		conf_write(fp, "   Retry count = %u" , rs->retry);
+	if (rs->delay_before_retry != ULONG_MAX)
+		conf_write(fp, "   Retry delay = %f" , (double)rs->delay_before_retry / TIMER_HZ);
+	if (rs->warmup != ULONG_MAX)
+		conf_write(fp, "   Warmup = %f", (double)rs->warmup / TIMER_HZ);
+	conf_write(fp, "   Inhibit on failure is %s", rs->inhibit ? "ON" : "OFF");
+
+	if (rs->notify_up)
+		conf_write(fp, "     RS up notify script = %s, uid:gid %u:%u",
+				cmd_str(rs->notify_up), rs->notify_up->uid, rs->notify_up->gid);
+	if (rs->notify_down)
+		conf_write(fp, "     RS down notify script = %s, uid:gid %u:%u",
+				cmd_str(rs->notify_down), rs->notify_down->uid, rs->notify_down->gid);
+	if (rs->virtualhost)
+		conf_write(fp, "    VirtualHost = %s", rs->virtualhost);
+	conf_write(fp, "   Using smtp notification = %s", rs->smtp_alert ? "yes" : "no");
+
+	conf_write(fp, "   initial weight = %d", rs->iweight);
+	conf_write(fp, "   previous weight = %d", rs->pweight);
+	conf_write(fp, "   alive = %d", rs->alive);
+	conf_write(fp, "   num failed checkers = %u", rs->num_failed_checkers);
+	conf_write(fp, "   RS set = %d", rs->set);
+	conf_write(fp, "   reloaded = %d", rs->reloaded);
+
+	if (!list_empty(&rs->track_files)) {
+		conf_write(fp, "   Tracked Files");
+		dump_track_file_monitor_list(fp, &rs->track_files);
+	}
+
+#ifdef _WITH_BFD_
+	if (!list_empty(&rs->tracked_bfds)) {
+		conf_write(fp, "   Tracked BFDs");
+		list_for_each_entry(tbfd, &rs->tracked_bfds, e_list)
+			conf_write(fp, "     %s", tbfd->bfd->bname);
+	}
+#endif
+}
+static void
+dump_rs_list(FILE *fp, const list_head_t *l)
+{
+	real_server_t *rs;
+
+	list_for_each_entry(rs, l, e_list)
+		dump_rs(fp, rs);
+}
+
+void
+alloc_rs(const char *ip, const char *port)
+{
+	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
+	real_server_t *new;
+	const char *port_str;
+
+	/* inet_stosockaddr rejects port 0 */
+	port_str = (port && port[strspn(port, "0")]) ? port : NULL;
+
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->e_list);
+	INIT_LIST_HEAD(&new->track_files);
+#ifdef _WITH_BFD_
+	INIT_LIST_HEAD(&new->tracked_bfds);
+#endif
+	if (inet_stosockaddr(ip, port_str, &new->addr)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid real server ip address/port %s/%s - skipping", ip, port);
+		skip_block(true);
+		FREE(new);
+		return;
+	}
+
+#ifndef LIBIPVS_USE_NL
+	if (new->addr.ss_family != AF_INET) {
+		report_config_error(CONFIG_GENERAL_ERROR, "IPVS does not support IPv6 in this build - skipping %s/%s", ip, port);
+		skip_block(true);
+		FREE(new);
+		return;
+	}
+#else
+#if !HAVE_DECL_IPVS_DEST_ATTR_ADDR_FAMILY
+	if (vs->af != AF_UNSPEC && new->addr.ss_family != vs->af) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Your kernel doesn't support mixed IPv4/IPv6 for virtual/real servers");
+		skip_block(true);
+		FREE(new);
+		return;
+	}
+#endif
+#endif
+
+	new->weight = INT_MAX;
+	new->forwarding_method = vs->forwarding_method;
+#ifdef _HAVE_IPVS_TUN_TYPE_
+	new->tun_type = vs->tun_type;
+	new->tun_port = vs->tun_port;
+#ifdef _HAVE_IPVS_TUN_CSUM_
+	new->tun_flags = vs->tun_flags;
+#endif
+#endif
+	new->alpha = -1;
+	new->inhibit = -1;
+	new->connection_to = UINT_MAX;
+	new->delay_loop = ULONG_MAX;
+	new->warmup = ULONG_MAX;
+	new->retry = UINT_MAX;
+	new->delay_before_retry = ULONG_MAX;
+	new->virtualhost = NULL;
+	new->smtp_alert = -1;
+
+	list_add_tail(&new->e_list, &vs->rs);
+	vs->rs_cnt++;
+
+	clear_dynamic_misc_check_flag();
+}
+
+/*
+ *	Virtual server facility functions
+ */
+void
+free_vs(virtual_server_t *vs)
+{
+	list_del_init(&vs->e_list);
+	FREE_CONST_PTR(vs->vsgname);
+	FREE_CONST_PTR(vs->virtualhost);
+	FREE_PTR(vs->s_svr);
+	free_rs_list(&vs->rs);
+	free_notify_script(&vs->notify_quorum_up);
+	free_notify_script(&vs->notify_quorum_down);
+	free_vs_checkers(vs);
+	FREE(vs);
+}
+
+static void
+free_vs_list(list_head_t *l)
+{
+	virtual_server_t *vs, *vs_tmp;
+
+	list_for_each_entry_safe(vs, vs_tmp, l, e_list)
+		free_vs(vs);
+}
+
+static void
+dump_vs(FILE *fp, const virtual_server_t *vs)
+{
 	conf_write(fp, " ------< Virtual server >------");
 	if (vs->vsgname)
 		conf_write(fp, " VS GROUP = %s", FMT_VS(vs));
@@ -318,6 +535,10 @@ dump_vs(FILE *fp, const void *data)
 		conf_write(fp, "   VirtualHost = %s", vs->virtualhost);
 	if (vs->af != AF_UNSPEC)
 		conf_write(fp, "   Address family = inet%s", vs->af == AF_INET ? "" : "6");
+	else if (vs->vsg && vs->vsg->have_ipv4 && vs->vsg->have_ipv6)
+		conf_write(fp, "   Address family = IPv4 & IPv6");
+	else
+		conf_write(fp, "   Address family = unknown");
 	conf_write(fp, "   connection timeout = %f", (double)vs->connection_to / TIMER_HZ);
 	conf_write(fp, "   delay_loop = %f", (double)vs->delay_loop / TIMER_HZ);
 	conf_write(fp, "   lvs_sched = %s", vs->sched);
@@ -407,7 +628,16 @@ dump_vs(FILE *fp, const void *data)
 	conf_write(fp, "   quorum_state_up = %d", vs->quorum_state_up);
 	conf_write(fp, "   reloaded = %d", vs->reloaded);
 
-	dump_list(fp, vs->rs);
+	dump_rs_list(fp, &vs->rs);
+}
+
+static void
+dump_vs_list(FILE *fp, const list_head_t *l)
+{
+	virtual_server_t *vs;
+
+	list_for_each_entry(vs, l, e_list)
+		dump_vs(fp, vs);
 }
 
 void
@@ -417,15 +647,16 @@ alloc_vs(const char *param1, const char *param2)
 	const char *port_str;
 	unsigned fwmark;
 
-	new = (virtual_server_t *) MALLOC(sizeof(virtual_server_t));
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->e_list);
 
 	new->af = AF_UNSPEC;
 
 	if (!strcmp(param1, "group"))
 		new->vsgname = STRDUP(param2);
 	else if (!strcmp(param1, "fwmark")) {
-		if (!read_unsigned(param2, &fwmark, 0, UINT32_MAX, true)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "virtual server fwmark '%s' must be in [0, %u] - ignoring", param2, UINT32_MAX);
+		if (!read_unsigned(param2, &fwmark, 0, IPVS_FWMARK_MAX, true)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "virtual server fwmark '%s' must be in [0, %u] - ignoring", param2, IPVS_FWMARK_MAX);
 			skip_block(true);
 			FREE(new);
 			return;
@@ -472,145 +703,25 @@ alloc_vs(const char *param1, const char *param2)
 	new->weight = 1;
 	new->smtp_alert = -1;
 	new->persistence_granularity = 0xffffffff;
+	INIT_LIST_HEAD(&new->rs);
 
-	list_add(check_data->vs, new);
+	list_add_tail(&new->e_list, &check_data->vs);
 }
 
 /* Sorry server facility functions */
 void
 alloc_ssvr(const char *ip, const char *port)
 {
-	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
-	const char *port_str;
-
-	/* inet_stosockaddr rejects port 0 */
-	port_str = (port && port[strspn(port, "0")]) ? port : NULL;
-
-	vs->s_svr = (real_server_t *) MALLOC(sizeof(real_server_t));
-	vs->s_svr->weight = 1;
-	vs->s_svr->iweight = 1;
-	vs->s_svr->forwarding_method = vs->forwarding_method;
-#ifdef _HAVE_IPVS_TUN_TYPE_
-	vs->s_svr->tun_type = vs->tun_type;
-	vs->s_svr->tun_port = vs->tun_port;
-#ifdef _HAVE_IPVS_TUN_CSUM_
-	vs->s_svr->tun_flags = vs->tun_flags;
-#endif
-#endif
-	if (inet_stosockaddr(ip, port_str, &vs->s_svr->addr)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Invalid sorry server IP address %s - skipping", ip);
-		FREE(vs->s_svr);
-		vs->s_svr = NULL;
-		return;
-	}
-}
-
-/* Real server facility functions */
-static void
-free_rs(void *data)
-{
-	real_server_t *rs = data;
-
-	free_notify_script(&rs->notify_up);
-	free_notify_script(&rs->notify_down);
-#ifdef _WITH_BFD_
-	free_list(&rs->tracked_bfds);
-#endif
-	FREE_CONST_PTR(rs->virtualhost);
-	FREE(rs);
-}
-
-static void
-dump_rs(FILE *fp, const void *data)
-{
-	const real_server_t *rs = data;
-#ifdef _WITH_BFD_
-	bfd_checker_t *cbfd;
-	element e;
-#endif
-
-	conf_write(fp, "   ------< Real server >------");
-	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d"
-			    , inet_sockaddrtos(&rs->addr)
-			    , ntohs(inet_sockaddrport(&rs->addr))
-			    , rs->weight);
-	dump_forwarding_method(fp, "", rs);
-
-	conf_write(fp, "   Alpha is %s", rs->alpha ? "ON" : "OFF");
-	conf_write(fp, "   connection timeout = %f", ((double)rs->connection_to) / TIMER_HZ);
-	conf_write(fp, "   connection limit range = %" PRIu32 " -> %" PRIu32, rs->l_threshold, rs->u_threshold);
-	conf_write(fp, "   Delay loop = %f" , (double)rs->delay_loop / TIMER_HZ);
-	if (rs->retry != UINT_MAX)
-		conf_write(fp, "   Retry count = %u" , rs->retry);
-	if (rs->delay_before_retry != ULONG_MAX)
-		conf_write(fp, "   Retry delay = %f" , (double)rs->delay_before_retry / TIMER_HZ);
-	if (rs->warmup != ULONG_MAX)
-		conf_write(fp, "   Warmup = %f", (double)rs->warmup / TIMER_HZ);
-	conf_write(fp, "   Inhibit on failure is %s", rs->inhibit ? "ON" : "OFF");
-
-	if (rs->notify_up)
-		conf_write(fp, "     RS up notify script = %s, uid:gid %u:%u",
-				cmd_str(rs->notify_up), rs->notify_up->uid, rs->notify_up->gid);
-	if (rs->notify_down)
-		conf_write(fp, "     RS down notify script = %s, uid:gid %u:%u",
-				cmd_str(rs->notify_down), rs->notify_down->uid, rs->notify_down->gid);
-	if (rs->virtualhost)
-		conf_write(fp, "    VirtualHost = %s", rs->virtualhost);
-	conf_write(fp, "   Using smtp notification = %s", rs->smtp_alert ? "yes" : "no");
-
-	conf_write(fp, "   initial weight = %d", rs->iweight);
-	conf_write(fp, "   previous weight = %d", rs->pweight);
-	conf_write(fp, "   alive = %d", rs->alive);
-	conf_write(fp, "   num failed checkers = %u", rs->num_failed_checkers);
-	conf_write(fp, "   RS set = %d", rs->set);
-	conf_write(fp, "   reloaded = %d", rs->reloaded);
-
-#ifdef _WITH_BFD_
-	if (!LIST_ISEMPTY(rs->tracked_bfds)) {
-		conf_write(fp, "=== Tracked BFDs ===");
-		LIST_FOREACH(rs->tracked_bfds, cbfd, e)
-			conf_write(fp, "     %s", cbfd->bfd->bname);
-	}
-#endif
-}
-
-void
-alloc_rs(const char *ip, const char *port)
-{
-	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
+	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
 	real_server_t *new;
 	const char *port_str;
 
 	/* inet_stosockaddr rejects port 0 */
 	port_str = (port && port[strspn(port, "0")]) ? port : NULL;
 
-	new = (real_server_t *) MALLOC(sizeof(real_server_t));
-	if (inet_stosockaddr(ip, port_str, &new->addr)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Invalid real server ip address/port %s/%s - skipping", ip, port);
-		skip_block(true);
-		FREE(new);
-		return;
-	}
-
-#ifndef LIBIPVS_USE_NL
-	if (new->addr.ss_family != AF_INET) {
-		report_config_error(CONFIG_GENERAL_ERROR, "IPVS does not support IPv6 in this build - skipping %s/%s", ip, port);
-		skip_block(true);
-		FREE(new);
-		return;
-	}
-#else
-#if !HAVE_DECL_IPVS_DEST_ATTR_ADDR_FAMILY
-	if (vs->af != AF_UNSPEC && new->addr.ss_family != vs->af) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Your kernel doesn't support mixed IPv4/IPv6 for virtual/real servers");
-		skip_block(true);
-		FREE(new);
-		return;
-	}
-#endif
-#endif
-
-	new->weight = INT_MAX;
+	PMALLOC(new);
+	new->weight = 1;
+	new->iweight = 1;
 	new->forwarding_method = vs->forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
 	new->tun_type = vs->tun_type;
@@ -619,47 +730,52 @@ alloc_rs(const char *ip, const char *port)
 	new->tun_flags = vs->tun_flags;
 #endif
 #endif
-	new->alpha = -1;
-	new->inhibit = -1;
-	new->connection_to = UINT_MAX;
-	new->delay_loop = ULONG_MAX;
-	new->warmup = ULONG_MAX;
-	new->retry = UINT_MAX;
-	new->delay_before_retry = ULONG_MAX;
-	new->virtualhost = NULL;
-	new->smtp_alert = -1;
+	if (inet_stosockaddr(ip, port_str, &new->addr)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid sorry server IP address %s - skipping", ip);
+		FREE(new);
+		return;
+	}
 
-// ??? alloc list in alloc_vs
-	if (!LIST_EXISTS(vs->rs))
-		vs->rs = alloc_list(free_rs, dump_rs);
-	list_add(vs->rs, new);
-
-	clear_dynamic_misc_check_flag();
+	vs->s_svr = new;
 }
 
 #ifdef _WITH_BFD_
 /* Track bfd dump */
 static void
-dump_checker_bfd(FILE *fp, const void *track_data)
+dump_checker_bfd(FILE *fp, const checker_tracked_bfd_t *cbfd)
 {
-	const checker_tracked_bfd_t *cbfd = track_data;
-
 	conf_write(fp, " Checker Track BFD = %s", cbfd->bname);
 //	conf_write(fp, "   Weight = %d", cbfd->weight);
-	conf_write(fp, "   Tracking RS = %u", cbfd->tracking_rs ? LIST_SIZE(cbfd->tracking_rs) : 0);
-	if (cbfd->tracking_rs)
-		dump_list(fp, cbfd->tracking_rs);
+	conf_write(fp, "   Tracking RS :");
+	dump_bfds_rs_list(fp, &cbfd->tracking_rs);
 }
-
 static void
-free_checker_bfd(void *track_data)
+dump_checker_bfd_list(FILE *fp, const list_head_t *l)
 {
-	checker_tracked_bfd_t *cbfd = track_data;
+	checker_tracked_bfd_t *cbfd;
 
-	FREE(cbfd->bname);
-	free_list(&cbfd->tracking_rs);
-	FREE(track_data);
+	list_for_each_entry(cbfd, l, e_list)
+		dump_checker_bfd(fp, cbfd);
+
 }
+
+void
+free_checker_bfd(checker_tracked_bfd_t *cbfd)
+{
+	list_del_init(&cbfd->e_list);
+	FREE(cbfd->bname);
+	free_bfds_rs_list(&cbfd->tracking_rs);
+	FREE(cbfd);
+}
+static void
+free_checker_bfd_list(list_head_t *l)
+{
+	checker_tracked_bfd_t *cbfd, *cbfd_tmp;
+
+	list_for_each_entry_safe(cbfd, cbfd_tmp, l, e_list)
+		free_checker_bfd(cbfd);
+}
+
 #endif
 
 /* data facility functions */
@@ -668,11 +784,12 @@ alloc_check_data(void)
 {
 	check_data_t *new;
 
-	new = (check_data_t *) MALLOC(sizeof(check_data_t));
-	new->vs = alloc_list(free_vs, dump_vs);
-	new->vs_group = alloc_list(free_vsg, dump_vsg);
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->vs);
+	INIT_LIST_HEAD(&new->vs_group);
+	INIT_LIST_HEAD(&new->track_files);
 #ifdef _WITH_BFD_
-	new->track_bfds = alloc_list(free_checker_bfd, dump_checker_bfd);
+	INIT_LIST_HEAD(&new->track_bfds);
 #endif
 
 	return new;
@@ -681,10 +798,11 @@ alloc_check_data(void)
 void
 free_check_data(check_data_t *data)
 {
-	free_list(&data->vs);
-	free_list(&data->vs_group);
+	free_vs_list(&data->vs);
+	free_vsg_list(&data->vs_group);
+	free_track_file_list(&data->track_files);
 #ifdef _WITH_BFD_
-	free_list(&data->track_bfds);
+	free_checker_bfd_list(&data->track_bfds);
 #endif
 	FREE(data);
 }
@@ -696,20 +814,26 @@ dump_check_data(FILE *fp, const check_data_t *data)
 		conf_write(fp, "------< SSL definitions >------");
 		dump_ssl(fp);
 	}
-	if (!LIST_ISEMPTY(data->vs)) {
+
+	if (!list_empty(&data->vs)) {
 		conf_write(fp, "------< LVS Topology >------");
-		conf_write(fp, " System is compiled with LVS v%d.%d.%d",
-		       NVERSION(IP_VS_VERSION_CODE));
-		if (!LIST_ISEMPTY(data->vs_group))
-			dump_list(fp, data->vs_group);
-		dump_list(fp, data->vs);
+		conf_write(fp, " System is compiled with LVS v%d.%d.%d"
+			     , NVERSION(IP_VS_VERSION_CODE));
+		if (!list_empty(&data->vs_group))
+			dump_vsg_list(fp, &data->vs_group);
+		dump_vs_list(fp, &data->vs);
 	}
 	dump_checkers_queue(fp);
 
+	if (!list_empty(&data->track_files)) {
+		conf_write(fp, "------< Checker track files >------");
+		dump_track_file_list(fp, &data->track_files);
+	}
+
 #ifdef _WITH_BFD_
-	if (!LIST_ISEMPTY(data->track_bfds)) {
+	if (!list_empty(&data->track_bfds)) {
 		conf_write(fp, "------< Checker track BFDs >------");
-		dump_list(fp, data->track_bfds);
+		dump_checker_bfd_list(fp, &data->track_bfds);
 	}
 #endif
 }
@@ -779,28 +903,23 @@ format_rs(const real_server_t *rs, const virtual_server_t *vs)
 static void
 check_check_script_security(void)
 {
-	element e, e1;
 	virtual_server_t *vs;
 	real_server_t *rs;
-	int script_flags;
+	unsigned script_flags;
 	magic_t magic;
 
-	if (LIST_ISEMPTY(check_data->vs))
+	if (list_empty(&check_data->vs))
 		return;
 
 	magic = ka_magic_open();
 
 	script_flags = check_misc_script_security(magic);
 
-	for (e = LIST_HEAD(check_data->vs); e; ELEMENT_NEXT(e)) {
-		vs = ELEMENT_DATA(e);
-
+	list_for_each_entry(vs, &check_data->vs, e_list) {
 		script_flags |= check_notify_script_secure(&vs->notify_quorum_up, magic);
 		script_flags |= check_notify_script_secure(&vs->notify_quorum_down, magic);
 
-		for (e1 = LIST_HEAD(vs->rs); e1; ELEMENT_NEXT(e1)) {
-			rs = ELEMENT_DATA(e1);
-
+		list_for_each_entry(rs, &vs->rs, e_list) {
 			script_flags |= check_notify_script_secure(&rs->notify_up, magic);
 			script_flags |= check_notify_script_secure(&rs->notify_down, magic);
 		}
@@ -820,28 +939,27 @@ check_check_script_security(void)
 		ka_magic_close(magic);
 }
 
-bool validate_check_config(void)
+bool
+validate_check_config(void)
 {
-	element e, e1, e2;
-	virtual_server_t *vs;
+	virtual_server_t *vs, *vs_tmp;
 	virtual_server_group_entry_t *vsge;
-	real_server_t *rs, *rs1;
+	real_server_t *rs, *rs_tmp, *rs1;
 	checker_t *checker;
-	element next_vs, next_rs;
 	unsigned weight_sum;
 	bool rs_removed;
 
 	using_ha_suspend = false;
-	LIST_FOREACH_NEXT(check_data->vs, vs, e, next_vs) {
-		if (!vs->rs || LIST_ISEMPTY(vs->rs)) {
+	list_for_each_entry_safe(vs, vs_tmp, &check_data->vs, e_list) {
+		if (list_empty(&vs->rs)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s has no real servers - ignoring", FMT_VS(vs));
-			free_list_element(check_data->vs, e);
+			free_vs(vs);
 			continue;
 		}
 
 		/* Ensure that ha_suspend is not set for any virtual server using fwmarks */
 		if (vs->ha_suspend &&
-		    (vs->vfwmark || (vs->vsg && !LIST_ISEMPTY(vs->vsg->vfwmark)))) {
+		    (vs->vfwmark || (vs->vsg && !list_empty(&vs->vsg->vfwmark)))) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s: cannot use ha_suspend with fwmarks - clearing ha_suspend", FMT_VS(vs));
 			vs->ha_suspend = false;
 		}
@@ -850,7 +968,7 @@ bool validate_check_config(void)
 			using_ha_suspend = true;
 
 		/* If the virtual server is specified by address (rather than fwmark), make some further checks */
-		if ((vs->vsg && !LIST_ISEMPTY(vs->vsg->addr_range)) ||
+		if ((vs->vsg && !list_empty(&vs->vsg->addr_range)) ||
 		    (!vs->vsg && !vs->vfwmark)) {
 			/* Check protocol set */
 			if (!vs->service_type) {
@@ -882,7 +1000,7 @@ bool validate_check_config(void)
 		 * make sure all the address blocks have a port, otherwise set
 		 * persistence. */
 		if (!vs->persistence_timeout && vs->vsg) {
-			LIST_FOREACH(vs->vsg->addr_range, vsge, e1) {
+			list_for_each_entry(vsge, &vs->vsg->addr_range, e_list) {
 				if (!inet_sockaddrport(&vsge->addr)) {
 					report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s: zero port only valid for persistent services - setting", FMT_VS(vs));
 					vs->persistence_timeout = IPVS_SVC_PERSISTENT_TIMEOUT;
@@ -893,7 +1011,7 @@ bool validate_check_config(void)
 
 		/* A virtual server using fwmarks will ignore any protocol setting, so warn if one is set */
 		if (vs->service_type &&
-		    ((vs->vsg && LIST_ISEMPTY(vs->vsg->addr_range) && !LIST_ISEMPTY(vs->vsg->vfwmark)) ||
+		    ((vs->vsg && list_empty(&vs->vsg->addr_range) && !list_empty(&vs->vsg->vfwmark)) ||
 		     (!vs->vsg && vs->vfwmark)))
 			report_config_error(CONFIG_GENERAL_ERROR, "Warning: Virtual server %s: protocol specified for fwmark - protocol will be ignored", FMT_VS(vs));
 
@@ -915,15 +1033,16 @@ bool validate_check_config(void)
 
 		/* Spin through all the real servers */
 		weight_sum = 0;
-		LIST_FOREACH_NEXT(vs->rs, rs, e1, next_rs) {
+		list_for_each_entry_safe(rs, rs_tmp, &vs->rs, e_list) {
 			/* Check the real server is not a duplicate of any rs earlier in the list */
 			rs_removed = false;
-			LIST_FOREACH(vs->rs, rs1, e2) {
+			list_for_each_entry(rs1, &vs->rs, e_list) {
 				if (rs == rs1)
 					break;
 				if (rs_iseq(rs, rs1)) {
 					report_config_error(CONFIG_GENERAL_ERROR, "VS %s: real server %s is duplicated - removing second rs", FMT_VS(vs), FMT_RS(rs, vs));
-					free_list_element(vs->rs, e1);
+					free_rs(rs);
+					vs->rs_cnt--;
 					rs_removed = true;
 					break;
 				}
@@ -993,6 +1112,21 @@ bool validate_check_config(void)
 			}
 		}
 
+		if (vs->s_svr && vs->s_svr->forwarding_method == IP_VS_CONN_F_FWD_MASK) {
+			if (vs->forwarding_method == IP_VS_CONN_F_FWD_MASK) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s: no forwarding method set, setting default NAT", FMT_VS(vs));
+				vs->forwarding_method = IP_VS_CONN_F_MASQ;
+			}
+			vs->s_svr->forwarding_method = vs->forwarding_method;
+#ifdef _HAVE_IPVS_TUN_TYPE_
+			vs->s_svr->tun_type = vs->tun_type;
+			vs->s_svr->tun_port = vs->tun_port;
+#ifdef _HAVE_IPVS_TUN_CSUM_
+			vs->s_svr->tun_flags = vs->tun_flags;
+#endif
+#endif
+		}
+
 		/* Check that the quorum isn't higher than the total weight of
 		 * the real servers, otherwise we will never be able to come up. */
 		if (vs->quorum > weight_sum) {
@@ -1010,8 +1144,8 @@ bool validate_check_config(void)
 		/* Now check that, unless using NAT, real and virtual servers have the same port.
 		 * Also if a fwmark is used, ensure that unless NAT, the real server port is 0. */
 		if (vs->vsg) {
-			if (!LIST_ISEMPTY(vs->vsg->vfwmark)) {
-				LIST_FOREACH(vs->rs, rs, e1) {
+			if (!list_empty(&vs->vsg->vfwmark)) {
+				list_for_each_entry(rs, &vs->rs, e_list) {
 					if (rs->forwarding_method == IP_VS_CONN_F_MASQ)
 						continue;
 					if (inet_sockaddrport(&rs->addr))
@@ -1021,8 +1155,8 @@ bool validate_check_config(void)
 				    inet_sockaddrport(&vs->s_svr->addr))
 					report_config_error(CONFIG_GENERAL_ERROR, "WARNING - fwmark virtual server %s, sorry server has port specified - port will be ignored", FMT_VS(vs));
 			}
-			LIST_FOREACH(vs->vsg->addr_range, vsge, e1) {
-				LIST_FOREACH(vs->rs, rs, e2) {
+			list_for_each_entry(vsge, &vs->vsg->addr_range, e_list) {
+				list_for_each_entry(rs, &vs->rs, e_list) {
 					if (rs->forwarding_method == IP_VS_CONN_F_MASQ)
 						continue;
 					if (inet_sockaddrport(&rs->addr) &&
@@ -1036,7 +1170,7 @@ bool validate_check_config(void)
 			}
 		} else {
 			/* We can also correct errors here */
-			LIST_FOREACH(vs->rs, rs, e1) {
+			list_for_each_entry(rs, &vs->rs, e_list) {
 				if (rs->forwarding_method == IP_VS_CONN_F_MASQ) {
 					if (!vs->vfwmark && !inet_sockaddrport(&rs->addr))
 						inet_set_sockaddrport(&rs->addr, inet_sockaddrport(&vs->addr));
@@ -1077,8 +1211,7 @@ bool validate_check_config(void)
 		}
 	}
 
-	LIST_FOREACH(checkers_queue, checker, e)
-	{
+	list_for_each_entry(checker, &checkers_queue, e_list) {
 		/* Ensure any checkers that don't have ha_suspend set are enabled */
 		if (!checker->vs->ha_suspend)
 			checker->enabled = true;

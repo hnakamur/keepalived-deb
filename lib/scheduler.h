@@ -31,9 +31,11 @@
 #ifdef _WITH_SNMP_
 #include <sys/select.h>
 #endif
+#ifdef THREAD_DUMP
+#include <stdio.h>
+#endif
 
 #include "timer.h"
-#include "list.h"
 #include "list_head.h"
 #include "rbtree.h"
 
@@ -47,7 +49,7 @@ typedef enum {
 #define THREAD_MAX_WAITING THREAD_CHILD
 	THREAD_UNUSED,		/* thread_master.unuse list_head */
 
-	/* The following are all on the thread_master.next list_head */
+	/* The following are all on the thread_master.e_list list_head */
 	THREAD_READY,
 	THREAD_EVENT,
 	THREAD_WRITE_TIMEOUT,
@@ -79,7 +81,7 @@ enum thread_flags {
 
 typedef struct _thread thread_t;
 typedef const thread_t * thread_ref_t;
-typedef int (*thread_func_t)(thread_ref_t);
+typedef void (*thread_func_t)(thread_ref_t);
 
 /* Thread itself. */
 struct _thread {
@@ -104,7 +106,7 @@ struct _thread {
 
 	union {
 		rb_node_t n;
-		list_head_t next;
+		list_head_t e_list;
 	};
 
 	rb_node_t rb_data;		/* PID or fd/vrid */
@@ -128,10 +130,12 @@ typedef struct _thread_master {
 	rb_root_cached_t	child;
 	list_head_t		event;
 #ifdef USE_SIGNAL_THREADS
-	list_head_t 		signal;
+	list_head_t		signal;
 #endif
 	list_head_t		ready;
 	list_head_t		unuse;
+
+	thread_t		*current_thread;
 
 	/* child process related */
 	rb_root_t		child_pid;
@@ -213,12 +217,16 @@ extern bool do_epoll_debug;
 #ifdef _EPOLL_THREAD_DUMP_
 extern bool do_epoll_thread_dump;
 #endif
+#ifdef _SCRIPT_DEBUG_
+extern bool do_script_debug;
+#endif
 
 /* Prototypes. */
 extern void set_child_finder_name(char const * (*)(pid_t));
 extern void save_cmd_line_options(int, char * const *);
 extern void log_command_line(unsigned);
 #ifndef _ONE_PROCESS_DEBUG_
+extern unsigned calc_restart_delay(const timeval_t *, unsigned *, const char *);
 extern bool report_child_status(int, pid_t, const char *);
 #endif
 extern thread_master_t *thread_make_master(void);
@@ -231,10 +239,10 @@ extern void thread_cleanup_master(thread_master_t *);
 extern void thread_destroy_master(thread_master_t *);
 extern thread_ref_t thread_add_read_sands(thread_master_t *, thread_func_t, void *, int, const timeval_t *, bool);
 extern thread_ref_t thread_add_read(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
-extern int thread_del_read(thread_ref_t);
+extern void thread_del_read(thread_ref_t);
 extern void thread_requeue_read(thread_master_t *, int, const timeval_t *);
 extern thread_ref_t thread_add_write(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
-extern int thread_del_write(thread_ref_t);
+extern void thread_del_write(thread_ref_t);
 extern void thread_close_fd(thread_ref_t);
 extern thread_ref_t thread_add_timer(thread_master_t *, thread_func_t, void *, unsigned long);
 extern void timer_thread_update_timeout(thread_ref_t, unsigned long);
@@ -245,8 +253,9 @@ extern thread_ref_t thread_add_event(thread_master_t *, thread_func_t, void *, i
 extern void thread_cancel(thread_ref_t);
 extern void thread_cancel_read(thread_master_t *, int);
 #ifdef _WITH_SNMP_
-extern int snmp_timeout_thread(thread_ref_t);
-extern void snmp_epoll_reset(thread_master_t *);
+extern void snmp_timeout_thread(thread_ref_t);
+extern void snmp_epoll_info(thread_master_t *);
+extern void snmp_epoll_clear(thread_master_t *);
 #endif
 extern void process_threads(thread_master_t *);
 extern void thread_child_handler(void *, int);
