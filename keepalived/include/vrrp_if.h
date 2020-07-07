@@ -43,7 +43,7 @@
 
 /* local includes */
 #include "scheduler.h"
-#include "list.h"
+#include "list_head.h"
 #include "timer.h"
 
 #define LINK_UP   1
@@ -56,6 +56,9 @@
 #define LB_MII     0x2
 #define LB_ETHTOOL 0x4
 #endif
+
+/* We need a default MTU in case a vrrp instance using usicast doesn't specify an interface */
+#define	DEFAULT_MTU	1500
 
 /* I don't know what the correct type is.
  * The kernel has ifindex in the range [1, INT_MAX], but IFLA_LINK is defined
@@ -75,7 +78,21 @@ typedef struct _garp_delay {
 	timeval_t		garp_next_time;		/* Time when next gratuitous ARP message can be sent */
 	timeval_t		gna_next_time;		/* Time when next gratuitous NA message can be sent */
 	int			aggregation_group;	/* Index of multi-interface group */
+
+	/* linked list member */
+	list_head_t		e_list;
 } garp_delay_t;
+
+typedef struct _sin_addr {
+	union {
+		struct in_addr	sin_addr;		/* IPv4 address */
+		struct in6_addr	sin6_addr;		/* IPv6 address */
+	} u;
+
+	/* linked list member */
+	list_head_t	e_list;
+} sin_addr_t;
+
 
 #ifdef _HAVE_VRRP_VMAC_
 typedef enum {
@@ -90,9 +107,9 @@ typedef enum {
 } if_type_t;
 
 #ifdef _HAVE_VRRP_IPVLAN_
-#define IS_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN || (IFP)->if_type == IF_TYPE_IPVLAN)
+#define IS_MAC_IP_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN || (IFP)->if_type == IF_TYPE_IPVLAN)
 #else
-#define IS_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN)
+#define IS_MAC_IP_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN)
 #endif
 
 #endif
@@ -112,8 +129,8 @@ typedef struct _interface {
 #ifdef _WITH_VRRP_
 	struct in_addr		sin_addr;		/* IPv4 primary IPv4 address */
 	struct in6_addr		sin6_addr;		/* IPv6 primary link local address */
-	list			sin_addr_l;		/* List of extra IPv4 interface addresses - struct in_addr */
-	list			sin6_addr_l;		/* List of extra IPv6 interface addresses - struct in6_addr */
+	list_head_t		sin_addr_l;		/* List of extra IPv4 interface addresses - sin_addr_t */
+	list_head_t		sin6_addr_l;		/* List of extra IPv6 interface addresses - sin_addr_t */
 #endif
 	unsigned		ifi_flags;		/* Kernel flags */
 	uint32_t		mtu;			/* MTU for this interface_t */
@@ -151,7 +168,10 @@ typedef struct _interface {
 	bool			gna_router;		/* Router flag for NA messages */
 	bool			promote_secondaries;	/* Original value of promote_secondaries to be restored */
 	uint32_t		reset_promote_secondaries; /* Count of how many vrrps have changed promote_secondaries on interface */
-	list			tracking_vrrp;		/* List of tracking_vrrp_t for vrrp instances tracking this interface */
+	list_head_t		tracking_vrrp;		/* tracking_obj_t - vrrp instances tracking this interface */
+
+	/* linked list member */
+	list_head_t		e_list;
 } interface_t;
 
 /* Tracked interface structure definition */
@@ -159,6 +179,9 @@ typedef struct _tracked_if {
 	int			weight;		/* tracking weight when non-zero */
 	bool			weight_reverse; /* which direction is the weight applied */
 	interface_t		*ifp;		/* interface backpointer, cannot be NULL */
+
+	/* linked list member */
+	list_head_t		e_list;
 } tracked_if_t;
 
 /* Macros */
@@ -194,26 +217,31 @@ typedef enum if_lookup {
 } if_lookup_t;
 
 /* Global data */
-extern list garp_delay;
+extern list_head_t garp_delay;
 
 /* prototypes */
 extern interface_t *if_get_by_ifindex(ifindex_t) __attribute__ ((pure));
+extern interface_t *get_default_if(void);
 extern interface_t *if_get_by_ifname(const char *, if_lookup_t);
-extern list get_if_list(void) __attribute__ ((pure));
-extern void reset_interface_queue(void);
-extern void alloc_garp_delay(void);
+extern sin_addr_t *if_extra_ipaddress_alloc(interface_t *, void *, unsigned char);
+extern void if_extra_ipaddress_free(sin_addr_t *);
+extern void if_extra_ipaddress_free_list(list_head_t *);
+extern void dump_garp_delay_list(FILE *, list_head_t *);
+extern void free_garp_delay(garp_delay_t *);
+extern garp_delay_t *alloc_garp_delay(void);
 extern void set_default_garp_delay(void);
-extern void if_add_queue(interface_t *);
 extern void init_interface_queue(void);
 #ifdef _WITH_LINKBEAT_
 extern void init_interface_linkbeat(void);
 extern void close_interface_linkbeat(void);
 #endif
+extern list_head_t *get_interface_queue(void) __attribute__ ((const));
 extern void free_interface_queue(void);
 extern void free_old_interface_queue(void);
-extern int if_join_vrrp_group(sa_family_t, int *, interface_t *);
-extern int if_leave_vrrp_group(sa_family_t, int, interface_t *);
-extern int if_setsockopt_bindtodevice(int *, interface_t *);
+extern void dump_interface_queue(FILE *, list_head_t *);
+extern void reset_interface_queue(void);
+extern int if_join_vrrp_group(sa_family_t, int *, const interface_t *);
+extern int if_setsockopt_bindtodevice(int *, const interface_t *);
 extern int if_setsockopt_hdrincl(int *);
 extern int if_setsockopt_ipv6_checksum(int *);
 #if HAVE_DECL_IP_MULTICAST_ALL  /* Since Linux 2.6.31 */
@@ -221,14 +249,14 @@ extern int if_setsockopt_mcast_all(sa_family_t, int *);
 #endif
 extern int if_setsockopt_mcast_loop(sa_family_t, int *);
 extern int if_setsockopt_mcast_hops(sa_family_t, int *);
-extern int if_setsockopt_mcast_if(sa_family_t, int *, interface_t *);
+extern int if_setsockopt_mcast_if(sa_family_t, int *, const interface_t *);
 extern int if_setsockopt_priority(int *, int);
 extern int if_setsockopt_rcvbuf(int *, int);
 extern int if_setsockopt_no_receive(int *);
 extern void interface_up(interface_t *);
 extern void interface_down(interface_t *);
 extern void cleanup_lost_interface(interface_t *);
-extern int recreate_vmac_thread(thread_ref_t);
+extern void recreate_vmac_thread(thread_ref_t);
 void update_mtu(interface_t *);
 extern void update_added_interface(interface_t *);
 #ifdef THREAD_DUMP

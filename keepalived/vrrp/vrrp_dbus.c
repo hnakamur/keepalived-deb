@@ -78,6 +78,7 @@ typedef enum dbus_action {
 	DBUS_ACTION_NONE,
 	DBUS_PRINT_DATA,
 	DBUS_PRINT_STATS,
+	DBUS_PRINT_STATS_CLEAR,
 	DBUS_RELOAD,
 #ifdef _WITH_DBUS_CREATE_INSTANCE_
 	DBUS_CREATE_INSTANCE,
@@ -116,6 +117,7 @@ typedef struct dbus_queue_ent {
 static bool dbus_running;
 
 /* Global file variables */
+static const char * const no_interface = "none";
 static GDBusNodeInfo *vrrp_introspection_data = NULL;
 static GDBusNodeInfo *vrrp_instance_introspection_data = NULL;
 static GDBusConnection *global_connection;
@@ -183,6 +185,10 @@ state_str(int state)
 		return "Master";
 	case VRRP_STATE_FAULT:
 		return "Fault";
+	case VRRP_STATE_STOP:
+		return "Stop";
+	case VRRP_STATE_DELETED:
+		return "Deleted";
 	}
 	return "Unknown";
 }
@@ -190,18 +196,13 @@ state_str(int state)
 static vrrp_t * __attribute__ ((pure))
 get_vrrp_instance(const char *ifname, int vrid, int family)
 {
-	element e;
 	vrrp_t *vrrp;
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
-		return NULL;
-
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-
-		if (vrrp->vrid == vrid &&
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (vrrp->ifp &&
+		    vrrp->vrid == vrid &&
 		    vrrp->family == family &&
-		    !valid_path_cmp(IF_BASE_IFP(vrrp->ifp)->ifname, ifname))
+		    !valid_path_cmp(VRRP_CONFIGURED_IFP(vrrp)->ifname, ifname))
 			return vrrp;
 	}
 
@@ -402,6 +403,11 @@ handle_method_call(__attribute__((unused)) GDBusConnection *connection,
 			process_method_call(&ent);
 			g_dbus_method_invocation_return_value(invocation, NULL);
 		}
+		else if (g_strcmp0(method_name, "PrintStatsClear") == 0) {
+			ent.action = DBUS_PRINT_STATS_CLEAR;
+			process_method_call(&ent);
+			g_dbus_method_invocation_return_value(invocation, NULL);
+		}
 		else if (g_strcmp0(method_name, "ReloadConfig") == 0) {
 			g_dbus_method_invocation_return_value(invocation, NULL);
 			kill(getppid(), SIGHUP);
@@ -510,7 +516,7 @@ dbus_create_object_params(const char *instance_name, const char *interface_name,
 static void
 dbus_create_object(vrrp_t *vrrp)
 {
-	dbus_create_object_params(vrrp->iname, IF_NAME(IF_BASE_IFP(vrrp->ifp)), vrrp->vrid, vrrp->family, false);
+	dbus_create_object_params(vrrp->iname, vrrp->ifp ? IF_NAME(VRRP_CONFIGURED_IFP(vrrp)) : no_interface, vrrp->vrid, vrrp->family, false);
 }
 
 static bool
@@ -544,7 +550,6 @@ on_bus_acquired(GDBusConnection *connection,
 	global_connection = connection;
 	gchar *path;
 	vrrp_t *vrrp;
-	element e;
 	GError *local_error = NULL;
 	guint vrrp_guint;
 
@@ -564,10 +569,10 @@ on_bus_acquired(GDBusConnection *connection,
 	g_free(path);
 
 	/* for each available VRRP instance, register an object */
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return;
 
-	LIST_FOREACH(vrrp_data->vrrp, vrrp, e)
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list)
 		dbus_create_object(vrrp);
 
 	/* Send a signal to say we have started */
@@ -576,7 +581,7 @@ on_bus_acquired(GDBusConnection *connection,
 	g_free(path);
 
 	/* Notify DBus of the state of our instances */
-	LIST_FOREACH(vrrp_data->vrrp, vrrp, e)
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list)
 		dbus_send_state_signal(vrrp);
 }
 
@@ -717,7 +722,7 @@ dbus_send_state_signal(vrrp_t *vrrp)
 	if (global_connection == NULL)
 		return;
 
-	object_path = dbus_object_create_path_instance(IF_NAME(IF_BASE_IFP(vrrp->ifp)), vrrp->vrid, vrrp->family);
+	object_path = dbus_object_create_path_instance(vrrp->ifp ? IF_NAME(VRRP_CONFIGURED_IFP(vrrp)) : no_interface, vrrp->vrid, vrrp->family);
 
 	args = g_variant_new("(u)", vrrp->state);
 	dbus_emit_signal(global_connection, object_path, DBUS_VRRP_INSTANCE_INTERFACE, "VrrpStatusChange", args);
@@ -762,7 +767,7 @@ dbus_remove_object(const vrrp_t *vrrp)
 	dbus_unregister_object(vrrp->iname);
 }
 
-static int
+static void
 handle_dbus_msg(__attribute__((unused)) thread_ref_t thread)
 {
 	dbus_queue_ent_t *ent;
@@ -785,7 +790,11 @@ handle_dbus_msg(__attribute__((unused)) thread_ref_t thread)
 		}
 		else if (ent->action == DBUS_PRINT_STATS) {
 			log_message(LOG_INFO, "Printing VRRP stats on DBus request");
-			vrrp_print_stats();
+			vrrp_print_stats(false);
+		}
+		else if (ent->action == DBUS_PRINT_STATS_CLEAR) {
+			log_message(LOG_INFO, "Printing and clearing VRRP stats on DBus request");
+			vrrp_print_stats(true);
 		}
 #ifdef _WITH_DBUS_CREATE_INSTANCE_
 		else if (ent->action == DBUS_CREATE_INSTANCE) {
@@ -830,31 +839,29 @@ handle_dbus_msg(__attribute__((unused)) thread_ref_t thread)
 	}
 
 	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
-
-	return 0;
 }
 
 void
-dbus_reload(list o, list n)
+dbus_reload(const list_head_t *o, const list_head_t *n)
 {
-	element e1, e2;
 	vrrp_t *vrrp_n, *vrrp_o;
 
 	if (!dbus_running)
 		return;
 
-	LIST_FOREACH(n, vrrp_n, e1) {
-		char *n_name;
+	list_for_each_entry(vrrp_n, n, e_list) {
+		const char *n_name;
 		bool match_found;
 
-		n_name = IF_BASE_IFP(vrrp_n->ifp)->ifname;
+		n_name = vrrp_n->ifp ? VRRP_CONFIGURED_IFP(vrrp_n)->ifname : no_interface;
 
 		/* Try and find an instance with same vrid/family/interface that existed before and now */
 		match_found = false;
-		LIST_FOREACH(o, vrrp_o, e2) {
+		list_for_each_entry(vrrp_o, o, e_list) {
 			if (vrrp_n->vrid == vrrp_o->vrid &&
 			    vrrp_n->family == vrrp_o->family &&
-			    !strcmp(n_name, IF_BASE_IFP(vrrp_o->ifp)->ifname)) {
+// TODO - need to match on unicast_src if no interface
+			    !strcmp(n_name, VRRP_CONFIGURED_IFP(vrrp_o)->ifname)) {
 				/* If the old instance exists in the new config,
 				 * then the dbus object will exist */
 				if (!strcmp(vrrp_n->iname, vrrp_o->iname)) {
@@ -877,7 +884,7 @@ dbus_reload(list o, list n)
 
 				/* Check if the old instance name we found still exists
 				 * (but has a different vrid/family/interface) */
-				LIST_FOREACH(n, vrrp_n3, e3) {
+				list_for_each_entry(vrrp_n3, n, e_list) {
 					if (!strcmp(vrrp_o->iname, vrrp_n3->iname)) {
 						match_found = true;
 						break;

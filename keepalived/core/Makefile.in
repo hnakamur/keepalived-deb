@@ -100,9 +100,12 @@ POST_UNINSTALL = :
 @LIBNL_DYNAMIC_TRUE@am__append_6 = libnl_link.c
 @CN_PROC_TRUE@am__append_7 = track_process.o
 @CN_PROC_TRUE@am__append_8 = track_process.c
+@ONE_PROCESS_DEBUG_FALSE@am__append_9 = reload_monitor.o
+@ONE_PROCESS_DEBUG_FALSE@am__append_10 = reload_monitor.c
 subdir = keepalived/core
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
+	$(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -118,13 +121,13 @@ am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 libcore_a_AR = $(AR) $(ARFLAGS)
 libcore_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
-	$(am__append_5) $(am__append_7)
+	$(am__append_5) $(am__append_7) $(am__append_9)
 am_libcore_a_OBJECTS = main.$(OBJEXT) daemon.$(OBJEXT) \
 	pidfile.$(OBJEXT) layer4.$(OBJEXT) smtp.$(OBJEXT) \
 	global_data.$(OBJEXT) global_parser.$(OBJEXT) \
 	keepalived_netlink.$(OBJEXT)
 am__EXTRA_libcore_a_SOURCES_DIST = snmp.c namespaces.c libnl_link.c \
-	track_process.c
+	track_process.c reload_monitor.c
 libcore_a_OBJECTS = $(am_libcore_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -139,7 +142,7 @@ am__v_at_ = $(am__v_at_@AM_DEFAULT_V@)
 am__v_at_0 = @
 am__v_at_1 = 
 DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)/lib
-depcomp = $(SHELL) $(top_srcdir)/depcomp
+depcomp = $(SHELL) $(top_srcdir)/build-aux/depcomp
 am__depfiles_maybe = depfiles
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
@@ -181,7 +184,8 @@ am__define_uniq_tagged_files = \
   done | $(am__uniquify_input)`
 ETAGS = etags
 CTAGS = ctags
-am__DIST_COMMON = $(srcdir)/Makefile.in $(top_srcdir)/depcomp
+am__DIST_COMMON = $(srcdir)/Makefile.in \
+	$(top_srcdir)/build-aux/depcomp
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 ACLOCAL = @ACLOCAL@
 AMTAR = @AMTAR@
@@ -239,11 +243,11 @@ PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_URL = @PACKAGE_URL@
 PACKAGE_VERSION = @PACKAGE_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
-PID_DIR = @PID_DIR@
 PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
+RUN_DIR = @RUN_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -296,9 +300,9 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-AM_CPPFLAGS = $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS) \
-	-DLOCAL_STATE_DIR=\"@localstatedir@\" -I$(srcdir)/../include \
-	-I$(srcdir)/../../lib
+AM_CPPFLAGS = -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib \
+	$(KA_CPPFLAGS) $(DEBUG_CPPFLAGS) \
+	-DLOCAL_STATE_DIR=\"@localstatedir@\"
 AM_CFLAGS = $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBS		= $(KA_LIBS)
@@ -308,9 +312,9 @@ libcore_a_SOURCES = main.c daemon.c pidfile.c layer4.c smtp.c \
 			  global_data.c global_parser.c keepalived_netlink.c
 
 libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
-	$(am__append_7)
+	$(am__append_7) $(am__append_9)
 EXTRA_libcore_a_SOURCES = $(am__append_2) $(am__append_4) \
-	$(am__append_6) $(am__append_8)
+	$(am__append_6) $(am__append_8) $(am__append_10)
 all: all-am
 
 .SUFFIXES:
@@ -368,6 +372,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/main.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/namespaces.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pidfile.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/reload_monitor.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/snmp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/track_process.Po@am__quote@

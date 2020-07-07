@@ -23,6 +23,9 @@
 /* Define if enabling logging to files */
 #undef ENABLE_LOG_TO_FILE
 
+/* Define to 1 if linux/errqueue.h needs sys/time.h */
+#undef ERRQUEUE_NEEDS_SYS_TIME
+
 /* Defined here if not found in <net/ethernet.h>. */
 #undef ETHERTYPE_IPV6
 
@@ -543,6 +546,9 @@
 /* Define to 1 if you have the <sys/types.h> header file. */
 #undef HAVE_SYS_TYPES_H
 
+/* Define to 1 if have timegm() */
+#undef HAVE_TIMEGM
+
 /* Define to 1 if you have the `TLS_method' function. */
 #undef HAVE_TLS_METHOD
 
@@ -646,9 +652,6 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* Parent directory of /run */
-#undef PID_DIR_ROOT
-
 /* Define to zu if msghdr.msg_controllen is size_t, else u */
 #undef PRI_MSG_CONTROLLEN
 
@@ -657,6 +660,9 @@
 
 /* Define to 1 if <linux/rtnetlink.h> needs <sys/socket.h> */
 #undef RTNETLINK_H_NEEDS_SYS_SOCKET_H
+
+/* Parent directory of /run */
+#undef RUN_DIR_ROOT
 
 /* Dummy definition if not defined in system headers */
 #undef SCHED_RESET_ON_FORK
@@ -735,9 +741,6 @@
 /* Define to 1 if have ipset library */
 #undef _HAVE_LIBIPSET_
 
-/* Define to 1 if have iptables libraries */
-#undef _HAVE_LIBIPTC_
-
 /* Define to 1 if have libiptc/libiptc.h linux/if.h and net/if.h namespace
    collision */
 #undef _HAVE_LIBIPTC_LINUX_NET_IF_H_COLLISION_
@@ -813,6 +816,9 @@
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
 
+/* Define to enable script debugging support */
+#undef _SCRIPT_DEBUG_
+
 /* Define to 1 to build with smtp-alert debugging support */
 #undef _SMTP_ALERT_DEBUG_
 
@@ -849,9 +855,6 @@
    <pthread.h>, or <semaphore.h> is not used. If the typedef were allowed, the
    #define below would cause a syntax error. */
 #undef _UINT8_T
-
-/* Define to 1 if using iptables command enabled */
-#undef _USE_IPTABLES_CMD_
 
 /* Define to 1 to build with vrrp fd debugging support */
 #undef _VRRP_FD_DEBUG_

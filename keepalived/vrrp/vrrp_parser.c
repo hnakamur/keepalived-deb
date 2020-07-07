@@ -30,7 +30,6 @@
 #include <net/if_arp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-//#include <unistd.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <net/if.h>
@@ -60,6 +59,7 @@
 #ifdef _WITH_BFD_
 #include "bfd_parser.h"
 #endif
+#include "track_file.h"
 #ifdef _WITH_CN_PROC_
 #include "track_process.h"
 #endif
@@ -70,14 +70,6 @@ enum process_delay {
 	PROCESS_FORK_DELAY,
 };
 
-/* Used for initialising track files */
-static enum {
-	TRACK_FILE_NO_INIT,
-	TRACK_FILE_CREATE,
-	TRACK_FILE_INIT,
-} track_file_init;
-static int track_file_init_value;
-
 static bool script_user_set;
 static bool remove_script;
 
@@ -85,7 +77,6 @@ static bool remove_script;
 static void
 static_track_group_handler(const vector_t *strvec)
 {
-	element e;
 	static_track_group_t *tg;
 	const char *gname;
 
@@ -101,9 +92,10 @@ static_track_group_handler(const vector_t *strvec)
 	gname = strvec_slot(strvec, 1);
 
 	/* check group doesn't already exist */
-	LIST_FOREACH(vrrp_data->static_track_groups, tg, e) {
+	list_for_each_entry(tg, &vrrp_data->static_track_groups, e_list) {
 		if (!strcmp(gname,tg->gname)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "track_group %s already defined", gname);
+			report_config_error(CONFIG_GENERAL_ERROR, "track_group %s already defined"
+								, gname);
 			skip_block(true);
 			return;
 		}
@@ -115,7 +107,8 @@ static_track_group_handler(const vector_t *strvec)
 static void
 static_track_group_group_handler(const vector_t *strvec)
 {
-	static_track_group_t *tgroup = LIST_TAIL_DATA(vrrp_data->static_track_groups);
+	static_track_group_t *tgroup = list_last_entry(&vrrp_data->static_track_groups,
+						       static_track_group_t, e_list);
 
 	if (tgroup->iname) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Group list already specified for sync group %s", tgroup->gname);
@@ -138,7 +131,7 @@ static_addresses_handler(const vector_t *strvec)
 	if (!strvec)
 		return;
 
-	alloc_value_block(alloc_saddress, vector_slot(strvec, 0));
+	alloc_value_block(alloc_saddress, strvec);
 }
 
 #ifdef _HAVE_FIB_ROUTING_
@@ -151,7 +144,7 @@ static_routes_handler(const vector_t *strvec)
 	if (!strvec)
 		return;
 
-	alloc_value_block(alloc_sroute, vector_slot(strvec, 0));
+	alloc_value_block(alloc_sroute, strvec);
 }
 
 /* Static rules handler */
@@ -163,7 +156,7 @@ static_rules_handler(const vector_t *strvec)
 	if (!strvec)
 		return;
 
-	alloc_value_block(alloc_srule, vector_slot(strvec, 0));
+	alloc_value_block(alloc_srule, strvec);
 }
 #endif
 
@@ -181,7 +174,7 @@ alloc_linkbeat_interface(const vector_t *strvec)
 
 #ifdef _HAVE_VRRP_VMAC_
 	/* netlink messages work for vmacs */
-	if (IS_VLAN(ifp)) {
+	if (IS_MAC_IP_VLAN(ifp)) {
 		log_message(LOG_INFO, "(%s): linkbeat not supported for vmacs since netlink works", ifp->ifname);
 		return;
 	}
@@ -208,7 +201,7 @@ linkbeat_interfaces_handler(const vector_t *strvec)
 {
 	if (!strvec)
 		return;
-	alloc_value_block(alloc_linkbeat_interface, vector_slot(strvec, 0));
+	alloc_value_block(alloc_linkbeat_interface, strvec);
 }
 #endif
 
@@ -216,9 +209,7 @@ linkbeat_interfaces_handler(const vector_t *strvec)
 static void
 vrrp_sync_group_handler(const vector_t *strvec)
 {
-	list l;
-	element e;
-	vrrp_sgroup_t *sg;
+	vrrp_sgroup_t *sgroup;
 	const char *gname;
 
 	if (!strvec)
@@ -233,15 +224,11 @@ vrrp_sync_group_handler(const vector_t *strvec)
 	gname = strvec_slot(strvec, 1);
 
 	/* check group doesn't already exist */
-	if (!LIST_ISEMPTY(vrrp_data->vrrp_sync_group)) {
-		l = vrrp_data->vrrp_sync_group;
-		for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-			sg = ELEMENT_DATA(e);
-			if (!strcmp(gname,sg->gname)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "vrrp sync group %s already defined", gname);
-				skip_block(true);
-				return;
-			}
+	list_for_each_entry(sgroup, &vrrp_data->vrrp_sync_group, e_list) {
+		if (!strcmp(gname, sgroup->gname)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "vrrp sync group %s already defined", gname);
+			skip_block(true);
+			return;
 		}
 	}
 
@@ -251,43 +238,45 @@ vrrp_sync_group_handler(const vector_t *strvec)
 static void
 vrrp_group_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 
-	if (vgroup->iname) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Group list already specified for sync group %s", vgroup->gname);
+	if (sgroup->iname) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Group list already specified for sync group %s"
+							, sgroup->gname);
 		skip_block(true);
 		return;
 	}
 
-	vgroup->iname = read_value_block(strvec);
+	sgroup->iname = read_value_block(strvec);
 
-	if (!vgroup->iname)
-		report_config_error(CONFIG_GENERAL_ERROR, "Warning - sync group %s has empty group block", vgroup->gname);
+	if (!sgroup->iname)
+		report_config_error(CONFIG_GENERAL_ERROR, "Warning - sync group %s has empty group block"
+							, sgroup->gname);
 }
 
 static void
 vrrp_group_track_if_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_group_track_if, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_group_track_if, strvec);
 }
 
 static void
 vrrp_group_track_scr_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_group_track_script, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_group_track_script, strvec);
 }
 
 static void
 vrrp_group_track_file_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_group_track_file, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_group_track_file, strvec);
 }
 
 #ifdef _WITH_CN_PROC_
 static void
 vrrp_group_track_process_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_group_track_process, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_group_track_process, strvec);
 }
 #endif
 
@@ -295,7 +284,7 @@ vrrp_group_track_process_handler(const vector_t *strvec)
 static void
 vrrp_group_track_bfd_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_group_track_bfd, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_group_track_bfd, strvec);
 }
 #endif
 
@@ -308,7 +297,7 @@ set_vrrp_notify_script(__attribute__((unused)) const vector_t *strvec, int extra
 static void
 vrrp_gnotify_backup_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	if (vgroup->script_backup) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp group %s: notify_backup script already specified - ignoring %s", vgroup->gname, strvec_slot(strvec,1));
 		return;
@@ -319,7 +308,7 @@ vrrp_gnotify_backup_handler(const vector_t *strvec)
 static void
 vrrp_gnotify_master_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	if (vgroup->script_master) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp group %s: notify_master script already specified - ignoring %s", vgroup->gname, strvec_slot(strvec,1));
 		return;
@@ -330,7 +319,7 @@ vrrp_gnotify_master_handler(const vector_t *strvec)
 static void
 vrrp_gnotify_fault_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	if (vgroup->script_fault) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp group %s: notify_fault script already specified - ignoring %s", vgroup->gname, strvec_slot(strvec,1));
 		return;
@@ -341,7 +330,7 @@ vrrp_gnotify_fault_handler(const vector_t *strvec)
 static void
 vrrp_gnotify_stop_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	if (vgroup->script_stop) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp group %s: notify_stop script already specified - ignoring %s", vgroup->gname, strvec_slot(strvec,1));
 		return;
@@ -352,7 +341,7 @@ vrrp_gnotify_stop_handler(const vector_t *strvec)
 static void
 vrrp_gnotify_handler(const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	if (vgroup->script) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp group %s: notify script already specified - ignoring %s", vgroup->gname, strvec_slot(strvec,1));
 		return;
@@ -363,7 +352,7 @@ vrrp_gnotify_handler(const vector_t *strvec)
 static void
 vrrp_gsmtp_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	int res = true;
 
 	if (vector_size(strvec) >= 2) {
@@ -379,7 +368,7 @@ vrrp_gsmtp_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_gglobal_tracking_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 
 	report_config_error(CONFIG_GENERAL_ERROR, "(%s) global_tracking is deprecated. Use track_interface/script/file on the sync group", vgroup->gname);
 	vgroup->sgroup_tracking_weight = true;
@@ -387,14 +376,12 @@ vrrp_gglobal_tracking_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_sg_tracking_weight_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_sgroup_t *vgroup = LIST_TAIL_DATA(vrrp_data->vrrp_sync_group);
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
 	vgroup->sgroup_tracking_weight = true;
 }
 static void
 vrrp_handler(const vector_t *strvec)
 {
-	list l;
-	element e;
 	vrrp_t *vrrp;
 	const char *iname;
 
@@ -412,36 +399,76 @@ vrrp_handler(const vector_t *strvec)
 	iname = strvec_slot(strvec,1);
 
 	/* Make sure the vrrp instance doesn't already exist */
-	if (!LIST_ISEMPTY(vrrp_data->vrrp)) {
-		l = vrrp_data->vrrp;
-		for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
-			vrrp = ELEMENT_DATA(e);
-			if (!strcmp(iname,vrrp->iname)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "vrrp instance %s already defined", iname );
-				skip_block(true);
-				return;
-			}
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (!strcmp(iname, vrrp->iname)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "vrrp instance %s already defined", iname);
+			skip_block(true);
+			return;
 		}
 	}
 
 	alloc_vrrp(iname);
 }
+static void
+vrrp_end_handler(void)
+{
 #ifdef _HAVE_VRRP_VMAC_
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	if (!list_empty(&vrrp->unicast_peer) && vrrp->vmac_flags) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers - clearing use_vmac", vrrp->iname);
+		vrrp->vmac_flags = 0;
+		vrrp->vmac_ifname[0] = '\0';
+	}
+#endif
+
+	if (list_empty(&vrrp->unicast_peer) && vrrp->ttl != -1) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use unicast_ttl without unicast peers - resetting", vrrp->iname);
+		vrrp->ttl = 0;
+	}
+
+	if (!vrrp->ifp) {
+		vrrp->linkbeat_use_polling = false;
+	}
+}
+#ifdef _HAVE_VRRP_VMAC_
+/* The following function is copied from kernel net/core/dev.c */
+static bool __attribute__ ((pure))
+dev_name_valid(const char *name)
+{
+	if (*name == '\0')
+		return false;
+	if (strnlen(name, IFNAMSIZ) == IFNAMSIZ)
+		return false;
+	if (!strcmp(name, ".") || !strcmp(name, ".."))
+		return false;
+
+	while (*name) {
+		if (*name == '/' || *name == ':' || isspace(*name))
+			return false;
+		name++;
+	}
+	return true;
+}
+
 static void
 vrrp_vmac_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	interface_t *ifp;
+	const char *name;
 
 	__set_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags);
 
 	if (vector_size(strvec) >= 2) {
-		if (strlen(strvec_slot(strvec, 1)) >= IFNAMSIZ) {
-			report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface name '%s' too long - ignoring", strvec_slot(strvec, 1));
+		name = strvec_slot(strvec, 1);
+
+		if (!dev_name_valid(name)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface name '%s' too long or invalid characters - ignoring", name);
 			return;
 		}
 
-		strcpy(vrrp->vmac_ifname, strvec_slot(strvec, 1));
+		strcpy(vrrp->vmac_ifname, name);
 
 		/* Check if the interface exists and is a macvlan we can use */
 		if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
@@ -454,7 +481,7 @@ vrrp_vmac_handler(const vector_t *strvec)
 static void
 vrrp_vmac_xmit_base_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags);
 }
@@ -463,7 +490,7 @@ vrrp_vmac_xmit_base_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_ipvlan_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	interface_t *ifp;
 	bool had_flags = false;
 	ip_address_t addr = {};
@@ -575,13 +602,20 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 static void
 vrrp_unicast_peer_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_unicast_peer, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_unicast_peer, strvec);
+}
+static void
+vrrp_check_unicast_src_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	vrrp->check_unicast_src = true;
 }
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 static void
 vrrp_unicast_chksum_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	if (vector_size(strvec) >= 2) {
 		if (!strcmp(strvec_slot(strvec, 1), "never"))
@@ -596,7 +630,7 @@ vrrp_unicast_chksum_handler(const vector_t *strvec)
 static void
 vrrp_native_ipv6_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	if (vrrp->family == AF_INET) {
 		report_config_error(CONFIG_GENERAL_ERROR,"(%s) Cannot specify native_ipv6 with IPv4 addresses", vrrp->iname);
@@ -610,7 +644,7 @@ static void
 vrrp_state_handler(const vector_t *strvec)
 {
 	const char *str = strvec_slot(strvec, 1);
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	if (!strcmp(str, "MASTER"))
 		vrrp->wantstate = VRRP_STATE_MAST;
@@ -629,7 +663,7 @@ vrrp_state_handler(const vector_t *strvec)
 static void
 vrrp_int_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	const char *name = strvec_slot(strvec, 1);
 
 	if (strlen(name) >= IFNAMSIZ) {
@@ -653,7 +687,7 @@ vrrp_int_handler(const vector_t *strvec)
 static void
 vrrp_linkbeat_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	vrrp->linkbeat_use_polling = true;
 	report_config_error(CONFIG_GENERAL_ERROR, "(%s) 'linkbeat_use_polling' in vrrp instance deprecated - use linkbeat_interfaces block", vrrp->iname);
@@ -662,42 +696,42 @@ vrrp_linkbeat_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_track_if_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_track_if, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_track_if, strvec);
 }
 static void
 vrrp_track_scr_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_track_script, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_track_script, strvec);
 }
 static void
 vrrp_track_file_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_track_file, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_track_file, strvec);
 }
 #ifdef _WITH_CN_PROC_
 static void
 vrrp_track_process_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_track_process, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_track_process, strvec);
 }
 #endif
 static void
 vrrp_dont_track_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	vrrp->dont_track_primary = true;
 }
 #ifdef _WITH_BFD_
 static void
 vrrp_track_bfd_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_track_bfd, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_track_bfd, strvec);
 }
 #endif
 static void
 vrrp_srcip_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	struct sockaddr_storage *saddr = &vrrp->saddr;
 
 	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, saddr)) {
@@ -722,14 +756,14 @@ vrrp_srcip_handler(const vector_t *strvec)
 static void
 vrrp_track_srcip_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	vrrp->track_saddr = true;
 }
 static void
 vrrp_vrid_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned vrid;
 
 	if (!read_unsigned_strvec(strvec, 1, &vrid, 1, 255, false)) {
@@ -740,9 +774,22 @@ vrrp_vrid_handler(const vector_t *strvec)
 	vrrp->vrid = (uint8_t)vrid;
 }
 static void
+vrrp_ttl_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	unsigned ttl;
+
+	if (!read_unsigned_strvec(strvec, 1, &ttl, 0, 255, false)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): TTL '%s' not valid - must be between 0 & 255", vrrp->iname, strvec_slot(strvec, 1));
+		return;
+	}
+
+	vrrp->ttl = (uint8_t)ttl;
+}
+static void
 vrrp_prio_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned base_priority;
 
 	if (!read_unsigned_strvec(strvec, 1, &base_priority, 1, VRRP_PRIO_OWNER, false)) {
@@ -755,7 +802,7 @@ vrrp_prio_handler(const vector_t *strvec)
 static void
 vrrp_adv_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	double adver_int;
 	bool res;
 
@@ -770,7 +817,7 @@ vrrp_adv_handler(const vector_t *strvec)
 static void
 vrrp_debug_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned debug_val;
 
 	if (!read_unsigned_strvec(strvec, 1, &debug_val, 0, 4, true))
@@ -781,7 +828,7 @@ vrrp_debug_handler(const vector_t *strvec)
 static void
 vrrp_skip_check_adv_addr_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	int res;
 
 	if (vector_size(strvec) >= 2) {
@@ -800,7 +847,7 @@ vrrp_strict_mode_handler(const vector_t *strvec)
 {
 	int res;
 
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res >= 0)
@@ -815,19 +862,19 @@ vrrp_strict_mode_handler(const vector_t *strvec)
 static void
 vrrp_nopreempt_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	vrrp->nopreempt = 1;
 }
 static void	/* backwards compatibility */
 vrrp_preempt_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	vrrp->nopreempt = 0;
 }
 static void
 vrrp_preempt_delay_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	double preempt_delay;
 
 	if (!read_double_strvec(strvec, 1, &preempt_delay, 0, TIMER_MAX_SEC, true)) {
@@ -840,7 +887,7 @@ vrrp_preempt_delay_handler(const vector_t *strvec)
 static void
 vrrp_notify_backup_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script_backup) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_backup script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -851,7 +898,7 @@ vrrp_notify_backup_handler(const vector_t *strvec)
 static void
 vrrp_notify_master_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script_master) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_master script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -862,7 +909,7 @@ vrrp_notify_master_handler(const vector_t *strvec)
 static void
 vrrp_notify_fault_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script_fault) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_fault script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -873,7 +920,7 @@ vrrp_notify_fault_handler(const vector_t *strvec)
 static void
 vrrp_notify_stop_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script_stop) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_stop script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -882,9 +929,24 @@ vrrp_notify_stop_handler(const vector_t *strvec)
 	vrrp->notify_exec = true;
 }
 static void
+vrrp_notify_deleted_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	if (vrrp->notify_deleted) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_deleted already specified - ignoring %s", vrrp->iname, vector_size(strvec) > 1 ? strvec_slot(strvec,1) : "");
+		return;
+	}
+
+	if (vector_size(strvec) > 1) {
+		vrrp->script_deleted = set_vrrp_notify_script(strvec, 0);
+		vrrp->notify_exec = true;
+	}
+	vrrp->notify_deleted = true;
+}
+static void
 vrrp_notify_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -895,7 +957,7 @@ vrrp_notify_handler(const vector_t *strvec)
 static void
 vrrp_notify_master_rx_lower_pri(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	if (vrrp->script_master_rx_lower_pri) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) notify_master_rx_lower_pri script already specified - ignoring %s", vrrp->iname, strvec_slot(strvec,1));
 		return;
@@ -906,7 +968,7 @@ vrrp_notify_master_rx_lower_pri(const vector_t *strvec)
 static void
 vrrp_smtp_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	int res = true;
 
 	if (vector_size(strvec) >= 2) {
@@ -922,24 +984,24 @@ vrrp_smtp_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_notify_priority_changes_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
-        int res = true;
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	int res = true;
 
-        if (vector_size(strvec) >= 2) {
-                res = check_true_false(strvec_slot(strvec,1));
-                if (res < 0) {
-                        report_config_error(CONFIG_GENERAL_ERROR, "(%s) Invalid value '%s' for notify_priority_changes specified", vrrp->iname, strvec_slot(strvec, 1));
-                        return;
-                }
-        }
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) Invalid value '%s' for notify_priority_changes specified", vrrp->iname, strvec_slot(strvec, 1));
+			return;
+		}
+	}
 
-        vrrp->notify_priority_changes = res;
+	vrrp->notify_priority_changes = res;
 }
 #ifdef _WITH_LVS_
 static void
 vrrp_lvs_syncd_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	report_config_error(CONFIG_GENERAL_ERROR, "(%s) Specifying lvs_sync_daemon_interface against a vrrp is deprecated.", vrrp->iname);  /* Deprecated after v1.2.19 */
 	report_config_error(CONFIG_GENERAL_ERROR, "      %*sPlease use global lvs_sync_daemon", (int)strlen(vrrp->iname) - 2, "");
@@ -956,7 +1018,7 @@ vrrp_lvs_syncd_handler(const vector_t *strvec)
 static void
 vrrp_garp_delay_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned delay;
 
 	if (!read_unsigned_strvec(strvec, 1, &delay, 0, UINT_MAX / TIMER_HZ, true)) {
@@ -969,7 +1031,7 @@ vrrp_garp_delay_handler(const vector_t *strvec)
 static void
 vrrp_garp_refresh_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned refresh;
 
 	if (!read_unsigned_strvec(strvec, 1, &refresh, 0, UINT_MAX, true)) {
@@ -983,7 +1045,7 @@ vrrp_garp_refresh_handler(const vector_t *strvec)
 static void
 vrrp_garp_rep_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned repeats;
 
 	/* The min value should be 1, but allow 0 to maintain backward compatibility
@@ -1003,7 +1065,7 @@ vrrp_garp_rep_handler(const vector_t *strvec)
 static void
 vrrp_garp_refresh_rep_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned repeats;
 
 	/* The min value should be 1, but allow 0 to maintain backward compatibility
@@ -1024,7 +1086,7 @@ vrrp_garp_refresh_rep_handler(const vector_t *strvec)
 static void
 vrrp_garp_lower_prio_delay_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned delay;
 
 	if (!read_unsigned_strvec(strvec, 1, &delay, 0, UINT_MAX / TIMER_HZ, true)) {
@@ -1037,7 +1099,7 @@ vrrp_garp_lower_prio_delay_handler(const vector_t *strvec)
 static void
 vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned garp_lower_prio_rep;
 
 	if (!read_unsigned_strvec(strvec, 1, &garp_lower_prio_rep, 0, INT_MAX, true)) {
@@ -1050,7 +1112,7 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 static void
 vrrp_lower_prio_no_advert_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	int res;
 
 	if (vector_size(strvec) >= 2) {
@@ -1069,7 +1131,7 @@ static void
 vrrp_higher_prio_send_advert_handler(const vector_t *strvec)
 {
 	int res;
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
@@ -1087,7 +1149,7 @@ vrrp_higher_prio_send_advert_handler(const vector_t *strvec)
 static void
 kernel_rx_buf_size_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned rx_buf_size;
 
 	if (vector_size(strvec) == 2 &&
@@ -1103,7 +1165,7 @@ kernel_rx_buf_size_handler(const vector_t *strvec)
 static void
 vrrp_auth_type_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	const char *str = strvec_slot(strvec, 1);
 
 	if (!strcmp(str, "AH"))
@@ -1116,7 +1178,7 @@ vrrp_auth_type_handler(const vector_t *strvec)
 static void
 vrrp_auth_pass_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	const char *str = strvec_slot(strvec, 1);
 	size_t max_size = sizeof (vrrp->auth_data);
 	size_t str_len = strlen(str);
@@ -1134,17 +1196,17 @@ vrrp_auth_pass_handler(const vector_t *strvec)
 static void
 vrrp_vip_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_vip, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_vip, strvec);
 }
 static void
 vrrp_evip_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_evip, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_evip, strvec);
 }
 static void
 vrrp_promote_secondaries_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	vrrp->promote_secondaries = true;
 }
@@ -1152,12 +1214,12 @@ vrrp_promote_secondaries_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_vroutes_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_vroute, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_vroute, strvec);
 }
 static void
 vrrp_vrules_handler(const vector_t *strvec)
 {
-	alloc_value_block(alloc_vrrp_vrule, vector_slot(strvec, 0));
+	alloc_value_block(alloc_vrrp_vrule, strvec);
 }
 #endif
 static void
@@ -1173,7 +1235,7 @@ vrrp_script_handler(const vector_t *strvec)
 static void
 vrrp_vscript_script_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	const vector_t *strvec_qe;
 
 	/* We need to allow quoted and escaped strings for the script and parameters */
@@ -1185,7 +1247,7 @@ vrrp_vscript_script_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_vscript_interval_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	unsigned interval;
 
 	/* The min value should be 1, but allow 0 to maintain backward compatibility
@@ -1205,7 +1267,7 @@ vrrp_vscript_interval_handler(const vector_t *strvec)
 static void
 vrrp_vscript_timeout_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	unsigned timeout;
 
 	/* The min value should be 1, but allow 0 to maintain backward compatibility
@@ -1225,7 +1287,7 @@ vrrp_vscript_timeout_handler(const vector_t *strvec)
 static void
 vrrp_vscript_weight_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	int weight;
 
 	if (!read_int_strvec(strvec, 1, &weight, -253, 253, true))
@@ -1242,7 +1304,7 @@ vrrp_vscript_weight_handler(const vector_t *strvec)
 static void
 vrrp_vscript_rise_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	unsigned rise;
 
 	if (!read_unsigned_strvec(strvec, 1, &rise, 1, INT_MAX, true)) {
@@ -1255,7 +1317,7 @@ vrrp_vscript_rise_handler(const vector_t *strvec)
 static void
 vrrp_vscript_fall_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	unsigned fall;
 
 	if (!read_unsigned_strvec(strvec, 1, &fall, 1, INT_MAX, true)) {
@@ -1268,10 +1330,11 @@ vrrp_vscript_fall_handler(const vector_t *strvec)
 static void
 vrrp_vscript_user_handler(const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 
 	if (set_script_uid_gid(strvec, 1, &vscript->script.uid, &vscript->script.gid)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Unable to set uid/gid for script %s", cmd_str(&vscript->script));
+		report_config_error(CONFIG_GENERAL_ERROR, "Unable to set uid/gid for script %s"
+							, cmd_str(&vscript->script));
 		remove_script = true;
 	}
 	else {
@@ -1282,10 +1345,11 @@ vrrp_vscript_user_handler(const vector_t *strvec)
 static void
 vrrp_vscript_end_handler(void)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 
 	if (!vscript->script.args || !vscript->script.args[0]) {
-		report_config_error(CONFIG_GENERAL_ERROR, "No script set for vrrp_script %s - removing", vscript->sname);
+		report_config_error(CONFIG_GENERAL_ERROR, "No script set for vrrp_script %s - removing"
+							, vscript->sname);
 		remove_script = true;
 	}
 	else if (!remove_script) {
@@ -1293,150 +1357,22 @@ vrrp_vscript_end_handler(void)
 			return;
 
 		if (set_default_script_user(NULL, NULL)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "Unable to set default user for vrrp script %s - removing", vscript->sname);
+			report_config_error(CONFIG_GENERAL_ERROR, "Unable to set default user for vrrp"
+								  " script %s - removing"
+								, vscript->sname);
 			remove_script = true;
 		}
 	}
 
 	if (remove_script) {
-		free_list_element(vrrp_data->vrrp_script, vrrp_data->vrrp_script->tail);
+		free_vscript(vscript);
 		return;
 	}
 
 	vscript->script.uid = default_script_uid;
 	vscript->script.gid = default_script_gid;
 }
-static void
-vrrp_tfile_handler(const vector_t *strvec)
-{
-	if (!strvec)
-		return;
 
-	alloc_vrrp_file(strvec_slot(strvec, 1));
-
-	track_file_init = TRACK_FILE_NO_INIT;
-}
-static void
-vrrp_tfile_file_handler(const vector_t *strvec)
-{
-	vrrp_tracked_file_t *tfile = LIST_TAIL_DATA(vrrp_data->vrrp_track_files);
-
-	if (vector_size(strvec) < 2) {
-		report_config_error(CONFIG_GENERAL_ERROR, "track file file name missing");
-		return;
-	}
-
-	if (tfile->file_path) {
-		report_config_error(CONFIG_GENERAL_ERROR, "File already set for track file %s - ignoring %s", tfile->fname, strvec_slot(strvec, 1));
-		return;
-	}
-
-	tfile->file_path = set_value(strvec);
-}
-static void
-vrrp_tfile_weight_handler(const vector_t *strvec)
-{
-	int weight;
-	vrrp_tracked_file_t *tfile = LIST_TAIL_DATA(vrrp_data->vrrp_track_files);
-
-	if (vector_size(strvec) < 2) {
-		report_config_error(CONFIG_GENERAL_ERROR, "No weight specified for track file %s - ignoring", tfile->fname);
-		return;
-	}
-
-	if (tfile->weight != 1) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Weight already set for track file %s - ignoring %s", tfile->fname, strvec_slot(strvec, 1));
-		return;
-	}
-
-	if (!read_int_strvec(strvec, 1, &weight, -254, 254, true)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Weight (%s) for vrrp_track_file %s must be between "
-				 "[-254..254] inclusive. Ignoring...", strvec_slot(strvec, 1), tfile->fname);
-		weight = 1;
-	}
-	tfile->weight = weight;
-
-	if (vector_size(strvec) >= 3) {
-		if (!strcmp(strvec_slot(strvec, 2), "reverse"))
-			tfile->weight_reverse = true;
-		else
-			report_config_error(CONFIG_GENERAL_ERROR, "track_file %s unknown weight option %s", tfile->fname, strvec_slot(strvec, 2));
-	}
-}
-static void
-vrrp_tfile_init_handler(const vector_t *strvec)
-{
-	unsigned i;
-	const char *word;
-	vrrp_tracked_file_t *tfile = LIST_TAIL_DATA(vrrp_data->vrrp_track_files);
-	int value;
-
-	track_file_init = TRACK_FILE_CREATE;
-	track_file_init_value = 0;
-
-	for (i = 1; i < vector_size(strvec); i++) {
-		word = strvec_slot(strvec, i);
-		word += strspn(word, WHITE_SPACE);
-		if (isdigit(word[0]) || word[0] == '-') {
-			if (!read_int_strvec(strvec, i, &value, INT_MIN, INT_MAX, false)) {
-				/* It is not a valid integer */
-				report_config_error(CONFIG_GENERAL_ERROR, "Track file %s init value %s is invalid", tfile->fname, word);
-				value = 0;
-			}
-			else if (value < -254 || value > 254)
-				report_config_error(CONFIG_GENERAL_ERROR, "Track file %s init value %d is outside sensible range [%d, %d]", tfile->fname, value, -254, 254);
-			track_file_init_value = value;
-		}
-		else if (!strcmp(word, "overwrite"))
-			track_file_init = TRACK_FILE_INIT;
-		else
-			report_config_error(CONFIG_GENERAL_ERROR, "Unknown track file init option %s", word);
-	}
-}
-static void
-vrrp_tfile_end_handler(void)
-{
-	vrrp_tracked_file_t *tfile = LIST_TAIL_DATA(vrrp_data->vrrp_track_files);
-	struct stat statb;
-	FILE *tf;
-	int ret;
-
-	if (!tfile->file_path) {
-		report_config_error(CONFIG_GENERAL_ERROR, "No file set for track_file %s - removing", tfile->fname);
-		free_list_element(vrrp_data->vrrp_track_files, vrrp_data->vrrp_track_files->tail);
-		return;
-	}
-
-	if (track_file_init == TRACK_FILE_NO_INIT)
-		return;
-
-	ret = stat(tfile->file_path, &statb);
-	if (!ret) {
-		if (track_file_init == TRACK_FILE_CREATE) {
-			/* The file exists */
-			return;
-		}
-		if ((statb.st_mode & S_IFMT) != S_IFREG) {
-			/* It is not a regular file */
-			report_config_error(CONFIG_GENERAL_ERROR, "Cannot initialise track file %s - it is not a regular file", tfile->fname);
-			return;
-		}
-
-		/* Don't overwrite a file on reload */
-		if (reload)
-			return;
-	}
-
-	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
-		/* Write the value to the file */
-		if ((tf = fopen_safe(tfile->file_path, "w"))) {
-			fprintf(tf, "%d\n", track_file_init_value);
-			fclose(tf);
-		}
-		else
-			report_config_error(CONFIG_GENERAL_ERROR, "Unable to initialise track file %s", tfile->fname);
-	}
-}
 #ifdef _WITH_CN_PROC_
 static void
 vrrp_tprocess_handler(const vector_t *strvec)
@@ -1452,13 +1388,15 @@ vrrp_tprocess_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_process_handler(const vector_t *strvec)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 	size_t len = 0;
 	size_t i;
 	char *p;
 
 	if (tprocess->process_path) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Process already set for track process %s - ignoring %s", tprocess->pname, strvec_slot(strvec, 1));
+		report_config_error(CONFIG_GENERAL_ERROR, "Process already set for track process %s"
+							   " - ignoring %s"
+							, tprocess->pname, strvec_slot(strvec, 1));
 		return;
 	}
 
@@ -1488,7 +1426,7 @@ vrrp_tprocess_process_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_match_handler(const vector_t *strvec)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 
 	if (vector_size(strvec) == 1) {
 		tprocess->param_match = PARAM_MATCH_EXACT;
@@ -1506,8 +1444,8 @@ vrrp_tprocess_match_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_weight_handler(const vector_t *strvec)
 {
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 	int weight;
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
 
 	if (vector_size(strvec) < 2) {
 		report_config_error(CONFIG_GENERAL_ERROR, "No weight specified for track process %s - ignoring", tprocess->pname);
@@ -1537,7 +1475,7 @@ vrrp_tprocess_weight_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_quorum_handler(const vector_t *strvec)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 	unsigned quorum;
 
 	if (!read_unsigned_strvec(strvec, 1, &quorum, 1, 65535, true)) {
@@ -1556,7 +1494,7 @@ vrrp_tprocess_quorum_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_quorum_max_handler(const vector_t *strvec)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 	unsigned quorum_max;
 
 	if (!read_unsigned_strvec(strvec, 1, &quorum_max, 0, 65535, true)) {
@@ -1582,15 +1520,15 @@ vrrp_tprocess_quorum_max_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_delay_general(const vector_t *strvec, enum process_delay delay_type)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 	double delay;
 
 	if (!read_double_strvec(strvec, 1, &delay, 0.000001F, 3600.F, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%sdelay (%s) for vrrp_track_process %s must be between "
-				 "[0.000001..3600] inclusive. Ignoring...",
-				 delay_type == PROCESS_TERMINATE_DELAY ? "terminate_" :
-				 delay_type == PROCESS_FORK_DELAY ? "fork_" : "",
-				 strvec_slot(strvec, 1), tprocess->pname);
+							  "[0.000001..3600] inclusive. Ignoring..."
+							, delay_type == PROCESS_TERMINATE_DELAY ? "terminate_" :
+							   delay_type == PROCESS_FORK_DELAY ? "fork_" : ""
+							, strvec_slot(strvec, 1), tprocess->pname);
 		return;
 	}
 
@@ -1617,23 +1555,24 @@ vrrp_tprocess_delay_handler(const vector_t *strvec)
 static void
 vrrp_tprocess_full_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 
 	tprocess->full_command = true;
 }
 static void
 vrrp_tprocess_end_handler(void)
 {
-	vrrp_tracked_process_t *tprocess = LIST_TAIL_DATA(vrrp_data->vrrp_track_processes);
+	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
 
 	if (proc_events_not_supported) {
-		list_remove(vrrp_data->vrrp_track_processes, LIST_TAIL(vrrp_data->vrrp_track_processes));
+		free_vprocess(tprocess);
 		return;
 	}
 
 	if (!tprocess->process_path) {
-		report_config_error(CONFIG_GENERAL_ERROR, "track process '%s' process name not specified", tprocess->pname);
-		list_remove(vrrp_data->vrrp_track_processes, LIST_TAIL(vrrp_data->vrrp_track_processes));
+		report_config_error(CONFIG_GENERAL_ERROR, "track process '%s' process name not specified"
+							, tprocess->pname);
+		free_vprocess(tprocess);
 		return;
 	}
 
@@ -1646,23 +1585,26 @@ vrrp_tprocess_end_handler(void)
 static void
 vrrp_vscript_init_fail_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
+	vrrp_script_t *vscript = list_last_entry(&vrrp_data->vrrp_script, vrrp_script_t, e_list);
 	vscript->init_state = SCRIPT_INIT_STATE_FAILED;
 }
 static void
 vrrp_version_handler(const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	int version;
 
 	if (!read_int_strvec(strvec, 1, &version, 2, 3, true)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Version must be either 2 or 3", vrrp->iname);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Version must be either 2 or 3"
+							, vrrp->iname);
 		return;
 	}
 
 	if ((vrrp->version && vrrp->version != version) ||
 	    (version == VRRP_VERSION_2 && vrrp->family == AF_INET6)) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) vrrp_version %d conflicts with configured or deduced version %d; ignoring.", vrrp->iname, version, vrrp->version);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) vrrp_version %d conflicts with configured"
+							  " or deduced version %d; ignoring."
+							, vrrp->iname, version, vrrp->version);
 		return;
 	}
 
@@ -1673,7 +1615,7 @@ static void
 vrrp_accept_handler(__attribute__((unused)) const vector_t *strvec)
 {
 #ifdef _WITH_FIREWALL_
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	vrrp->accept = true;
 #endif
@@ -1683,7 +1625,7 @@ vrrp_accept_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 vrrp_no_accept_handler(__attribute__((unused)) const vector_t *strvec)
 {
-	vrrp_t *vrrp = LIST_TAIL_DATA(vrrp_data->vrrp);
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 	vrrp->accept = false;
 }
@@ -1700,7 +1642,7 @@ garp_group_handler(const vector_t *strvec)
 static void
 garp_group_garp_interval_handler(const vector_t *strvec)
 {
-	garp_delay_t *delay = LIST_TAIL_DATA(garp_delay);
+	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
 	double val;
 
 	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
@@ -1718,7 +1660,7 @@ garp_group_garp_interval_handler(const vector_t *strvec)
 static void
 garp_group_gna_interval_handler(const vector_t *strvec)
 {
-	garp_delay_t *delay = LIST_TAIL_DATA(garp_delay);
+	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
 	double val;
 
 	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
@@ -1749,22 +1691,21 @@ garp_group_interface_handler(const vector_t *strvec)
 
 #ifdef _HAVE_VRRP_VMAC_
 	/* We cannot have a group on a vmac interface */
-	if (IS_VLAN(ifp)) {
+	if (IS_MAC_IP_VLAN(ifp)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify garp_delay on a vmac (%s) - ignoring", ifp->ifname);
 		return;
 	}
 #endif
-	ifp->garp_delay = LIST_TAIL_DATA(garp_delay);
+	ifp->garp_delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
 }
 static void
 garp_group_interfaces_handler(const vector_t *strvec)
 {
-	garp_delay_t *delay = LIST_TAIL_DATA(garp_delay);
+	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
 	interface_t *ifp;
 	const vector_t *interface_vec = read_value_block(strvec);
-	size_t i;
 	garp_delay_t *gd;
-	element e;
+	size_t i;
 
 	/* Handle the interfaces block being empty */
 	if (!interface_vec) {
@@ -1774,8 +1715,7 @@ garp_group_interfaces_handler(const vector_t *strvec)
 
 	/* First set the next aggregation group number */
 	delay->aggregation_group = 1;
-	for (e = LIST_HEAD(garp_delay); e; ELEMENT_NEXT(e)) {
-		gd = ELEMENT_DATA(e);
+	list_for_each_entry(gd, &garp_delay, e_list) {
 		if (gd->aggregation_group && gd != delay)
 			delay->aggregation_group++;
 	}
@@ -1784,19 +1724,19 @@ garp_group_interfaces_handler(const vector_t *strvec)
 		ifp = if_get_by_ifname(vector_slot(interface_vec, i), IF_CREATE_IF_DYNAMIC);
 		if (!ifp) {
 			if (global_data->dynamic_interfaces)
-				log_message(LOG_INFO, "WARNING - interface %s specified for garp_group doesn't exist", strvec_slot(strvec, i));
+				log_message(LOG_INFO, "WARNING - interface %s specified for garp_group doesn't exist", strvec_slot(interface_vec, i));
 			else
-				report_config_error(CONFIG_GENERAL_ERROR, "WARNING - interface %s specified for garp_group doesn't exist", strvec_slot(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "WARNING - interface %s specified for garp_group doesn't exist", strvec_slot(interface_vec, i));
 			continue;
 		}
 
 		if (ifp->garp_delay) {
-			report_config_error(CONFIG_GENERAL_ERROR, "garp_group already specified for %s - ignoring", strvec_slot(strvec, 1));
+			report_config_error(CONFIG_GENERAL_ERROR, "garp_group already specified for %s - ignoring", strvec_slot(interface_vec, 1));
 			continue;
 		}
 
 #ifdef _HAVE_VRRP_VMAC_
-		if (IS_VLAN(ifp)) {
+		if (IS_MAC_IP_VLAN(ifp)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify garp_delay on a vmac (%s) - ignoring", ifp->ifname);
 			continue;
 		}
@@ -1809,29 +1749,32 @@ garp_group_interfaces_handler(const vector_t *strvec)
 static void
 garp_group_end_handler(void)
 {
-	garp_delay_t *delay = LIST_TAIL_DATA(garp_delay);
-	element e, next;
+	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
 	interface_t *ifp;
+	list_head_t *ifq;
 
 	if (!delay->have_garp_interval && !delay->have_gna_interval) {
 		report_config_error(CONFIG_GENERAL_ERROR, "garp group %d does not have any delay set - removing", delay->aggregation_group);
 
 		/* Remove the garp_delay from any interfaces that are using it */
-		LIST_FOREACH_NEXT(get_if_list(), ifp, e, next) {
+		ifq = get_interface_queue();
+		list_for_each_entry(ifp, ifq, e_list) {
 			if (ifp->garp_delay == delay)
 				ifp->garp_delay = NULL;
 		}
 
-		free_list_element(garp_delay, garp_delay->tail);
+		free_garp_delay(delay);
 	}
 }
 
 void
 init_vrrp_keywords(bool active)
 {
-	/* Static addresses/routes/rules */
+	/* Track group declarations */
 	install_keyword_root("track_group", &static_track_group_handler, active);
 	install_keyword("group", &static_track_group_group_handler);
+
+	/* Static addresses/routes/rules declarations */
 	install_keyword_root("static_ipaddress", &static_addresses_handler, active);
 #ifdef _HAVE_FIB_ROUTING_
 	install_keyword_root("static_routes", &static_routes_handler, active);
@@ -1859,6 +1802,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("global_tracking", &vrrp_gglobal_tracking_handler);
 	install_keyword("sync_group_tracking_weight", &vrrp_sg_tracking_weight_handler);
 
+	/* Garp declarations */
 	install_keyword_root("garp_group", &garp_group_handler, active);
 	install_keyword("garp_interval", &garp_group_garp_interval_handler);
 	install_keyword("gna_interval", &garp_group_gna_interval_handler);
@@ -1871,8 +1815,9 @@ init_vrrp_keywords(bool active)
 	install_keyword_root("linkbeat_interfaces", &linkbeat_interfaces_handler, active);
 #endif
 
-	/* VRRP Instance mapping */
+	/* VRRP Instance declarations */
 	install_keyword_root("vrrp_instance", &vrrp_handler, active);
+	install_root_end_handler(&vrrp_end_handler);
 #ifdef _HAVE_VRRP_VMAC_
 	install_keyword("use_vmac", &vrrp_vmac_handler);
 	install_keyword("vmac_xmit_base", &vrrp_vmac_xmit_base_handler);
@@ -1881,6 +1826,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("use_ipvlan", &vrrp_ipvlan_handler);
 #endif
 	install_keyword("unicast_peer", &vrrp_unicast_peer_handler);
+	install_keyword("check_unicast_src", &vrrp_check_unicast_src_handler);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	install_keyword("old_unicast_checksum", &vrrp_unicast_chksum_handler);
 #endif
@@ -1901,6 +1847,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("unicast_src_ip", &vrrp_srcip_handler);
 	install_keyword("track_src_ip", &vrrp_track_srcip_handler);
 	install_keyword("virtual_router_id", &vrrp_vrid_handler);
+	install_keyword("unicast_ttl", &vrrp_ttl_handler);
 	install_keyword("version", &vrrp_version_handler);
 	install_keyword("priority", &vrrp_prio_handler);
 	install_keyword("advert_int", &vrrp_adv_handler);
@@ -1928,6 +1875,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("notify_master", &vrrp_notify_master_handler);
 	install_keyword("notify_fault", &vrrp_notify_fault_handler);
 	install_keyword("notify_stop", &vrrp_notify_stop_handler);
+	install_keyword("notify_deleted", &vrrp_notify_deleted_handler);
 	install_keyword("notify", &vrrp_notify_handler);
 	install_keyword("notify_master_rx_lower_pri", vrrp_notify_master_rx_lower_pri);
 	install_keyword("smtp_alert", &vrrp_smtp_handler);
@@ -1951,6 +1899,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("auth_pass", &vrrp_auth_pass_handler);
 	install_sublevel_end();
 #endif
+	/* Script declarations */
 	install_keyword_root("vrrp_script", &vrrp_script_handler, active);
 	install_keyword("script", &vrrp_vscript_script_handler);
 	install_keyword("interval", &vrrp_vscript_interval_handler);
@@ -1961,13 +1910,6 @@ init_vrrp_keywords(bool active)
 	install_keyword("user", &vrrp_vscript_user_handler);
 	install_keyword("init_fail", &vrrp_vscript_init_fail_handler);
 	install_sublevel_end_handler(&vrrp_vscript_end_handler);
-
-	/* Track file declarations */
-	install_keyword_root("vrrp_track_file", &vrrp_tfile_handler, active);
-	install_keyword("file", &vrrp_tfile_file_handler);
-	install_keyword("weight", &vrrp_tfile_weight_handler);
-	install_keyword("init_file", &vrrp_tfile_init_handler);
-	install_sublevel_end_handler(&vrrp_tfile_end_handler);
 
 #ifdef _WITH_CN_PROC_
 	/* Track process declarations */
@@ -1998,6 +1940,7 @@ vrrp_init_keywords(void)
 #ifdef _WITH_BFD_
 	init_bfd_keywords(true);
 #endif
+	add_track_file_keywords(true);
 
 	return keywords;
 }

@@ -28,7 +28,6 @@
 /* Include to check NFT_TABLE_MAXNAMELEN defined */
 #include <linux/netfilter/nf_tables.h>
 
-#include "list.h"
 #include "vrrp.h"
 #include "vrrp_ipaddress.h"
 
@@ -41,7 +40,7 @@
 
 extern void nft_add_addresses(vrrp_t *);
 extern void nft_remove_addresses(vrrp_t *);
-extern void nft_remove_addresses_iplist(list);
+extern void nft_remove_addresses_iplist(list_head_t *);
 #ifdef _HAVE_VRRP_VMAC_
 extern void nft_add_vmac(const vrrp_t *);
 extern void nft_remove_vmac(const vrrp_t *);

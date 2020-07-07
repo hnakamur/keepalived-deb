@@ -4,7 +4,8 @@
 #
 # Copyright (C) 2001-2018 Alexandre Cassen, <acassen@gmail.com>
 
-AM_CPPFLAGS		= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
+AM_CPPFLAGS		= -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib
+AM_CPPFLAGS		+= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS		= $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS		= $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBS		= $(KA_LIBS)
@@ -16,9 +17,8 @@ libcheck_a_SOURCES = \
 	check_daemon.c check_data.c check_parser.c \
 	check_api.c check_tcp.c check_http.c check_ssl.c \
 	check_smtp.c check_misc.c check_dns.c check_print.c \
-	ipwrapper.c ipvswrapper.c libipvs.c
-
-AM_CPPFLAGS		+= -I$(srcdir)/../include -I$(srcdir)/../../lib
+	ipwrapper.c ipvswrapper.c libipvs.c check_udp.c check_ping.c \
+	check_file.c
 
 EXTRA_libcheck_a_SOURCES =
 libcheck_a_LIBADD =

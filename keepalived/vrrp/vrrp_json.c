@@ -30,7 +30,7 @@
 
 #include "vrrp.h"
 #include "vrrp_track.h"
-#include "list.h"
+#include "list_head.h"
 #include "vrrp_data.h"
 #include "vrrp_ipaddress.h"
 #include "vrrp_iproute.h"
@@ -58,9 +58,9 @@ vrrp_json_script_dump(json_writer_t *wr, const char *prop, notify_script_t *scri
 }
 
 static int
-vrrp_json_ip_dump(json_writer_t *wr, void *data)
+vrrp_json_ip_dump(json_writer_t *wr, list_head_t *e)
 {
-	ip_address_t *ipaddr = data;
+	ip_address_t *ipaddr = list_entry(e, ip_address_t, e_list);
 	char buf[256];
 
 	format_ipaddress(ipaddr, buf, sizeof(buf));
@@ -70,9 +70,9 @@ vrrp_json_ip_dump(json_writer_t *wr, void *data)
 
 #ifdef _HAVE_FIB_ROUTING_
 static int
-vrrp_json_vroute_dump(json_writer_t *wr, void *data)
+vrrp_json_vroute_dump(json_writer_t *wr, list_head_t *e)
 {
-	ip_route_t *iproute = data;
+	ip_route_t *iproute = list_entry(e, ip_route_t, e_list);
 	char buf[256];
 
 	format_iproute(iproute, buf, sizeof(buf));
@@ -81,9 +81,9 @@ vrrp_json_vroute_dump(json_writer_t *wr, void *data)
 }
 
 static int
-vrrp_json_vrule_dump(json_writer_t *wr, void *data)
+vrrp_json_vrule_dump(json_writer_t *wr, list_head_t *e)
 {
-	ip_rule_t *iprule = data;
+	ip_rule_t *iprule = list_entry(e, ip_rule_t, e_list);
 	char buf[256];
 
 	format_iprule(iprule, buf, sizeof(buf));
@@ -93,9 +93,9 @@ vrrp_json_vrule_dump(json_writer_t *wr, void *data)
 #endif
 
 static int
-vrrp_json_track_ifp_dump(json_writer_t *wr, void *data)
+vrrp_json_track_ifp_dump(json_writer_t *wr, list_head_t *e)
 {
-	tracked_if_t *tip = data;
+	tracked_if_t *tip = list_entry(e, tracked_if_t, e_list);
 	interface_t *ifp = tip->ifp;
 
 	jsonw_string(wr, ifp->ifname);
@@ -103,9 +103,9 @@ vrrp_json_track_ifp_dump(json_writer_t *wr, void *data)
 }
 
 static int
-vrrp_json_track_script_dump(json_writer_t *wr, void *data)
+vrrp_json_track_script_dump(json_writer_t *wr, list_head_t *e)
 {
-	tracked_sc_t *tsc = data;
+	tracked_sc_t *tsc = list_entry(e, tracked_sc_t, e_list);
 	vrrp_script_t *vscript = tsc->scr;
 
 	jsonw_string(wr, cmd_str(&vscript->script));
@@ -113,20 +113,18 @@ vrrp_json_track_script_dump(json_writer_t *wr, void *data)
 }
 
 static int
-vrrp_json_array_dump(json_writer_t *wr, const char *prop, list l,
-		     int (*func) (json_writer_t *, void *))
+vrrp_json_array_dump(json_writer_t *wr, const char *prop, list_head_t *l,
+		     int (*func) (json_writer_t *, list_head_t *))
 {
-	void *data;
-	element e;
+	list_head_t *e;
 
-	if (LIST_ISEMPTY(l))
+	if (list_empty(l))
 		return -1;
 
 	jsonw_name(wr, prop);
 	jsonw_start_array(wr);
-	LIST_FOREACH(l, data, e) {
-		(*func) (wr, data);
-	}
+	list_for_each(e, l)
+		(*func) (wr, e);
 	jsonw_end_array(wr);
 	return 0;
 }
@@ -160,7 +158,8 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 #ifdef _HAVE_VRRP_VMAC_
 	jsonw_string_field(wr, "vmac_ifname", vrrp->vmac_ifname);
 #endif
-	jsonw_string_field(wr, "ifp_ifname", vrrp->ifp->ifname);
+	if (vrrp->ifp)
+		jsonw_string_field(wr, "ifp_ifname", vrrp->ifp->ifname);
 	jsonw_uint_field(wr, "master_priority", vrrp->master_priority);
 	jsonw_float_field_fmt(wr, "last_transition", "%f", timeval_to_double(&vrrp->last_transition));
 	jsonw_float_field(wr, "garp_delay", vrrp->garp_delay / TIMER_HZ_FLOAT);
@@ -187,27 +186,29 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 	jsonw_uint_field(wr, "wantstate", vrrp->wantstate);
 	jsonw_uint_field(wr, "version", vrrp->version);
 	jsonw_bool_field(wr, "smtp_alert", vrrp->smtp_alert);
+	jsonw_bool_field(wr, "notify_deleted", vrrp->notify_deleted);
 
 	/* Script related */
 	vrrp_json_script_dump(wr, "script_backup", vrrp->script_backup);
 	vrrp_json_script_dump(wr, "script_master", vrrp->script_master);
 	vrrp_json_script_dump(wr, "script_fault", vrrp->script_fault);
 	vrrp_json_script_dump(wr, "script_stop", vrrp->script_stop);
+	vrrp_json_script_dump(wr, "script_deleted", vrrp->script_deleted);
 	vrrp_json_script_dump(wr, "script", vrrp->script);
 	vrrp_json_script_dump(wr, "script_master_rx_lower_pri"
 				, vrrp->script_master_rx_lower_pri);
 
 	/* Virtual related */
-	vrrp_json_array_dump(wr, "vips", vrrp->vip, vrrp_json_ip_dump);
-	vrrp_json_array_dump(wr, "evips", vrrp->evip, vrrp_json_ip_dump);
+	vrrp_json_array_dump(wr, "vips", &vrrp->vip, vrrp_json_ip_dump);
+	vrrp_json_array_dump(wr, "evips", &vrrp->evip, vrrp_json_ip_dump);
 #ifdef _HAVE_FIB_ROUTING_
-	vrrp_json_array_dump(wr, "vroutes", vrrp->vroutes, vrrp_json_vroute_dump);
-	vrrp_json_array_dump(wr, "vrules", vrrp->vrules, vrrp_json_vrule_dump);
+	vrrp_json_array_dump(wr, "vroutes", &vrrp->vroutes, vrrp_json_vroute_dump);
+	vrrp_json_array_dump(wr, "vrules", &vrrp->vrules, vrrp_json_vrule_dump);
 #endif
 
 	/* Tracking related */
-	vrrp_json_array_dump(wr, "track_ifp", vrrp->track_ifp, vrrp_json_track_ifp_dump);
-	vrrp_json_array_dump(wr, "track_script", vrrp->track_script, vrrp_json_track_script_dump);
+	vrrp_json_array_dump(wr, "track_ifp", &vrrp->track_ifp, vrrp_json_track_ifp_dump);
+	vrrp_json_array_dump(wr, "track_script", &vrrp->track_script, vrrp_json_track_script_dump);
 
 #ifdef _WITH_VRRP_AUTH_
 	jsonw_uint_field(wr, "auth_type", vrrp->auth_type);
@@ -259,12 +260,11 @@ vrrp_json_dump(FILE *fp)
 {
 	json_writer_t *wr;
 	vrrp_t *vrrp;
-	element e;
 
 	wr = jsonw_new(fp);
 	jsonw_start_array(wr);
 
-	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
 		jsonw_start_object(wr);
 		vrrp_json_data_dump(wr, vrrp);
 		vrrp_json_stats_dump(wr, vrrp);
@@ -281,7 +281,7 @@ vrrp_print_json(void)
 {
 	FILE *fp;
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return;
 
 	fp = fopen_safe("/tmp/keepalived.json", "w");

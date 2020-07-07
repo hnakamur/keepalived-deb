@@ -4,13 +4,12 @@
 #
 # Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
-AM_CPPFLAGS		= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
+AM_CPPFLAGS		= -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib
+AM_CPPFLAGS		+= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS		= $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS		= $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBS		= $(KA_LIBS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
-
-AM_CPPFLAGS		+= -I$(srcdir)/../include -I$(srcdir)/../../lib
 
 noinst_LIBRARIES	= libvrrp.a
 
@@ -50,18 +49,8 @@ if FIREWALL
 endif
 
 if IPTABLES
-  libvrrp_a_LIBADD	+= vrrp_iptables.o
-  EXTRA_libvrrp_a_SOURCES += vrrp_iptables.c
-endif
-
-if LIBIPTC
-  libvrrp_a_LIBADD	+= vrrp_iptables_lib.o vrrp_iptables_calls.o
-  EXTRA_libvrrp_a_SOURCES += vrrp_iptables_lib.c vrrp_iptables_calls.c
-endif
-
-if IPTABLES_CMD
-  libvrrp_a_LIBADD	+= vrrp_iptables_cmd.o
-  EXTRA_libvrrp_a_SOURCES += vrrp_iptables_cmd.c
+  libvrrp_a_LIBADD	+= vrrp_iptables.o vrrp_iptables_calls.o
+  EXTRA_libvrrp_a_SOURCES += vrrp_iptables.c vrrp_iptables_calls.c
 endif
 
 if LIBIPSET

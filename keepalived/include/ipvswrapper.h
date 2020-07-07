@@ -36,19 +36,12 @@
 #define IPVS_ERROR	0
 #define IPVS_SUCCESS	1
 
-#ifdef _WITH_LVS_
 #define IPVS_STARTDAEMON	IP_VS_SO_SET_STARTDAEMON
 #define IPVS_STOPDAEMON		IP_VS_SO_SET_STOPDAEMON
 #define IPVS_FLUSH		IP_VS_SO_SET_FLUSH
 #define IPVS_MASTER		IP_VS_STATE_MASTER
 #define IPVS_BACKUP		IP_VS_STATE_BACKUP
-#else
-#define IPVS_STARTDAEMON	1
-#define IPVS_STOPDAEMON		2
-#define IPVS_MASTER		3
-#define IPVS_BACKUP		4
-#define IPVS_FLUSH		5
-#endif
+#define	IPVS_MASTER_BACKUP	(IP_VS_STATE_MASTER | IP_VS_STATE_BACKUP)
 
 #define IPVS_DEF_SCHED		"wlc"
 
@@ -56,7 +49,7 @@
 struct lvs_syncd_config {
 	const char			*ifname;	/* handle LVS sync daemon state using this */
 	vrrp_t				*vrrp;		/* instance FSM & running on specific interface */
-	unsigned			syncid;		/* 0 .. 255 */
+	unsigned			syncid;		/* 0 .. 255, or PARAMETER_UNSET if not configured */
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 	uint16_t			sync_maxlen;
 	struct sockaddr_storage		mcast_group;
@@ -64,6 +57,7 @@ struct lvs_syncd_config {
 	uint8_t				mcast_ttl;
 #endif
 	const char			*vrrp_name;	/* used during configuration and SNMP */
+	bool				daemon_set_reload;
 };
 #endif
 
@@ -72,12 +66,12 @@ extern int ipvs_start(void);
 extern void ipvs_stop(void);
 extern void ipvs_set_timeouts(int, int, int);
 extern void ipvs_flush_cmd(void);
-extern virtual_server_group_t *ipvs_get_group_by_name(const char *, list) __attribute__ ((pure));
+extern virtual_server_group_t *ipvs_get_group_by_name(const char *, list_head_t *) __attribute__ ((pure));
 extern void ipvs_group_sync_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge);
 extern void ipvs_group_remove_entry(virtual_server_t *, virtual_server_group_entry_t *);
 extern int ipvs_cmd(int, virtual_server_t *, real_server_t *);
 #ifdef _WITH_VRRP_
-extern void ipvs_syncd_cmd(int, const struct lvs_syncd_config *, int, bool, bool);
+extern void ipvs_syncd_cmd(int, const struct lvs_syncd_config *, int, bool);
 extern void ipvs_syncd_master(const struct lvs_syncd_config *);
 extern void ipvs_syncd_backup(const struct lvs_syncd_config *);
 #endif

@@ -37,9 +37,9 @@
 
 /* local include */
 #include "vector.h"
-#include "list.h"
 #include "timer.h"
 #include "notify.h"
+#include "tracker.h"
 #if defined _WITH_VRRP_AUTH_
 #include "vrrp_ipsecah.h"
 #endif
@@ -109,21 +109,21 @@ typedef struct {
 typedef struct _vrrp_sgroup {
 	const char		*gname;			/* Group name */
 	const vector_t		*iname;			/* Set of VRRP instances in this group, only used during initialisation */
-	list			vrrp_instances;		/* List of VRRP instances */
+	list_head_t		vrrp_instances;		/* vrrp_t - VRRP instances */
 	unsigned		num_member_fault;	/* Number of members of group in fault state */
 	unsigned		num_member_init;	/* Number of members of group in pending state */
 	int			state;			/* current stable state */
 	bool			sgroup_tracking_weight;	/* Use floating priority and scripts
 							 * Used if need different priorities needed on a track object in a sync group.
 							 * It probably won't work properly. */
-	list			track_ifp;		/* Interface state we monitor */
-	list			track_script;		/* Script state we monitor */
-	list			track_file;		/* Files whose value we monitor (list of tracked_file_t) */
+	list_head_t		track_ifp;		/* tracked_if_t - Interface state we monitor */
+	list_head_t		track_script;		/* Script state we monitor */
+	list_head_t		track_file;		/* tracked_file_monitor_t - Files whose value we monitor */
 #ifdef _WITH_CN_PROC_
-	list			track_process;		/* Processes we monitor (list of tracked_process_t) */
+	list_head_t		track_process;		/* tracked_process_t - Processes we monitor */
 #endif
 #ifdef _WITH_BFD_
-	list			track_bfd;		/* List of tracked_bfd_t */
+	list_head_t		track_bfd;		/* tracked_bfd_t - BFD instances we monitor */
 #endif
 
 	/* State transition notification */
@@ -135,6 +135,9 @@ typedef struct _vrrp_sgroup {
 	notify_script_t		*script;
 	int			smtp_alert;
 	int			last_email_state;
+
+	/* linked list member */
+	list_head_t		e_list;
 } vrrp_sgroup_t;
 
 /* Statistics */
@@ -196,11 +199,16 @@ typedef struct {
 } checksum_check_t;
 #endif
 
-typedef struct {
+typedef struct _unicast_peer_t {
 	struct sockaddr_storage	address;
 #ifdef _CHECKSUM_DEBUG_
 	checksum_check_t	chk;
 #endif
+	unsigned char		min_ttl;
+	unsigned char		max_ttl;
+
+	/* Linked list member */
+	list_head_t		e_list;
 } unicast_peer_t;
 
 /* parameters per virtual router -- rfc2338.6.1.2 */
@@ -223,16 +231,16 @@ typedef struct _vrrp_t {
 	struct _ip_address	*ipvlan_addr;		/* Address to configure on an ipvlan interface */
 	int			ipvlan_type;		/* Bridge, private or VEPA mode */
 #endif
-#endif
 	interface_t		*configured_ifp;	/* Interface the configuration says we are on */
-	list			track_ifp;		/* Interface state we monitor */
-	list			track_script;		/* Script state we monitor */
-	list			track_file;		/* list of tracked_file_t - Files whose value we monitor */
+#endif
+	list_head_t		track_ifp;		/* tracked_if_t - Interface state we monitor */
+	list_head_t		track_script;		/* tracked_sc_t - Script state we monitor */
+	list_head_t		track_file;		/* tracked_file_monitor_t - Files whose value we monitor */
 #ifdef _WITH_CN_PROC_
-	list			track_process;		/* list of tracked_process_t - Processes we monitor */
+	list_head_t		track_process;		/* tracked_process_t - Processes we monitor */
 #endif
 #ifdef _WITH_BFD_
-	list			track_bfd;		/* List of tracked_bfd_t */
+	list_head_t		track_bfd;		/* tracked_bfd_t - BFD instance state we monitor */
 #endif
 	unsigned		num_script_if_fault;	/* Number of scripts and interfaces in fault state */
 	unsigned		num_script_init;	/* Number of scripts in init state */
@@ -241,13 +249,13 @@ typedef struct _vrrp_t {
 	bool			saddr_from_config;	/* Set if the source address is from configuration */
 	bool			track_saddr;		/* Fault state if configured saddr is missing */
 	struct sockaddr_storage	pkt_saddr;		/* Src IP address received in VRRP IP header */
-#ifdef IPV6_RECVHOPLIMIT
-	int			hop_limit;		/* IPv6 hop limit returned via ancillary data */
-#endif
+	int			rx_ttl_hop_limit;	/* Received TTL/hop limit returned */
 #ifdef IPV6_RECVPKTINFO
 	bool			multicast_pkt;		/* Last IPv6 packet received was multicast */
 #endif
-	list			unicast_peer;		/* List of Unicast peer to send advert to */
+	list_head_t		unicast_peer;		/* unicast_peer_t - peers to send unicast advert to */
+	int			ttl;			/* TTL to send packet with if unicasting */
+	bool			check_unicast_src;	/* It set, check the source address of a unicast advert */
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	chksum_compatibility_t	unicast_chksum_compat;	/* Whether v1.3.6 and earlier chksum is used */
 #endif
@@ -274,15 +282,18 @@ typedef struct _vrrp_t {
 	int			total_priority;		/* base_priority +/- track_script, track_interface and track_file weights.
 							   effective_priority is this within the range [1,254]. */
 	bool			vipset;			/* All the vips are set ? */
-	list			vip;			/* list of virtual ip addresses */
-	list			evip;			/* list of protocol excluded VIPs.
+	list_head_t		vip;			/* ip_address_t - list of virtual ip addresses */
+	unsigned		vip_cnt;		/* size of vip list */
+	list_head_t		evip;			/* ip_address_t - list of protocol excluded VIPs.
 							 * Those VIPs will not be presents into the
 							 * VRRP adverts
 							 */
 	bool			promote_secondaries;	/* Set promote_secondaries option on interface */
 	bool			evip_other_family;	/* There are eVIPs of the different address family from the vrrp family */
-	list			vroutes;		/* list of virtual routes */
-	list			vrules;			/* list of virtual rules */
+#ifdef _HAVE_FIB_ROUTING_
+	list_head_t		vroutes;		/* ip_route_t - list of virtual routes */
+	list_head_t		vrules;			/* ip_rule_t - list of virtual rules */
+#endif
 	unsigned		adver_int;		/* locally configured delay between advertisements*/
 	unsigned		master_adver_int;	/* In v3, when we become BACKUP, we use the MASTER's
 							 * adver_int. If we become MASTER again, we use the
@@ -318,10 +329,12 @@ typedef struct _vrrp_t {
 	int			smtp_alert;
 	int			last_email_state;
 	bool			notify_exec;
+	bool			notify_deleted;
 	notify_script_t		*script_backup;
 	notify_script_t		*script_master;
 	notify_script_t		*script_fault;
 	notify_script_t		*script_stop;
+	notify_script_t		*script_deleted;
 	notify_script_t		*script_master_rx_lower_pri;
 	notify_script_t		*script;
 	int			notify_priority_changes;
@@ -358,6 +371,12 @@ typedef struct _vrrp_t {
 
 	/* RB tree on a sock_t for vrrp sands */
 	rb_node_t		rb_sands;
+
+	/* Sync group list member */
+	list_head_t		s_list;			/* vrrp_sgroup_t->vrrp_instances */
+
+	/* Linked list member */
+	list_head_t		e_list;
 } vrrp_t;
 
 /* VRRP state machine -- rfc2338.6.4 */
@@ -365,6 +384,7 @@ typedef struct _vrrp_t {
 #define VRRP_STATE_BACK			1	/* rfc2338.6.4.2 */
 #define VRRP_STATE_MAST			2	/* rfc2338.6.4.3 */
 #define VRRP_STATE_FAULT		3	/* internal */
+#define VRRP_STATE_DELETED		97	/* internal */
 #define VRRP_STATE_STOP			98	/* internal */
 #define VRRP_EVENT_MASTER_RX_LOWER_PRI	1000	/* Dummy state for sending event notify */
 #define VRRP_EVENT_MASTER_PRIORITY_CHANGE 1001	/* Dummy state for sending event notify */
@@ -416,8 +436,7 @@ extern bool do_checksum_debug;
 extern void clear_summary_flags(void);
 extern size_t vrrp_adv_len(const vrrp_t *) __attribute__ ((pure));
 extern const vrrphdr_t *vrrp_get_header(sa_family_t, const char *, size_t);
-extern int open_vrrp_send_socket(sa_family_t, int, interface_t *, bool);
-extern int open_vrrp_read_socket(sa_family_t, int, interface_t *, bool, int);
+extern void open_sockpool_socket(sock_t *);
 extern int new_vrrp_socket(vrrp_t *);
 extern void vrrp_send_adv(vrrp_t *, uint8_t);
 extern void vrrp_send_link_update(vrrp_t *, unsigned);

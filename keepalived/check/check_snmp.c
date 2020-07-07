@@ -242,12 +242,14 @@ check_snmp_vsgroup(struct variable *vp, oid *name, size_t *length,
 		   int exact, size_t *var_len, WriteMethod **write_method)
 {
 	virtual_server_group_t *g;
+	list_head_t *e;
 
-	if ((g = (virtual_server_group_t *)
-	     snmp_header_list_table(vp, name, length, exact,
-				    var_len, write_method,
-				    check_data->vs_group)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					 var_len, write_method,
+					 &check_data->vs_group)) == NULL)
 		return NULL;
+
+	g = list_entry(e, virtual_server_group_t, e_list);
 
 	switch (vp->magic) {
 	case CHECK_SNMP_VSGROUPNAME:
@@ -269,11 +271,10 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 	int result;
 	size_t target_len;
 	unsigned curgroup = 0, curentry;
-	element e1, e2;
 	virtual_server_group_t *group;
-	virtual_server_group_entry_t *e, *be = NULL;
+	virtual_server_group_entry_t *vsge, *be = NULL;
 	int state;
-	list l;
+	list_head_t *l;
 
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -284,7 +285,7 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof(long);
 
-	if (LIST_ISEMPTY(check_data->vs_group))
+	if (list_empty(&check_data->vs_group))
 		return NULL;
 
 	/* We search the best match: equal if exact, the lower OID in
@@ -293,7 +294,7 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 	best[0] = best[1] = MAX_SUBID; /* Our best match */
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
-	LIST_FOREACH(check_data->vs_group, group, e1) {
+	list_for_each_entry(group, &check_data->vs_group, e_list) {
 		curgroup++;
 		curentry = 0;
 		if (target_len && (curgroup < target[0]))
@@ -302,17 +303,17 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 		while (state < STATE_VSGM_END) {
 			switch (state) {
 			case STATE_VSGM_FWMARK:
-				l = group->vfwmark;
+				l = &group->vfwmark;
 				break;
 			case STATE_VSGM_ADDRESS_RANGE:
-				l = group->addr_range;
+				l = &group->addr_range;
 				break;
 			default:
 				/* Dunno? */
 				return NULL;
 			}
 			state++;
-			LIST_FOREACH(l, e, e2) {
+			list_for_each_entry(vsge, l, e_list) {
 				curentry++;
 				/* We build our current match */
 				current[0] = curgroup;
@@ -325,13 +326,13 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 					continue;
 				if (result == 0) {
 					/* Got an exact match and asked for it */
-					be = e;
+					be = vsge;
 					goto vsgmember_found;
 				}
 				if (snmp_oid_compare(current, 2, best, 2) < 0) {
 					/* This is our best match */
 					memcpy(best, current, sizeof(oid) * 2);
-					be = e;
+					be = vsge;
 					goto vsgmember_be_found;
 				}
 			}
@@ -402,20 +403,22 @@ check_snmp_vsgroupmember(struct variable *vp, oid *name, size_t *length,
 	return NULL;
 }
 
-static u_char*
+static u_char *
 check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 			 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	static struct counter64 counter64_ret;
 	virtual_server_t *v;
-	element e;
+	real_server_t *rs;
 	snmp_ret_t ret;
+	list_head_t *e;
 
-	if ((v = (virtual_server_t *)
-	     snmp_header_list_table(vp, name, length, exact,
-				    var_len, write_method,
-				    check_data->vs)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					 var_len, write_method,
+					 &check_data->vs)) == NULL)
 		return NULL;
+
+	v = list_entry(e, virtual_server_t, e_list);
 
 	switch (vp->magic) {
 	case CHECK_SNMP_VSTYPE:
@@ -557,17 +560,13 @@ check_snmp_virtualserver(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = v->hysteresis;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSREALTOTAL:
-		if (LIST_ISEMPTY(v->rs))
-			long_ret.u = 0;
-		else
-			long_ret.u = LIST_SIZE(v->rs);
+		long_ret.u = v->rs_cnt;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSREALUP:
 		long_ret.u = 0;
-		if (!LIST_ISEMPTY(v->rs))
-			for (e = LIST_HEAD(v->rs); e; ELEMENT_NEXT(e))
-				if (((real_server_t *)ELEMENT_DATA(e))->alive)
-					long_ret.u++;
+		list_for_each_entry(rs, &v->rs, e_list)
+			if (rs->alive)
+				long_ret.u++;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_VSSTATSCONNS:
 		ipvs_update_stats(v);
@@ -770,7 +769,6 @@ check_snmp_realserver_weight(int action,
 			     u_char *var_val, u_char var_val_type, size_t var_val_len,
 			     __attribute__((unused)) u_char *statP, oid *name, size_t name_len)
 {
-	element e1, e2;
 	virtual_server_t *vs = NULL;
 	real_server_t *rs = NULL;
 	oid ivs, irs;
@@ -788,9 +786,9 @@ check_snmp_realserver_weight(int action,
 		if (name_len < 2) return SNMP_ERR_NOSUCHNAME;
 		irs = name[name_len - 1];
 		ivs = name[name_len - 2];
-		if (LIST_ISEMPTY(check_data->vs)) return SNMP_ERR_NOSUCHNAME;
-		for (e1 = LIST_HEAD(check_data->vs); e1; ELEMENT_NEXT(e1)) {
-			vs = ELEMENT_DATA(e1);
+		if (list_empty(&check_data->vs))
+			return SNMP_ERR_NOSUCHNAME;
+		list_for_each_entry(vs, &check_data->vs, e_list) {
 			if (--ivs == 0) {
 				if (vs->s_svr) {
 					/* We don't want to set weight
@@ -798,18 +796,21 @@ check_snmp_realserver_weight(int action,
 					rs = NULL;
 					if (--irs == 0) break;
 				}
-				for (e2 = LIST_HEAD(vs->rs); e2; ELEMENT_NEXT(e2)) {
-					rs = ELEMENT_DATA(e2);
-					if (--irs == 0) break;
+				list_for_each_entry(rs, &vs->rs, e_list) {
+					if (--irs == 0)
+						break;
 				}
 				break;
 			}
 		}
+
 		/* Did not find a RS or this is a sorry server (this
 		   should not happen) */
-		if (!rs) return SNMP_ERR_NOSUCHNAME;
+		if (!rs)
+			return SNMP_ERR_NOSUCHNAME;
 		if (action == RESERVE2)
 			break;
+
 		/* Commit: change values. There is no way to fail. */
 		update_svr_wgt((unsigned)(*var_val), vs, rs, true);
 		break;
@@ -817,20 +818,19 @@ check_snmp_realserver_weight(int action,
 	return SNMP_ERR_NOERROR;
 }
 
-static u_char*
+static u_char *
 check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		      int exact, size_t *var_len, WriteMethod **write_method)
 {
 	static struct counter64 counter64_ret;
-	oid *target, current[2], best[2];
+	oid *target, current[2];
 	int result;
 	size_t target_len;
 	unsigned curvirtual = 0, curreal;
 	real_server_t *e = NULL, *be = NULL;
-	element e1, e2 = NULL;
 	virtual_server_t *vs, *bvs = NULL;
 	int state;
-	int type, btype;
+	int type;
 	snmp_ret_t ret;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -841,49 +841,47 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof(long);
 
-	if (LIST_ISEMPTY(check_data->vs))
+	if (list_empty(&check_data->vs))
 		return NULL;
 
 	/* We search the best match: equal if exact, the lower OID in
 	   the set of the OID strictly superior to the target
 	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
-	for (e1 = LIST_HEAD(check_data->vs); e1; ELEMENT_NEXT(e1)) {
-		vs = ELEMENT_DATA(e1);
+
+	list_for_each_entry(vs, &check_data->vs, e_list) {
 		curvirtual++;
+		current[0] = curvirtual;
 		curreal = 0;
 		if (target_len && (curvirtual < target[0]))
 			continue; /* Optimization: cannot be part of our set */
-		if (be)
-			break; /* Optimization: cannot be the lower anymore */
 		state = STATE_RS_SORRY;
 		while (state != STATE_RS_END) {
 			switch (state) {
 			case STATE_RS_SORRY:
 				e = vs->s_svr;
-				type = state++;
+				type = STATE_RS_SORRY;
+				state = STATE_RS_REGULAR_FIRST;
 				break;
 			case STATE_RS_REGULAR_FIRST:
-				e2 = LIST_HEAD(vs->rs);
-				if (!e2) {
+				if (list_empty(&vs->rs)) {
 					e = NULL;
 					state = STATE_RS_END;
 					break;
 				}
-				e = ELEMENT_DATA(e2);
-				type = state++;
+				e = list_first_entry(&vs->rs, real_server_t, e_list);
+				type = STATE_RS_REGULAR_FIRST;
+				state = STATE_RS_REGULAR_NEXT;
 				break;
 			case STATE_RS_REGULAR_NEXT:
-				type = state;
-				ELEMENT_NEXT(e2);
-				if (!e2) {
+				type = STATE_RS_REGULAR_NEXT;
+				if (list_is_last(&e->e_list, &vs->rs)) {
 					e = NULL;
-					state++;
+					state = STATE_RS_END;
 					break;
 				}
-				e = ELEMENT_DATA(e2);
+				e = list_entry(e->e_list.next, real_server_t, e_list);
 				break;
 			default:
 				/* Dunno? */
@@ -892,49 +890,40 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 			if (!e)
 				continue;
 			curreal++;
+
 			/* We build our current match */
-			current[0] = curvirtual;
 			current[1] = curreal;
+
 			/* And compare it to our target match */
 			if ((result = snmp_oid_compare(current, 2, target,
 						       target_len)) < 0)
 				continue;
 			if (result == 0) {
+				/* Got an exact match. Were we asked for it? */
 				if (!exact)
 					continue;
+			} else {
+				memcpy(target, current, sizeof(oid) * 2);
+				*length = (unsigned)vp->namelen + 2;
+			}
 
-				/* Got an exact match and asked for it */
-				be = e;
-				bvs = vs;
-				btype = type;
-				goto real_found;
-			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				be = e;
-				bvs = vs;
-				btype = type;
-				goto real_be_found;
-			}
+			bvs = vs;
+			be = e;
+			break;
 		}
+
+		if (be)
+			break;
 	}
-	if (be == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
 
- real_be_found:
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
+	if (be == NULL) {
+		/* No match */
+		return NULL;
+	}
 
- real_found:
 	switch (vp->magic) {
 	case CHECK_SNMP_RSTYPE:
-		long_ret.u = (btype == STATE_RS_SORRY)?2:1;
+		long_ret.u = (type == STATE_RS_SORRY)?2:1;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSADDRTYPE:
 		long_ret.u = (be->addr.ss_family == AF_INET6) ? 2:1;
@@ -961,36 +950,36 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		if (!long_ret.u) break;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSSTATUS:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		long_ret.u = be->alive?1:2;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSWEIGHT:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		long_ret.s = be->weight;
 		*write_method = check_snmp_realserver_weight;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSUPPERCONNECTIONLIMIT:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		if (!be->u_threshold) break;
 		long_ret.u = be->u_threshold;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSLOWERCONNECTIONLIMIT:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		if (!be->l_threshold) break;
 		long_ret.u = be->l_threshold;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSACTIONWHENDOWN:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		long_ret.u = be->inhibit?2:1;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSNOTIFYUP:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		if (!be->notify_up) break;
 		cmd_str_r(be->notify_up, buf, sizeof(buf));
 		*var_len = strlen(buf);
 		return (u_char*)buf;
 	case CHECK_SNMP_RSNOTIFYDOWN:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		if (!be->notify_down) break;
 		cmd_str_r(be->notify_down, buf, sizeof(buf));
 		*var_len = strlen(buf);
@@ -1001,7 +990,7 @@ check_snmp_realserver(struct variable *vp, oid *name, size_t *length,
 		ret.cp = be->virtualhost;
 		return ret.p;
 	case CHECK_SNMP_RSFAILEDCHECKS:
-		if (btype == STATE_RS_SORRY) break;
+		if (type == STATE_RS_SORRY) break;
 		long_ret.u = be->num_failed_checkers;
 		return (u_char*)&long_ret;
 	case CHECK_SNMP_RSSTATSCONNS:
@@ -1206,48 +1195,49 @@ check_snmp_lvs_sync_daemon(struct variable *vp, oid *name, size_t *length,
 
 	switch (vp->magic) {
 	case CHECK_SNMP_LVSSYNCDAEMONENABLED:
-		long_ret.u = global_data->lvs_syncd.syncid != PARAMETER_UNSET ? 1 : 2;
+		long_ret.u = global_data->lvs_syncd.ifname ? 1 : 2;
 		return (u_char *)&long_ret;
 	case CHECK_SNMP_LVSSYNCDAEMONINTERFACE:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		*var_len = strlen(global_data->lvs_syncd.ifname);
 		ret.cp = global_data->lvs_syncd.ifname;
 		return ret.p;
 	case CHECK_SNMP_LVSSYNCDAEMONVRRPINSTANCE:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname ||
+		    !global_data->lvs_syncd.vrrp_name)
 			return NULL;
 		*var_len = strlen(global_data->lvs_syncd.vrrp_name);
 		ret.cp = global_data->lvs_syncd.vrrp_name;
 		return ret.p;
 	case CHECK_SNMP_LVSSYNCDAEMONSYNCID:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		long_ret.u = global_data->lvs_syncd.syncid;
 		return (u_char *)&long_ret;
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 	case CHECK_SNMP_LVSSYNCDAEMONMAXLEN:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		long_ret.u = global_data->lvs_syncd.sync_maxlen;
 		return (u_char *)&long_ret;
 	case CHECK_SNMP_LVSSYNCDAEMONPORT:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		long_ret.u = global_data->lvs_syncd.mcast_port;
 		return (u_char *)&long_ret;
 	case CHECK_SNMP_LVSSYNCDAEMONTTL:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		long_ret.u = global_data->lvs_syncd.mcast_ttl;
 		return (u_char *)&long_ret;
 	case CHECK_SNMP_LVSSYNCDAEMONMCASTGROUPADDRTYPE:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		long_ret.u = (global_data->lvs_syncd.mcast_group.ss_family == AF_INET6) ? 2:1;
 		return (u_char *)&long_ret;
 	case CHECK_SNMP_LVSSYNCDAEMONMCASTGROUPADDRVALUE:
-		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+		if (!global_data->lvs_syncd.ifname)
 			return NULL;
 		if (global_data->lvs_syncd.mcast_group.ss_family == AF_INET6) {
 			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&global_data->lvs_syncd.mcast_group;
@@ -1630,7 +1620,7 @@ check_snmp_agent_close(void)
 void
 check_snmp_rs_trap(real_server_t *rs, virtual_server_t *vs, bool stopping)
 {
-	element e;
+	real_server_t *r;
 	snmp_ret_t ptr_conv;
 
 	/* OID of the notification */
@@ -1693,10 +1683,10 @@ check_snmp_rs_trap(real_server_t *rs, virtual_server_t *vs, bool stopping)
 		notification_oid[notification_oid_len - 1] = 2;
 
 	/* Initialize data */
-	realtotal = LIST_SIZE(vs->rs);
+	realtotal = vs->rs_cnt;
 	realup = 0;
-	for (e = LIST_HEAD(vs->rs); e; ELEMENT_NEXT(e))
-		if (((real_server_t *)ELEMENT_DATA(e))->alive)
+	list_for_each_entry(r, &vs->rs, e_list)
+		if (r->alive)
 			realup++;
 
 	/* snmpTrapOID */

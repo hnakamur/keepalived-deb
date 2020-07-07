@@ -36,10 +36,13 @@
 
 /* local includes */
 #include "ip_vs.h"
-#include "list.h"
+#include "list_head.h"
 #include "vector.h"
 #include "notify.h"
 #include "utils.h"
+#ifdef _WITH_BFD_
+#include "check_bfd.h"
+#endif
 
 /* Daemon dynamic data structure definition */
 #define KEEPALIVED_DEFAULT_DELAY	(60 * TIMER_HZ)
@@ -60,6 +63,7 @@ typedef struct _ssl_data {
 typedef struct _real_server {
 	struct sockaddr_storage		addr;
 	int				weight;
+	int				effective_weight;
 	int				iweight;	/* Initial weight */
 	int				pweight;	/* previous weight
 							 * used for reloading */
@@ -101,14 +105,18 @@ typedef struct _real_server {
 	struct ip_vs_stats64		stats;
 #endif
 #endif
+	list_head_t			track_files;	/* tracked_file_monitor_t - Files whose value we monitor */
 #ifdef _WITH_BFD_
-	list				tracked_bfds;	/* list of bfd_checker_t */
+	list_head_t			tracked_bfds;	/* cref_tracked_bfd_t */
 #endif
+
+	/* Linked list member */
+	list_head_t			e_list;
 } real_server_t;
 
 /* Virtual Server group definition */
 typedef struct _virtual_server_group_entry {
-	bool 				is_fwmark;
+	bool				is_fwmark;
 	union {
 		struct {
 			struct sockaddr_storage	addr;
@@ -119,17 +127,27 @@ typedef struct _virtual_server_group_entry {
 		};
 		struct {
 			uint32_t	vfwmark;
+			uint16_t	fwm_family;
 			unsigned	fwm4_alive;
 			unsigned	fwm6_alive;
 		};
 	};
 	bool				reloaded;
+
+	/* Linked list member */
+	list_head_t			e_list;
 } virtual_server_group_entry_t;
 
 typedef struct _virtual_server_group {
 	char				*gname;
-	list				addr_range;
-	list				vfwmark;
+	list_head_t			addr_range;
+	list_head_t			vfwmark;
+	bool				have_ipv4;
+	bool				have_ipv6;
+	bool				fwmark_no_family;
+
+	/* Linked list member */
+	list_head_t			e_list;
 } virtual_server_group_t;
 
 /* Virtual Server definition */
@@ -148,7 +166,7 @@ typedef struct _virtual_server {
 	uint32_t			flags;
 	uint32_t			persistence_timeout;
 #ifdef _HAVE_PE_NAME_
-	char				pe_name[IP_VS_PENAME_MAXLEN];
+	char				pe_name[IP_VS_PENAME_MAXLEN + 1];
 #endif
 	unsigned			forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
@@ -162,7 +180,8 @@ typedef struct _virtual_server {
 	const char			*virtualhost;	/* Default virtualhost for HTTP and SSL healthcheckers
 							   if not set on real servers */
 	int				weight;
-	list				rs;
+	list_head_t			rs;		/* real_server_t */
+	unsigned			rs_cnt;		/* Number of real_server in list */
 	int				alive;
 	bool				alpha;		/* Set if alpha mode is default. */
 	bool				omega;		/* Omega mode enabled. */
@@ -189,16 +208,19 @@ typedef struct _virtual_server {
 	struct ip_vs_stats64		stats;
 #endif
 #endif
+	/* Linked list member */
+	list_head_t			e_list;
 } virtual_server_t;
 
 /* Configuration data root */
 typedef struct _check_data {
 	bool				ssl_required;
 	ssl_data_t			*ssl;
-	list				vs_group;
-	list				vs;
+	list_head_t			vs_group;	/* virtual_server_group_t */
+	list_head_t			vs;		/* virtual_server_t */
+	list_head_t			track_files;	/* tracked_file_t */
 #ifdef _WITH_BFD_
-	list				track_bfds;	/* list of checker_tracked_bfd_t */
+	list_head_t			track_bfds;	/* checker_tracked_bfd_t */
 #endif
 	unsigned			num_checker_fd_required;
 	unsigned			num_smtp_alert;
@@ -226,10 +248,17 @@ extern check_data_t *old_check_data;
 extern ssl_data_t *alloc_ssl(void) __attribute((malloc));
 extern void free_ssl(void);
 extern void alloc_vsg(const char *);
+extern void free_vsg(virtual_server_group_t *);
 extern void alloc_vsg_entry(const vector_t *);
-extern void alloc_vs(const char *, const char *);
 extern void alloc_rs(const char *, const char *);
+extern void free_rs(real_server_t *);
+extern void alloc_vs(const char *, const char *);
+extern void free_vs(virtual_server_t *);
+extern void dump_tracking_rs(FILE *, const void *);
 extern void alloc_ssvr(const char *, const char *);
+#ifdef _WITH_BFD_
+extern void free_checker_bfd(checker_tracked_bfd_t *);
+#endif
 extern check_data_t *alloc_check_data(void);
 extern void free_check_data(check_data_t *);
 extern void dump_data_check(FILE *);

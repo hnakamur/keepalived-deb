@@ -40,7 +40,6 @@
 #include <getopt.h>
 #include <linux/version.h>
 #include <ctype.h>
-#include <stdlib.h>
 
 #include "main.h"
 #include "global_data.h"
@@ -54,6 +53,7 @@
 #include "logger.h"
 #include "parser.h"
 #include "notify.h"
+#include "track_file.h"
 #ifdef _WITH_LVS_
 #include "check_parser.h"
 #include "check_daemon.h"
@@ -99,7 +99,7 @@
 #if defined _NETWORK_TIMESTAMP_ || defined _CHECKSUM_DEBUG_
 #include "vrrp.h"
 #endif
-#ifdef _TSM_DEBUG_
+#if defined _TSM_DEBUG_ || defined _SCRIPT_DEBUG_
 #include "vrrp_scheduler.h"
 #endif
 #if defined _PARSER_DEBUG_ || defined _DUMP_KEYWORDS_
@@ -110,6 +110,9 @@
 #endif
 #ifdef _MEM_ERR_DEBUG_
 #include "memory.h"
+#endif
+#ifndef _ONE_PROCESS_DEBUG_
+#include "reload_monitor.h"
 #endif
 #include "warnings.h"
 
@@ -122,6 +125,26 @@
 #endif
 
 #define CHILD_WAIT_SECS	5
+
+/* Structure used for handling termination of children */
+struct child_term {
+	pid_t * const pid_p;
+	const char * const name;
+	const char * const short_name;
+};
+
+static const struct child_term children_term[] = {
+#ifdef _WITH_VRRP_
+	{ &vrrp_child, PROG_VRRP, "vrrp" },
+#endif
+#ifdef _WITH_LVS_
+	{ &checkers_child, PROG_CHECK, "checker" },
+#endif
+#ifdef _WITH_BFD
+	{ &bfd_child, PROG_BFD, "bfd" },
+#endif
+};
+#define NUM_CHILD_TERM	(sizeof children_term / sizeof children_term[0])
 
 /* global var */
 const char *version_string = VERSION_STRING;		/* keepalived version */
@@ -151,7 +174,7 @@ bool snmp_option;					/* Enable SNMP support */
 const char *snmp_socket;				/* Socket to use for SNMP agent */
 #endif
 static const char *syslog_ident;			/* syslog ident if not default */
-bool use_pid_dir;					/* Put pid files in /var/run/keepalived or @localstatedir@/run/keepalived */
+bool use_pid_dir;					/* Put pid files in /run/keepalived or @localstatedir@/run/keepalived */
 
 unsigned os_major;					/* Kernel version */
 unsigned os_minor;
@@ -182,6 +205,8 @@ static bool create_core_dump = false;
 static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
 
+static const char *dump_file = "/tmp/keepalived_parent.data";
+
 /* debug flags */
 #if defined _TIMER_CHECK_ || \
     defined _SMTP_ALERT_DEBUG_ || \
@@ -200,7 +225,8 @@ static char *orig_core_dump_pattern = NULL;
     defined _DUMP_KEYWORDS_ || \
     defined _CHECKER_DEBUG_ || \
     defined _MEM_ERR_DEBUG_ || \
-    defined _EINTR_DEBUG_
+    defined _EINTR_DEBUG_ || \
+    defined _SCRIPT_DEBUG_
 #define WITH_DEBUG_OPTIONS 1
 #endif
 
@@ -255,6 +281,9 @@ static char mem_err_debug;
 #endif
 #ifdef _EINTR_DEBUG_
 static char eintr_debug;
+#endif
+#ifdef _SCRIPT_DEBUG_
+static char script_debug;
 #endif
 #ifdef _DUMP_KEYWORDS_
 static char dump_keywords;
@@ -434,6 +463,9 @@ global_init_keywords(void)
 #ifdef _WITH_BFD_
 	init_bfd_keywords(false);
 #endif
+#if defined _WITH_VRRP_ || defined _WITH_LVS_
+	add_track_file_keywords(false);
+#endif
 
 	return keywords;
 }
@@ -445,7 +477,7 @@ read_config_file(void)
 }
 
 /* Daemon stop sequence */
-void
+static void
 stop_keepalived(void)
 {
 #ifndef _ONE_PROCESS_DEBUG_
@@ -472,14 +504,17 @@ stop_keepalived(void)
 }
 
 /* Daemon init sequence */
-static int
-start_keepalived(void)
+static void
+start_keepalived(__attribute__((unused)) thread_ref_t thread)
 {
 	bool have_child = false;
 
 #ifdef _WITH_BFD_
 	/* must be opened before vrrp and bfd start */
-	open_bfd_pipes();
+	if (!open_bfd_pipes()) {
+		thread_add_terminate_event(thread->master);
+		return;
+	}
 #endif
 
 #ifdef _WITH_LVS_
@@ -504,7 +539,120 @@ start_keepalived(void)
 	}
 #endif
 
-	return have_child;
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Do we have a reload file to monitor */
+	if (global_data->reload_time_file)
+		start_reload_monitor();
+#endif
+
+	if (!have_child)
+		log_message(LOG_INFO, "Warning - keepalived has no configuration to run");
+}
+
+static bool
+startup_shutdown_script_completed(thread_ref_t thread, bool startup)
+{
+	const char *type = startup ? "startup" : "shutdown";
+	int wait_status;
+	pid_t pid;
+	int sig_num;
+	unsigned timeout = 0;
+	void *next_arg;
+
+	if (thread->type == THREAD_CHILD_TIMEOUT) {
+		pid = THREAD_CHILD_PID(thread);
+
+		if (thread->arg == (void *)0) {
+			next_arg = (void *)1;
+			sig_num = SIGTERM;
+			timeout = 2;
+			log_message(LOG_INFO, "%s script timed out", type);
+		} else if (thread->arg == (void *)1) {
+			next_arg = (void *)2;
+			sig_num = SIGKILL;
+			timeout = 2;
+		} else if (thread->arg == (void *)2) {
+			log_message(LOG_INFO, "%s script (PID %d) failed to terminate after kill", type, pid);
+			next_arg = (void *)3;
+			sig_num = SIGKILL;
+			timeout = 10;	/* Give it longer to terminate */
+		} else if (thread->arg == (void *)3) {
+			/* We give up trying to kill the script */
+			return true;
+		}
+
+		if (timeout) {
+			/* If kill returns an error, we can't kill the process since either the process has terminated,
+			 * or we don't have permission. If we can't kill it, there is no point trying again. */
+			if (kill(-pid, sig_num)) {
+				if (errno == ESRCH) {
+					/* The process does not exist, and we should
+					 * have reaped its exit status, otherwise it
+					 * would exist as a zombie process. */
+					log_message(LOG_INFO, "%s script (PID %d) lost", type, pid);
+					timeout = 0;
+				} else {
+					log_message(LOG_INFO, "kill -%d of %s script (%d) with new state %p failed with errno %d", sig_num, type, pid, next_arg, errno);
+					timeout = 1000;
+				}
+			}
+		} else {
+			log_message(LOG_INFO, "%s script %d timeout with unknown script state %p", type, pid, thread->arg);
+			next_arg = thread->arg;
+			timeout = 10;	/* We need some timeout */
+		}
+
+		if (timeout)
+			thread_add_child(thread->master, thread->func, next_arg, pid, timeout * TIMER_HZ);
+
+		return false;
+	}
+
+	wait_status = THREAD_CHILD_STATUS(thread);
+
+	if (WIFEXITED(wait_status)) {
+		unsigned status = WEXITSTATUS(wait_status);
+
+		if (status)
+			log_message(LOG_INFO, "%s script failed, status %u", type, status);
+		else if (__test_bit(LOG_DETAIL_BIT, &debug))
+			log_message(LOG_INFO, "%s script succeeded", type);
+	}
+	else if (WIFSIGNALED(wait_status)) {
+		if (thread->arg == (void *)1 && WTERMSIG(wait_status) == SIGTERM) {
+			/* The script terminated due to a SIGTERM, and we sent it a SIGTERM to
+			 * terminate the process. Now make sure any children it created have
+			 * died too. */
+			pid = THREAD_CHILD_PID(thread);
+			kill(-pid, SIGKILL);
+		}
+	}
+
+	return true;
+}
+
+static void
+startup_script_completed(thread_ref_t thread)
+{
+	if (startup_shutdown_script_completed(thread, true))
+		thread_add_event(thread->master, start_keepalived, NULL, 0);
+}
+
+static void
+shutdown_script_completed(thread_ref_t thread)
+{
+	if (startup_shutdown_script_completed(thread, false))
+		thread_add_terminate_event(thread->master);
+}
+
+static void
+run_startup_script(thread_ref_t thread)
+{
+	if (__test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Running startup script %s", global_data->startup_script->args[0]);
+
+	if (system_call_script(thread->master, startup_script_completed, NULL, global_data->startup_script_timeout * TIMER_HZ, global_data->startup_script) == -1)
+		log_message(LOG_INFO, "Call of startup script %s failed", global_data->startup_script->args[0]);
 }
 
 static void
@@ -563,6 +711,11 @@ static bool reload_config(void)
 
 	log_message(LOG_INFO, "Reloading ...");
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (global_data->reload_time_file)
+		stop_reload_monitor();
+#endif
+
 	/* Make sure there isn't an attempt to change the network namespace or instance name */
 	old_global_data = global_data;
 	global_data = NULL;
@@ -588,9 +741,6 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change network namespace at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_CONST_PTR(global_data->network_namespace);
-	global_data->network_namespace = old_global_data->network_namespace;
-	old_global_data->network_namespace = NULL;
 #endif
 
 	if (!!old_global_data->instance_name != !!global_data->instance_name ||
@@ -598,9 +748,6 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change instance name at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_CONST_PTR(global_data->instance_name);
-	global_data->instance_name = old_global_data->instance_name;
-	old_global_data->instance_name = NULL;
 
 #ifdef _WITH_NFTABLES_
 	if (!!old_global_data->vrrp_nf_table_name != !!global_data->vrrp_nf_table_name ||
@@ -608,9 +755,6 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change nftables table name at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-	FREE_CONST_PTR(global_data->vrrp_nf_table_name);
-	global_data->vrrp_nf_table_name = old_global_data->vrrp_nf_table_name;
-	old_global_data->vrrp_nf_table_name = NULL;
 #endif
 
 	if (unsupported_change) {
@@ -621,11 +765,37 @@ static bool reload_config(void)
 	else
 		free_global_data (old_global_data);
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (global_data->reload_time_file)
+		start_reload_monitor();
+#endif
 
 	return !unsupported_change;
 }
 
-/* SIGHUP/USR1/USR2 handler */
+static void
+print_parent_data(__attribute__((unused)) thread_ref_t thread)
+{
+	FILE *fp;
+
+	log_message(LOG_INFO, "Printing parent data for process(%d) on signal", getpid());
+
+	fp = fopen_safe(dump_file, "w");
+
+	if (!fp) {
+		log_message(LOG_INFO, "Can't open %s (%d: %s)",
+			dump_file, errno, strerror(errno));
+		return;
+	}
+
+	dump_global_data(fp, global_data);
+
+	fclose(fp);
+
+	return;
+}
+
+/* SIGHUP/USR1/USR2/STATS_CLEAR handler */
 static void
 propagate_signal(__attribute__((unused)) void *v, int sig)
 {
@@ -643,7 +813,7 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 #endif
 
 	/* Only the VRRP process consumes SIGUSR2 and SIGJSON */
-	if (sig == SIGUSR2)
+	if (sig == SIGUSR2 || sig == SIGSTATS_CLEAR)
 		return;
 #ifdef _WITH_JSON_
 	if (sig == SIGJSON)
@@ -662,6 +832,9 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 	else if (running_bfd())
 		start_bfd_child();
 #endif
+
+	if (sig == SIGUSR1)
+		thread_add_event(master, print_parent_data, NULL, 0);
 }
 
 #ifdef THREAD_DUMP
@@ -681,10 +854,11 @@ thread_dump_signal(__attribute__((unused)) void *v, __attribute__((unused)) int 
 static void
 sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 {
-	int status;
 	int ret;
 	int wait_count = 0;
 	struct timeval start_time, now;
+	size_t i;
+	int wstatus;
 #ifdef HAVE_SIGNALFD
 	int timeout = child_wait_time * 1000;
 	int signal_fd = master->signal_fd;
@@ -692,7 +866,6 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	sigset_t sigmask;
 	struct epoll_event ev = { .events = EPOLLIN, .data.fd = master->signal_fd };
 	int efd;
-	int wstatus;
 #else
 	sigset_t old_set, child_wait;
 	struct timespec timeout = {
@@ -701,10 +874,12 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	};
 #endif
 
-	/* register the terminate thread */
-	thread_add_terminate_event(master);
-
 	log_message(LOG_INFO, "Stopping");
+
+#ifndef _ONE_PROCESSS_DEBUG_
+	if (global_data->reload_time_file)
+		stop_reload_monitor();
+#endif
 
 #ifdef HAVE_SIGNALFD
 	/* We only want to receive SIGCHLD now */
@@ -720,37 +895,18 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	}
 #endif
 
-#ifdef _WITH_VRRP_
-	if (vrrp_child > 0) {
-		if (kill(vrrp_child, SIGTERM)) {
-			/* ESRCH means no such process */
-			if (errno == ESRCH)
-				vrrp_child = 0;
+	/* Signal our children to terminate */
+	for (i = 0; i < NUM_CHILD_TERM; i++) {
+		if (*children_term[i].pid_p > 0) {
+			if (kill(*children_term[i].pid_p, SIGTERM)) {
+				/* ESRCH means no such process */
+				if (errno == ESRCH)
+					*children_term[i].pid_p = 0;
+			}
+			else
+				wait_count++;
 		}
-		else
-			wait_count++;
 	}
-#endif
-#ifdef _WITH_LVS_
-	if (checkers_child > 0) {
-		if (kill(checkers_child, SIGTERM)) {
-			if (errno == ESRCH)
-				checkers_child = 0;
-		}
-		else
-			wait_count++;
-	}
-#endif
-#ifdef _WITH_BFD_
-	if (bfd_child > 0) {
-		if (kill(bfd_child, SIGTERM)) {
-			if (errno == ESRCH)
-				bfd_child = 0;
-		}
-		else
-			wait_count++;
-	}
-#endif
 
 #ifdef HAVE_SIGNALFD
 	efd = epoll_create(1);
@@ -781,60 +937,38 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 			break;
 		}
 
-		status = siginfo.ssi_code == CLD_EXITED ? W_EXITCODE(siginfo.ssi_status, 0) :
-			 siginfo.ssi_code == CLD_KILLED ? W_EXITCODE(0, siginfo.ssi_status) :
-							   WCOREFLAG;
-
-#ifdef _WITH_VRRP_
-		if (vrrp_child > 0 && vrrp_child == (pid_t)siginfo.ssi_pid) {
-			report_child_status(status, vrrp_child, PROG_VRRP);
-			ret = waitpid(vrrp_child, &wstatus, WNOHANG);
-			if (ret == 0)
-				continue;
-			if (ret == -1) {
-				if (check_EINTR(errno))
-					continue;
-				log_message(LOG_INFO, "Wait for vrrp child return errno %d", errno);
-			}
-
-			/* We could check ret == vrrp_child, but it seems unneccessary */
-
-			vrrp_child = 0;
-			wait_count--;
+		/* We are only expecting SIGCHLD */
+		if (siginfo.ssi_signo != SIGCHLD) {
+			log_message(LOG_INFO, "Received signal %u code %d status %d from pid %u while waiting for children to terminate", siginfo.ssi_signo, siginfo.ssi_code, siginfo.ssi_status, siginfo.ssi_pid);
+			continue;
 		}
-#endif
 
-#ifdef _WITH_LVS_
-		if (checkers_child > 0 && checkers_child == (pid_t)siginfo.ssi_pid) {
-			report_child_status(status, checkers_child, PROG_CHECK);
-			ret = waitpid(checkers_child, &wstatus, WNOHANG);
-			if (ret == 0)
-				continue;
-			if (ret == -1) {
-				if (check_EINTR(errno))
-					continue;
-				log_message(LOG_INFO, "Wait for checker child return errno %d", errno);
-			}
-			checkers_child = 0;
-			wait_count--;
+		if (siginfo.ssi_code != CLD_EXITED && siginfo.ssi_code != CLD_KILLED && siginfo.ssi_code != CLD_DUMPED) {
+			/* CLD_STOPPED, CLD_CONTINUED or CLD_TRAPPED */
+			log_message(LOG_INFO, "Received SIGCHLD code %d status %d from pid %u while waiting for children to terminate", siginfo.ssi_code, siginfo.ssi_status, siginfo.ssi_pid);
+			continue;
 		}
-#endif
-#ifdef _WITH_BFD_
-		if (bfd_child > 0 && bfd_child == (pid_t)siginfo.ssi_pid) {
-			report_child_status(status, bfd_child, PROG_BFD);
-			ret = waitpid(bfd_child, &wstatus, WNOHANG);
-			if (ret == 0)
-				continue;
-			if (ret == -1) {
-				if (check_EINTR(errno))
-					continue;
-				log_message(LOG_INFO, "Wait for bfd child return errno %d", errno);
-			}
-			bfd_child = 0;
-			wait_count--;
-		}
-#endif
 
+		for (i = 0; i < NUM_CHILD_TERM && wait_count; i++) {
+			if (*children_term[i].pid_p > 0 && *children_term[i].pid_p == (pid_t)siginfo.ssi_pid) {
+				ret = waitpid(*children_term[i].pid_p, &wstatus, WNOHANG);
+				if (ret == 0)
+					continue;
+				if (ret == -1) {
+					if (!check_EINTR(errno))
+						log_message(LOG_INFO, "Wait for %s child return errno %d", children_term[i].short_name, errno);
+					continue;
+				}
+
+				report_child_status(wstatus, *children_term[i].pid_p, children_term[i].name);
+
+				/* We could check ret == *children_term[i].pid_p, but it seems unneccessary */
+				*children_term[i].pid_p = 0;
+				wait_count--;
+
+				break;
+			}
+		}
 #else
 		ret = sigtimedwait(&child_wait, NULL, &timeout);
 		if (ret == -1) {
@@ -844,28 +978,13 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 				break;
 		}
 
-#ifdef _WITH_VRRP_
-		if (vrrp_child > 0 && vrrp_child == waitpid(vrrp_child, &status, WNOHANG)) {
-			report_child_status(status, vrrp_child, PROG_VRRP);
-			vrrp_child = 0;
-			wait_count--;
+		for (i = 0; i < NUM_CHILD_TERM && wait_count; i++) {
+			if (*children_term[i].pid_p > 0 && *children_term[i].pid_p == waitpid(*children_term[i].pid_p, &wstatus, WNOHANG)) {
+				report_child_status(wstatus, *children_term[i].pid_p, children_term[i].name);
+				*children_term[i].pid_p = 0;
+				wait_count--;
+			}
 		}
-#endif
-
-#ifdef _WITH_LVS_
-		if (checkers_child > 0 && checkers_child == waitpid(checkers_child, &status, WNOHANG)) {
-			report_child_status(status, checkers_child, PROG_CHECK);
-			checkers_child = 0;
-			wait_count--;
-		}
-#endif
-#ifdef _WITH_BFD_
-		if (bfd_child > 0 && bfd_child == waitpid(bfd_child, &status, WNOHANG)) {
-			report_child_status(status, bfd_child, PROG_BFD);
-			bfd_child = 0;
-			wait_count--;
-		}
-#endif
 #endif
 
 		if (wait_count) {
@@ -891,29 +1010,29 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 #endif
 
 	/* A child may not have terminated, so force its termination */
-#ifdef _WITH_VRRP_
-	if (vrrp_child) {
-		log_message(LOG_INFO, "vrrp process failed to die - forcing termination");
-		kill(vrrp_child, SIGKILL);
+	for (i = 0; i < NUM_CHILD_TERM; i++) {
+		if (*children_term[i].pid_p) {
+			log_message(LOG_INFO, "%s process failed to die - forcing termination", children_term[i].short_name);
+			kill(*children_term[i].pid_p, SIGKILL);
+		}
 	}
-#endif
-#ifdef _WITH_LVS_
-	if (checkers_child) {
-		log_message(LOG_INFO, "checker process failed to die - forcing termination");
-		kill(checkers_child, SIGKILL);
-	}
-#endif
-#ifdef _WITH_BFD_
-	if (bfd_child) {
-		log_message(LOG_INFO, "bfd process failed to die - forcing termination");
-		kill(bfd_child, SIGKILL);
-	}
-#endif
+
+	if (!global_data->shutdown_script) {
+		/* register the terminate thread */
+		thread_add_terminate_event(master);
 
 #ifndef HAVE_SIGNALFD
-	if (!sigismember(&old_set, SIGCHLD))
-		sigmask_func(SIG_UNBLOCK, &child_wait, NULL);
+		if (!sigismember(&old_set, SIGCHLD))
+			sigmask_func(SIG_UNBLOCK, &child_wait, NULL);
 #endif
+	} else {
+		/* If we have a shutdown script, run it now */
+		if (__test_bit(LOG_DETAIL_BIT, &debug))
+			log_message(LOG_INFO, "Running shutdown script %s", global_data->shutdown_script->args[0]);
+
+		if (system_call_script(master, shutdown_script_completed, NULL, global_data->shutdown_script_timeout * TIMER_HZ, global_data->shutdown_script) == -1)
+			log_message(LOG_INFO, "Call of shutdown script %s failed", global_data->shutdown_script->args[0]);
+	}
 }
 #endif
 
@@ -925,6 +1044,7 @@ signal_init(void)
 	signal_set(SIGHUP, propagate_signal, NULL);
 	signal_set(SIGUSR1, propagate_signal, NULL);
 	signal_set(SIGUSR2, propagate_signal, NULL);
+	signal_set(SIGSTATS_CLEAR, propagate_signal, NULL);
 #ifdef _WITH_JSON_
 	signal_set(SIGJSON, propagate_signal, NULL);
 #endif
@@ -943,6 +1063,7 @@ signals_ignore(void) {
 	signal_ignore(SIGHUP);
 	signal_ignore(SIGUSR1);
 	signal_ignore(SIGUSR2);
+	signal_ignore(SIGSTATS_CLEAR);
 #ifdef _WITH_JSON_
 	signal_ignore(SIGJSON);
 #endif
@@ -1121,6 +1242,9 @@ initialise_debug_options(void)
 #ifdef _EINTR_DEBUG_
 	do_eintr_debug = !!(eintr_debug & mask);
 #endif
+#ifdef _SCRIPT_DEBUG_
+	do_script_debug = !!(script_debug & mask);
+#endif
 #ifdef _DUMP_KEYWORDS_
 	do_dump_keywords = !!(dump_keywords & mask);
 #endif
@@ -1204,6 +1328,9 @@ set_debug_options(const char *options)
 #ifdef _EINTR_DEBUG_
 		eintr_debug = all_processes;
 #endif
+#ifdef _SCRIPT_DEBUG_
+		script_debug = all_processes;
+#endif
 #ifdef _DUMP_KEYWORDS_
 		dump_keywords = all_processes;
 #endif
@@ -1255,7 +1382,7 @@ set_debug_options(const char *options)
 		}
 #endif
 
-		/* Letters used - ABCDEFIHKMNOPRSTUXZ */
+		/* Letters used - ABCDEFIHKMNOPRSTUVXZ */
 		switch (opt) {
 #ifdef _TIMER_CHECK_
 		case 'T':
@@ -1345,6 +1472,11 @@ set_debug_options(const char *options)
 			eintr_debug = processes;
 			break;
 #endif
+#ifdef _SCRIPT_DEBUG_
+		case 'V':
+			script_debug = processes;
+			break;
+#endif
 #ifdef _DUMP_KEYWORDS_
 		case 'K':
 			dump_keywords = processes;
@@ -1417,7 +1549,7 @@ usage(const char *prog)
 	fprintf(stderr, "  -i, --config-id id           Skip any configuration lines beginning '@' that don't match id\n"
 			"                                or any lines beginning @^ that do match.\n"
 			"                                The config-id defaults to the node name if option not used\n");
-	fprintf(stderr, "      --signum=SIGFUNC         Return signal number for STOP, RELOAD, DATA, STATS"
+	fprintf(stderr, "      --signum=SIGFUNC         Return signal number for STOP, RELOAD, DATA, STATS, STATS_CLEAR"
 #ifdef _WITH_JSON_
 								", JSON"
 #endif
@@ -1440,7 +1572,7 @@ usage(const char *prog)
 	fprintf(stderr, "                                   M - email alert debug\n");
 #endif
 #ifdef _SMTP_CONNECT_DEBUG_
-	fprintf(stderr, "                                   H - smtp connect debug\n");
+	fprintf(stderr, "                                   B - smtp connect debug\n");
 #endif
 #ifdef _EPOLL_DEBUG_
 	fprintf(stderr, "                                   E - epoll debug\n");
@@ -1484,6 +1616,9 @@ usage(const char *prog)
 #endif
 #ifdef _EINTR_DEBUG_
 	fprintf(stderr, "                                   I - EINTR debugging\n");
+#endif
+#ifdef _SCRIPT_DEBUG_
+	fprintf(stderr, "                                   V - script debugging\n");
 #endif
 #ifdef _DUMP_KEYWORDS_
 	fprintf(stderr, "                                   K - dump keywords\n");
@@ -1787,6 +1922,7 @@ parse_cmdline(int argc, char **argv)
 				exit(1);
 			}
 
+			/* If we want to print the signal description, strsignal(signum) can be used */
 			printf("%d\n", signum);
 			exit(0);
 			break;
@@ -1876,13 +2012,34 @@ register_parent_thread_addresses(void)
 #endif
 
 #ifndef _ONE_PROCESS_DEBUG_
+	register_reload_addresses();
 	register_signal_handler_address("propagate_signal", propagate_signal);
 	register_signal_handler_address("sigend", sigend);
 #endif
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
 	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
+
+	register_thread_address("start_keepalived", start_keepalived);
+	register_thread_address("startup_script_completed", startup_script_completed);
+	register_thread_address("shutdown_script_completed", shutdown_script_completed);
+	register_thread_address("run_startup_script", run_startup_script);
 }
 #endif
+
+static unsigned
+check_start_stop_script_secure(notify_script_t **script, magic_t magic)
+{
+	unsigned flags;
+
+	flags = check_notify_script_secure(script, magic);
+
+	/* Mark not to run if needs inhibiting */
+	if (flags & (SC_INHIBIT | SC_NOTFOUND) ||
+	    !(flags & (SC_EXECUTABLE | SC_SYSTEM)))
+		free_notify_script(script);
+
+	return flags;
+}
 
 /* Entry point */
 int
@@ -1892,12 +2049,10 @@ keepalived_main(int argc, char **argv)
 	struct utsname uname_buf;
 	char *end;
 	int exit_code = KEEPALIVED_EXIT_OK;
-#ifdef _WITH_NFTABLES_
-	FILE *fp;
-	char nft_ver_buf[128];
-	char *p;
-	unsigned nft_major = 0, nft_minor = 0, nft_release = 0;
-#endif
+	magic_t magic;
+	unsigned script_flags;
+	struct rusage usage;
+	struct rusage child_usage;
 
 	/* Ignore reloading signals till signal_init call */
 	signals_ignore();
@@ -2030,23 +2185,8 @@ keepalived_main(int argc, char **argv)
 	init_global_data(global_data, NULL, false);
 
 #ifdef _WITH_NFTABLES_
-	if (global_data->vrrp_nf_table_name) {
-		/* We are using nftables. Find the version of nft. */
-		fp = popen("nft -v 2>/dev/null", "r");
-		if (fgets(nft_ver_buf, sizeof(nft_ver_buf) - 1, fp)) {
-			p = strchr(nft_ver_buf, ' ');
-			while (*p == ' ')
-				p++;
-			if (*p == 'v')
-				p++;
-
-			if (sscanf(p, "%u.%u.%u", &nft_major, &nft_minor, &nft_release) >= 2)
-				global_data->nft_version = (nft_major * 0x100 + nft_minor) * 0x100 + nft_release;
-		}
-		pclose(fp);
-
+	if (global_data->vrrp_nf_table_name)
 		set_nf_ifname_type();
-	}
 #endif
 
 	/* Update process name if necessary */
@@ -2153,18 +2293,18 @@ keepalived_main(int argc, char **argv)
 		else
 		{
 			if (!main_pidfile)
-				main_pidfile = PID_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
+				main_pidfile = RUN_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
 #ifdef _WITH_LVS_
 			if (!checkers_pidfile)
-				checkers_pidfile = PID_DIR CHECKERS_PID_FILE PID_EXTENSION;
+				checkers_pidfile = RUN_DIR CHECKERS_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_VRRP_
 			if (!vrrp_pidfile)
-				vrrp_pidfile = PID_DIR VRRP_PID_FILE PID_EXTENSION;
+				vrrp_pidfile = RUN_DIR VRRP_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_BFD_
 			if (!bfd_pidfile)
-				bfd_pidfile = PID_DIR BFD_PID_FILE PID_EXTENSION;
+				bfd_pidfile = RUN_DIR BFD_PID_FILE PID_EXTENSION;
 #endif
 		}
 
@@ -2190,6 +2330,23 @@ keepalived_main(int argc, char **argv)
 	enable_mem_log_termination();
 #endif
 
+	if (global_data->startup_script || global_data->shutdown_script) {
+		magic = ka_magic_open();
+		script_flags = 0;
+		if (global_data->startup_script)
+			script_flags |= check_start_stop_script_secure(&global_data->startup_script, magic);
+		if (global_data->shutdown_script)
+			script_flags |= check_start_stop_script_secure(&global_data->shutdown_script, magic);
+
+		if (magic)
+			ka_magic_close(magic);
+
+		if (!script_security && script_flags & SC_ISSCRIPT) {
+			report_config_error(CONFIG_SECURITY_ERROR, "SECURITY VIOLATION - start/shutdown scripts are being executed but script_security not enabled.%s",
+						script_flags & SC_INSECURE ? " There are insecure scripts." : "");
+		}
+	}
+
 	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
 		validate_config();
 
@@ -2200,15 +2357,22 @@ keepalived_main(int argc, char **argv)
 	if (!pidfile_write(main_pidfile, getpid()))
 		goto end;
 
+	if (!global_data->max_auto_priority)
+		log_message(LOG_INFO, "NOTICE: setting config option max_auto_priority should result in better keepalived performance");
+
 	/* Create the master thread */
 	master = thread_make_master();
 
 	/* Signal handling initialization  */
 	signal_init();
 
-	/* Init daemon */
-	if (!start_keepalived())
-		log_message(LOG_INFO, "Warning - keepalived has no configuration to run");
+	/* If we have a startup script, run it first */
+	if (global_data->startup_script) {
+		thread_add_event(master, run_startup_script, NULL, 0);
+	} else {
+		/* Init daemon */
+		thread_add_event(master, start_keepalived, NULL, 0);
+	}
 
 	initialise_debug_options();
 
@@ -2232,6 +2396,15 @@ keepalived_main(int argc, char **argv)
 	 */
 end:
 	if (report_stopped) {
+		if (__test_bit(LOG_DETAIL_BIT, &debug)) {
+			getrusage(RUSAGE_SELF, &usage);
+			getrusage(RUSAGE_CHILDREN, &child_usage);
+
+			log_message(LOG_INFO, "CPU usage (self/children) user: %ld.%6.6ld/%ld.%6.6ld system: %ld.%6.6ld/%ld.%6.6ld",
+					usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, child_usage.ru_utime.tv_sec, child_usage.ru_utime.tv_usec,
+					usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, child_usage.ru_stime.tv_sec, child_usage.ru_stime.tv_usec);
+		}
+
 #ifdef GIT_COMMIT
 		log_message(LOG_INFO, "Stopped %s, git commit %s", version_string, GIT_COMMIT);
 #else

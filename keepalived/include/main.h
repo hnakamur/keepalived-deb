@@ -73,7 +73,7 @@ extern const char *main_pidfile;	/* overrule default pidfile */
 extern bool snmp_option;		/* Enable SNMP support */
 extern const char *snmp_socket;		/* Socket to use for SNMP agent */
 #endif
-extern bool use_pid_dir;		/* pid files in /var/run/keepalived */
+extern bool use_pid_dir;		/* pid files in /run/keepalived */
 extern unsigned os_major;		/* Kernel version */
 extern unsigned os_minor;
 extern unsigned os_release;
@@ -88,7 +88,6 @@ extern bool running_vrrp(void) __attribute__ ((pure));
 extern bool running_checker(void) __attribute__ ((pure));
 #endif
 
-extern void stop_keepalived(void);
 #ifdef THREAD_DUMP
 extern void thread_dump_signal(void *, int);
 #endif

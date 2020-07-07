@@ -41,13 +41,16 @@ typedef struct _sock {
 	sa_family_t		family;
 	int			proto;
 	interface_t		*ifp;
-	bool			unicast;
+	const struct sockaddr_storage	*unicast_src;
 	int			fd_in;
 	int			fd_out;
 	int			rx_buf_size;
 	thread_ref_t		thread;
 	rb_root_t		rb_vrid;
 	rb_root_cached_t	rb_sands;
+
+	/* Linked list member */
+	list_head_t		e_list;
 } sock_t;
 
 #endif

@@ -102,23 +102,20 @@ POST_UNINSTALL = :
 @FIB_ROUTING_TRUE@am__append_8 = vrrp_iproute.c vrrp_iprule.c vrrp_ip_rule_route_parser.c
 @FIREWALL_TRUE@am__append_9 = vrrp_firewall.o vrrp_firewall.o
 @FIREWALL_TRUE@am__append_10 = vrrp_firewall.c vrrp_firewall.c
-@IPTABLES_TRUE@am__append_11 = vrrp_iptables.o
-@IPTABLES_TRUE@am__append_12 = vrrp_iptables.c
-@LIBIPTC_TRUE@am__append_13 = vrrp_iptables_lib.o vrrp_iptables_calls.o
-@LIBIPTC_TRUE@am__append_14 = vrrp_iptables_lib.c vrrp_iptables_calls.c
-@IPTABLES_CMD_TRUE@am__append_15 = vrrp_iptables_cmd.o
-@IPTABLES_CMD_TRUE@am__append_16 = vrrp_iptables_cmd.c
-@LIBIPSET_TRUE@am__append_17 = vrrp_ipset.o
-@LIBIPSET_TRUE@am__append_18 = vrrp_ipset.c
-@NFTABLES_TRUE@am__append_19 = vrrp_nftables.o
-@NFTABLES_TRUE@am__append_20 = vrrp_nftables.c
-@SNMP_VRRP_TRUE@am__append_21 = vrrp_snmp.o
-@SNMP_VRRP_TRUE@am__append_22 = vrrp_snmp.c
-@WITH_JSON_TRUE@am__append_23 = vrrp_json.o
-@WITH_JSON_TRUE@am__append_24 = vrrp_json.c
+@IPTABLES_TRUE@am__append_11 = vrrp_iptables.o vrrp_iptables_calls.o
+@IPTABLES_TRUE@am__append_12 = vrrp_iptables.c vrrp_iptables_calls.c
+@LIBIPSET_TRUE@am__append_13 = vrrp_ipset.o
+@LIBIPSET_TRUE@am__append_14 = vrrp_ipset.c
+@NFTABLES_TRUE@am__append_15 = vrrp_nftables.o
+@NFTABLES_TRUE@am__append_16 = vrrp_nftables.c
+@SNMP_VRRP_TRUE@am__append_17 = vrrp_snmp.o
+@SNMP_VRRP_TRUE@am__append_18 = vrrp_snmp.c
+@WITH_JSON_TRUE@am__append_19 = vrrp_json.o
+@WITH_JSON_TRUE@am__append_20 = vrrp_json.c
 subdir = keepalived/vrrp
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
+	$(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -136,8 +133,7 @@ libvrrp_a_AR = $(AR) $(ARFLAGS)
 libvrrp_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
 	$(am__append_5) $(am__append_7) $(am__append_9) \
 	$(am__append_11) $(am__append_13) $(am__append_15) \
-	$(am__append_17) $(am__append_19) $(am__append_21) \
-	$(am__append_23)
+	$(am__append_17) $(am__append_19)
 am_libvrrp_a_OBJECTS = vrrp_daemon.$(OBJEXT) vrrp_print.$(OBJEXT) \
 	vrrp_data.$(OBJEXT) vrrp_parser.$(OBJEXT) vrrp.$(OBJEXT) \
 	vrrp_notify.$(OBJEXT) vrrp_scheduler.$(OBJEXT) \
@@ -148,8 +144,8 @@ am_libvrrp_a_OBJECTS = vrrp_daemon.$(OBJEXT) vrrp_print.$(OBJEXT) \
 am__EXTRA_libvrrp_a_SOURCES_DIST = vrrp_vmac.c vrrp_ipsecah.c \
 	vrrp_dbus.c vrrp_iproute.c vrrp_iprule.c \
 	vrrp_ip_rule_route_parser.c vrrp_firewall.c vrrp_iptables.c \
-	vrrp_iptables_lib.c vrrp_iptables_calls.c vrrp_iptables_cmd.c \
-	vrrp_ipset.c vrrp_nftables.c vrrp_snmp.c vrrp_json.c
+	vrrp_iptables_calls.c vrrp_ipset.c vrrp_nftables.c vrrp_snmp.c \
+	vrrp_json.c
 libvrrp_a_OBJECTS = $(am_libvrrp_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -164,7 +160,7 @@ am__v_at_ = $(am__v_at_@AM_DEFAULT_V@)
 am__v_at_0 = @
 am__v_at_1 = 
 DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)/lib
-depcomp = $(SHELL) $(top_srcdir)/depcomp
+depcomp = $(SHELL) $(top_srcdir)/build-aux/depcomp
 am__depfiles_maybe = depfiles
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
@@ -206,7 +202,8 @@ am__define_uniq_tagged_files = \
   done | $(am__uniquify_input)`
 ETAGS = etags
 CTAGS = ctags
-am__DIST_COMMON = $(srcdir)/Makefile.in $(top_srcdir)/depcomp
+am__DIST_COMMON = $(srcdir)/Makefile.in \
+	$(top_srcdir)/build-aux/depcomp
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 ACLOCAL = @ACLOCAL@
 AMTAR = @AMTAR@
@@ -264,11 +261,11 @@ PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_URL = @PACKAGE_URL@
 PACKAGE_VERSION = @PACKAGE_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
-PID_DIR = @PID_DIR@
 PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
+RUN_DIR = @RUN_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -321,12 +318,12 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-# AM_LIBS		= $(KA_LIBS)
-# AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
-AM_CPPFLAGS = $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS) -I$(srcdir)/../include \
-	-I$(srcdir)/../../lib
+AM_CPPFLAGS = -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib \
+	$(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS = $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
+# AM_LIBS		= $(KA_LIBS)
+# AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
 noinst_LIBRARIES = libvrrp.a
 libvrrp_a_SOURCES = vrrp_daemon.c vrrp_print.c vrrp_data.c \
 	vrrp_parser.c vrrp.c vrrp_notify.c vrrp_scheduler.c \
@@ -336,12 +333,11 @@ libvrrp_a_SOURCES = vrrp_daemon.c vrrp_print.c vrrp_data.c \
 libvrrp_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
 	$(am__append_7) $(am__append_9) $(am__append_11) \
 	$(am__append_13) $(am__append_15) $(am__append_17) \
-	$(am__append_19) $(am__append_21) $(am__append_23)
+	$(am__append_19)
 EXTRA_libvrrp_a_SOURCES = $(am__append_2) $(am__append_4) \
 	$(am__append_6) $(am__append_8) $(am__append_10) \
 	$(am__append_12) $(am__append_14) $(am__append_16) \
-	$(am__append_18) $(am__append_20) $(am__append_22) \
-	$(am__append_24)
+	$(am__append_18) $(am__append_20)
 all: all-am
 
 .SUFFIXES:
@@ -406,8 +402,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_ipset.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_iptables.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_iptables_calls.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_iptables_cmd.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_iptables_lib.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_json.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_ndisc.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vrrp_nftables.Po@am__quote@

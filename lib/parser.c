@@ -45,12 +45,13 @@
 #include "parser.h"
 #include "memory.h"
 #include "logger.h"
+#include "list_head.h"
 #include "rttables.h"
 #include "scheduler.h"
 #include "notify.h"
-#include "list.h"
 #include "bitops.h"
 #include "utils.h"
+#include "process.h"
 
 
 #define DEF_LINE_END	"\n"
@@ -69,12 +70,51 @@ typedef struct _defs {
 	unsigned max_params;
 	const char *params;
 	const char *params_end;
+
+	/* Linked list member */
+	list_head_t e_list;
 } def_t;
 
 typedef struct _multiline_stack_ent {
 	const char *ptr;
 	size_t seq_depth;
+
+	/* Linked list member */
+	list_head_t e_list;
 } multiline_stack_ent;
+
+/* Structures used for ~LST */
+typedef struct param {
+	const char	*name;
+	list_head_t	e_list;
+} param_t;
+
+typedef struct value {
+	const char	*val;
+	list_head_t	e_list;
+} value_t;
+
+typedef struct value_set {
+	list_head_t	values;		/* value_t */
+	list_head_t	e_list;
+} value_set_t;
+
+/* Structure for ~SEQ or ~LST */
+typedef struct _seq {
+	const char *var;
+	long next;
+	value_set_t *next_var;
+	long last;
+	long step;
+	bool hex;
+	const char *text;
+	list_head_t lst_params;		/* param_t */
+	list_head_t lst_values;		/* value_set_t */
+
+	/* Linked list member */
+	list_head_t e_list;
+} seq_t;
+
 
 /* global vars */
 vector_t *keywords;
@@ -94,18 +134,21 @@ static const char *current_file_name;
 static size_t current_file_line_no;
 static int sublevel = 0;
 static int skip_sublevel = 0;
-static list multiline_stack;
+static LIST_HEAD_INITIALIZE(multiline_stack); /* multiline_stack_ent */
 static size_t multiline_seq_depth = 0;
 static char *buf_extern;
 static config_err_t config_err = CONFIG_OK; /* Highest level of config error for --config-test */
 static unsigned int random_seed;
 static bool random_seed_configured;
+static LIST_HEAD_INITIALIZE(seq_list);	/* seq_t */
+static unsigned seq_list_count = 0;
 
 /* Parameter definitions */
-static list defs;
+static LIST_HEAD_INITIALIZE(defs); /* def_t */
 
 /* Forward declarations for recursion */
 static bool read_line(char *, size_t);
+static bool replace_param(char *, size_t, char const **);
 
 void
 report_config_error(config_err_t err, const char *format, ...)
@@ -221,7 +264,7 @@ read_unsigned_func(const char *number, int base, unsigned *res, unsigned min_val
 	else if (errno == ERANGE || val > UINT_MAX)
 		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' outside unsigned integer range", warn, number);
 	else if (val < min_val || val > max_val)
-		report_config_error(CONFIG_INVALID_NUMBER, "number '%s' outside range [%u, %u]", number, min_val, max_val);
+		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' outside range [%u, %u]", warn, number, min_val, max_val);
 	else
 		return true;
 
@@ -482,7 +525,7 @@ dump_keywords(vector_t *keydump, int level, FILE *fp)
 {
 	unsigned int i;
 	keyword_t *keyword_vec;
-	char file_name[22];
+	char file_name[1 + 3 + 1 + 8 + 1 + PID_MAX_DIGITS + 1];
 
 	if (!level) {
 		snprintf(file_name, sizeof(file_name), "/tmp/keywords.%d", getpid());
@@ -529,7 +572,7 @@ get_cwd(__attribute__((unused))const def_t *def)
 	return getcwd(dir, PATH_MAX);
 }
 
-static const char *
+static const char * __attribute__((malloc))
 get_instance(__attribute__((unused))const def_t *def)
 {
 	return STRDUP(config_id);
@@ -772,48 +815,126 @@ alloc_strvec_r(const char *string)
 	return strvec;
 }
 
-typedef struct _seq {
-	const char *var;
-	int next;
-	int last;
-	int step;
-	const char *text;
-} seq_t;
-
-static list seq_list;	/* List of seq_t */
-
 #ifdef _PARSER_DEBUG_
+static void
+dump_seq_lst(const seq_t *seq)
+{
+	param_t *param;
+	value_set_t *value_set;
+	value_t *value;
+	char *buf = MALLOC(1024);
+	char *p;
+
+	/* List the parameters */
+	p = buf;
+	list_for_each_entry(param, &seq->lst_params, e_list)
+		p += snprintf(p, buf + 1024 - p, "%s%s", p == buf ? "" : ", ", param->name);
+	log_message(LOG_INFO, "LST parameters: %s", buf);
+
+	/* List the values */
+	list_for_each_entry(value_set, &seq->lst_values, e_list) {
+		/* List the values in the value set */
+		buf[0] = '\0';
+		p = buf;
+		list_for_each_entry(value, &value_set->values, e_list)
+			p += snprintf(p, buf + 1024 - p, "%s%s", p == buf ? "" : ", ", value->val);
+		log_message(LOG_INFO, "    values:     %s", buf);
+	}
+
+	FREE(buf);
+}
+
 static void
 dump_seqs(void)
 {
 	seq_t *seq;
-	element e;
 
-	LIST_FOREACH(seq_list, seq, e)
-		log_message(LOG_INFO, "SEQ: %s => %d -> %d step %d: '%s'", seq->var, seq->next, seq->last, seq->step, seq->text);
+	list_for_each_entry(seq, &seq_list, e_list) {
+		if (!list_empty(&seq->lst_params)) {
+			dump_seq_lst(seq);
+		} else if (seq->hex)
+			log_message(LOG_INFO, "SEQ: %s => 0x%lx -> 0x%lx step %ld: '%s'", seq->var, (unsigned long)seq->next, (unsigned long)seq->last, seq->step, seq->text);
+		else
+			log_message(LOG_INFO, "SEQ: %s => %ld -> %ld step %ld: '%s'", seq->var, seq->next, seq->last, seq->step, seq->text);
+	}
 	log_message(LOG_INFO, "%s", "");
 }
 #endif
 
 static void
-free_seq(void *s)
+free_seq(seq_t *seq)
 {
-	seq_t *seq = s;
-
+	list_del_init(&seq->e_list);
 	FREE_CONST(seq->var);
 	FREE_CONST(seq->text);
 	FREE(seq);
+}
+
+static void
+free_seq_lst(seq_t *seq)
+{
+	param_t *param, *param_tmp;
+	value_set_t *value_set, *value_set_tmp;
+	value_t *value, *value_tmp;
+
+	list_del_init(&seq->e_list);
+
+	/* Free the parameters */
+	list_for_each_entry_safe(param, param_tmp, &seq->lst_params, e_list) {
+		list_del_init(&param->e_list);
+		FREE_CONST(param->name);
+		FREE(param);
+	}
+
+	/* Free the values */
+	list_for_each_entry_safe(value_set, value_set_tmp, &seq->lst_values, e_list) {
+		/* Free the values in a value set */
+		list_for_each_entry_safe(value, value_tmp, &value_set->values, e_list) {
+			list_del_init(&value->e_list);
+			FREE_CONST(value->val);
+			FREE(value);
+		}
+		list_del_init(&value_set->e_list);
+		FREE(value_set);
+	}
+
+	FREE_CONST(seq->text);
+	FREE(seq);
+}
+
+static void
+free_seq_list(list_head_t *l)
+{
+	seq_t *seq, *seq_tmp;
+
+	list_for_each_entry_safe(seq, seq_tmp, l, e_list) {
+		if (list_empty(&seq->lst_params))
+			free_seq(seq);
+		else
+			free_seq_lst(seq);
+	}
 }
 
 static bool
 add_seq(char *buf)
 {
 	char *p = buf + 4;	/* Skip ~SEQ */
+	bool hex;
 	long one, two, three;
 	long start, step, end;
 	seq_t *seq_ent;
 	const char *var;
 	const char *var_end;
+	const char *multiline = NULL;
+	char seq_buf[3 * 20 + 3 + 1]; /* 3 longs, each with , or ) after plus terminating nul */
+	char *end_seq;
+
+	/* Do we want the output in hex format - e.g. for IPv6 addresses */
+	if (*p == 'x') {
+		p++;
+		hex = true;
+	} else
+		hex = false;
 
 	p += strspn(p, " \t");
 	if (*p++ != '(')
@@ -830,7 +951,23 @@ add_seq(char *buf)
 		return false;
 	}
 
+	/* Convert any parameters of ~SEQ which are definitions */
 	p++;
+	p += strspn(p, " \t");
+	end_seq = strchr(p, ')');
+	if ((size_t)(end_seq + 1 - p + 1) > sizeof(seq_buf)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "~SEQ parameter strings too long '%s'", buf);
+		return false;
+	}
+	strncpy(seq_buf, p, end_seq + 1 - p);
+	seq_buf[end_seq + 1 - p] = '\0';
+	replace_param(seq_buf, sizeof(seq_buf), &multiline);
+	if (multiline) {
+		report_config_error(CONFIG_GENERAL_ERROR, "~SEQ parameter is multiline definition '%s'", buf);
+		return false;
+	}
+
+	p = seq_buf;
 	do {
 		// Handle missing number
 		one = strtol(p, &p, 0);
@@ -883,18 +1020,165 @@ add_seq(char *buf)
 		}
 	} while (false);
 
+	if (hex && (start < 0 || end < 0)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "~SEQx is only valid for positive numbers '%s'", buf);
+		return false;
+	}
+
+	p = end_seq;
 	p += strspn(p + 1, " \t") + 1;
 
 	PMALLOC(seq_ent);
+	INIT_LIST_HEAD(&seq_ent->e_list);
+	INIT_LIST_HEAD(&seq_ent->lst_params);
+	INIT_LIST_HEAD(&seq_ent->lst_values);
 	seq_ent->var = STRNDUP(var, var_end - var);
 	seq_ent->next = start;
 	seq_ent->step = step;
 	seq_ent->last = end;
+	seq_ent->hex = hex;
 	seq_ent->text = STRDUP(p);
 
-	if (!seq_list)
-		seq_list = alloc_list(free_seq, NULL);
-	list_add(seq_list, seq_ent);
+	list_add_tail(&seq_ent->e_list, &seq_list);
+	seq_list_count++;
+
+	return true;
+}
+
+static bool
+add_lst(char *buf)
+{
+	char *p = buf + 4;	/* Skip ~LST */
+	seq_t *seq_ent;
+	const char *var;
+	const char *var_end;
+	param_t *param;
+	value_set_t *value_set;
+	value_t *value;
+	unsigned num_vars = 0;
+	unsigned num_values;
+	char end_char;
+
+	PMALLOC(seq_ent);
+	INIT_LIST_HEAD(&seq_ent->e_list);
+	INIT_LIST_HEAD(&seq_ent->lst_params);
+	INIT_LIST_HEAD(&seq_ent->lst_values);
+
+	p += strspn(p, " \t");
+	if (*p++ != '(') {
+		free_seq_lst(seq_ent);
+		return false;
+	}
+
+	p += strspn(p, " \t");
+
+	if (*p == '{') {
+		end_char = '}';
+		p++;
+		p += strspn(p, " \t");
+	} else
+		end_char = ',';
+
+	while (true) {
+		var = p;
+		var_end = p += strcspn(p, " \t,}");
+		PMALLOC(param);
+		INIT_LIST_HEAD(&param->e_list);
+
+		param->name = STRNDUP(var, var_end - var);
+		list_add_tail(&param->e_list, &seq_ent->lst_params);
+
+		p += strspn(p, " \t");
+		if (*p == end_char)
+			break;
+		if (*p != ',') {
+			free_seq_lst(seq_ent);
+			return false;
+		}
+		p += strspn(p + 1, " \t") + 1;
+		num_vars++;
+	}
+	if (*p == '}')
+		p += strspn(p + 1, " \t") + 1;
+	if (*p++ != ',') {
+		free_seq_lst(seq_ent);
+		return false;
+	}
+
+	/* Read the values */
+	p += strspn(p, " \t");
+
+	while (true) {
+		PMALLOC(value_set);
+		INIT_LIST_HEAD(&value_set->e_list);
+		INIT_LIST_HEAD(&value_set->values);
+
+		if (*p == '{') {
+			end_char = '}';
+			p++;
+			p += strspn(p, " \t");
+		} else
+			end_char = ',';
+
+		/* Read one set of values */
+		num_values = 0;
+		while (true) {
+			var = p;
+			var_end = p += strcspn(p, " \t,})");
+			PMALLOC(value);
+			INIT_LIST_HEAD(&value->e_list);
+
+			value->val = STRNDUP(var, var_end - var);
+			list_add_tail(&value->e_list, &value_set->values);
+
+			p += strspn(p, " \t");
+			if (*p == end_char || (*p == ')' && end_char == ','))
+				break;
+			if (*p != ',') {
+				free_seq_lst(seq_ent);
+				return false;
+			}
+			p += strspn(p + 1, " \t") + 1;
+
+			if (++num_values > num_vars) {
+				report_config_error(CONFIG_GENERAL_ERROR, "~LST specification has too many values '%s'", buf);
+				free_seq_lst(seq_ent);
+				return false;
+			}
+		}
+
+		/* Any missing parameters are blank */
+		for (; num_values < num_vars; num_values++) {
+			PMALLOC(value);
+			value->val = STRDUP("");
+			INIT_LIST_HEAD(&value->e_list);
+		}
+
+		/* Add the value_set to the list of value_sets */
+		list_add_tail(&value_set->e_list, &seq_ent->lst_values);
+
+		if (*p == '}' && end_char == '}')
+			p += strspn(p + 1, " \t") + 1;
+		if (*p == ')')
+			break;
+		if (*p != ',') {
+			free_seq_lst(seq_ent);
+			return false;
+		}
+
+		p += strspn(p + 1, " \t") + 1;
+	}
+
+	if (list_empty(&seq_ent->lst_params) || list_empty(&seq_ent->lst_values)) {
+		free_seq_lst(seq_ent);
+		return false;
+	}
+
+	p += strspn(p + 1, " \t") + 1;
+	seq_ent->next_var = list_first_entry(&seq_ent->lst_values, value_set_t, e_list);
+	seq_ent->text = STRDUP(p);
+	list_add_tail(&seq_ent->e_list, &seq_list);
+	seq_list_count++;
 
 	return true;
 }
@@ -903,10 +1187,9 @@ add_seq(char *buf)
 static void
 dump_definitions(void)
 {
-	const def_t *def;
-	element e;
+	def_t *def;
 
-	LIST_FOREACH(defs, def, e)
+	list_for_each_entry(def, &defs, e_list)
 		log_message(LOG_INFO, "Defn %s = '%s'", def->name, def->value);
 	log_message(LOG_INFO, "%s", "");
 }
@@ -994,19 +1277,6 @@ process_stream(vector_t *keywords_vec, int need_bob)
 		if (!strcmp(str, EOB) && kw_level > 0) {
 			free_strvec(strvec);
 			break;
-		}
-
-		if (!strncmp(str, "~SEQ", 4)) {
-			if (!add_seq(buf))
-				report_config_error(CONFIG_GENERAL_ERROR, "Invalid ~SEQ specification '%s'", buf);
-			free_strvec(strvec);
-#ifdef _PARSER_DEBUG_
-			if (do_parser_debug) {
-				dump_definitions();
-				dump_seqs();
-			}
-#endif
-			continue;
 		}
 
 		for (i = 0; i < vector_size(keywords_vec); i++) {
@@ -1150,7 +1420,7 @@ read_conf_file(const char *conf_file)
 		process_stream(current_keywords, 0);
 		fclose(stream);
 
-		free_list(&seq_list);
+		free_seq_list(&seq_list);
 
 		/* If we changed directory, restore the previous directory */
 		if (curdir_fd != -1) {
@@ -1267,7 +1537,6 @@ check_include(const char *buf)
 static def_t * __attribute__ ((pure))
 find_definition(const char *name, size_t len, bool definition)
 {
-	element e;
 	def_t *def;
 	const char *p;
 	bool using_braces = false;
@@ -1275,7 +1544,7 @@ find_definition(const char *name, size_t len, bool definition)
 	const char *param_start = NULL;
 	const char *param_end = NULL;
 
-	if (LIST_ISEMPTY(defs))
+	if (list_empty(&defs))
 		return NULL;
 
 	if (!definition && *name == BOB[0]) {
@@ -1307,7 +1576,7 @@ find_definition(const char *name, size_t len, bool definition)
 			}
 			if (*p != EOB[0])
 				return NULL;
-		} else if (!definition && *p != ' ' && *p != '\t' && *p != '\0')
+		} else if (!definition && *p != ' ' && *p != '\t' && *p != ',' && *p != ')' && *p != '\0')
 			return NULL;
 	}
 
@@ -1318,7 +1587,7 @@ find_definition(const char *name, size_t len, bool definition)
 	else
 		allow_multiline = false;
 
-	LIST_FOREACH(defs, def, e) {
+	list_for_each_entry(def, &defs, e_list) {
 		if (def->name_len == len &&
 		    (allow_multiline || !def->multiline) &&
 		    !strncmp(def->name, name, len)) {
@@ -1338,18 +1607,27 @@ find_definition(const char *name, size_t len, bool definition)
 }
 
 static void
+free_multiline_stack_list(list_head_t *l)
+{
+	multiline_stack_ent *stack, *stack_tmp;
+
+	list_for_each_entry_safe(stack, stack_tmp, l, e_list) {
+		list_del_init(&stack->e_list);
+		FREE(stack);
+	}
+}
+
+static void
 multiline_stack_push(const char *ptr)
 {
 	multiline_stack_ent *stack_ent;
 
-	if (!LIST_EXISTS(multiline_stack))
-		multiline_stack = alloc_list(free_list_element_simple, NULL);
-
 	PMALLOC(stack_ent);
+	INIT_LIST_HEAD(&stack_ent->e_list);
 	stack_ent->ptr = ptr;
 	stack_ent->seq_depth = multiline_seq_depth;
 
-	list_add(multiline_stack, stack_ent);
+	list_add_tail(&stack_ent->e_list, &multiline_stack);
 }
 
 static const char *
@@ -1358,14 +1636,15 @@ multiline_stack_pop(void)
 	multiline_stack_ent *stack_ent;
 	const char *next_ptr;
 
-	if (!LIST_EXISTS(multiline_stack) || LIST_ISEMPTY(multiline_stack))
+	if (list_empty(&multiline_stack))
 		return NULL;
 
-	stack_ent = LIST_TAIL_DATA(multiline_stack);
+	stack_ent = list_last_entry(&multiline_stack, multiline_stack_ent, e_list);
 	next_ptr = stack_ent->ptr;
 	multiline_seq_depth = stack_ent->seq_depth;
 
-	list_remove(multiline_stack, multiline_stack->tail);
+	list_del_init(&stack_ent->e_list);
+	FREE(stack_ent);
 
 	return next_ptr;
 }
@@ -1398,7 +1677,7 @@ replace_param(char *buf, size_t max_len, char const **multiline_ptr_ptr)
 				multiline_stack_push(multiline_ptr);
 
 			if (def->multiline)
-				multiline_seq_depth = LIST_EXISTS(seq_list) ? seq_list->count : 0;
+				multiline_seq_depth = seq_list_count;
 
 			if (def->fn) {
 				/* This is a standard definition that uses a function for the replacement text */
@@ -1473,13 +1752,20 @@ replace_param(char *buf, size_t max_len, char const **multiline_ptr_ptr)
 }
 
 static void
-free_definition(void *d)
+free_def(def_t *def)
 {
-	def_t *def = d;
-
+	list_del_init(&def->e_list);
 	FREE_CONST(def->name);
 	FREE_CONST_PTR(def->value);
 	FREE(def);
+}
+static void
+free_def_list(list_head_t *l)
+{
+	def_t *def, *def_tmp;
+
+	list_for_each_entry_safe(def, def_tmp, l, e_list)
+		free_def(def);
 }
 
 static def_t*
@@ -1493,13 +1779,12 @@ set_definition(const char *name, const char *value)
 		def->fn = NULL;		/* Allow a standard definition to be overridden */
 	}
 	else {
-		def = MALLOC(sizeof(*def));
+		PMALLOC(def);
+		INIT_LIST_HEAD(&def->e_list);
 		def->name_len = name_len;
 		def->name = STRNDUP(name, def->name_len);
 
-		if (!LIST_EXISTS(defs))
-			defs = alloc_list(free_definition, NULL);
-		list_add(defs, def);
+		list_add_tail(&def->e_list, &defs);
 	}
 	def->value_len = strlen(value);
 	def->value = STRNDUP(value, def->value_len);
@@ -1547,13 +1832,12 @@ check_definition(const char *buf)
 		def->fn = NULL;		/* Allow a standard definition to be overridden */
 	}
 	else {
-		def = MALLOC(sizeof(*def));
+		PMALLOC(def);
+		INIT_LIST_HEAD(&def->e_list);
 		def->name_len = def_name_len;
 		def->name = STRNDUP(buf + 1, def->name_len);
 
-		if (!LIST_EXISTS(defs))
-			defs = alloc_list(free_definition, NULL);
-		list_add(defs, def);
+		list_add_tail(&def->e_list, &defs);
 	}
 
 	/* Skip leading whitespace */
@@ -1592,7 +1876,8 @@ add_std_definition(const char *name, const char *value, const char *(*fn)(const 
 {
 	def_t* def;
 
-	def = MALLOC(sizeof(*def));
+	PMALLOC(def);
+	INIT_LIST_HEAD(&def->e_list);
 	def->name_len = strlen(name);
 	def->name = STRNDUP(name, def->name_len);
 	if (value) {
@@ -1602,9 +1887,7 @@ add_std_definition(const char *name, const char *value, const char *(*fn)(const 
 	def->fn = fn;
 	def->max_params = max_params;
 
-	if (!LIST_EXISTS(defs))
-		defs = alloc_list(free_definition, NULL);
-	list_add(defs, def);
+	list_add_tail(&def->e_list, &defs);
 }
 
 static void
@@ -1628,11 +1911,8 @@ set_std_definitions(void)
 static void
 free_parser_data(void)
 {
-	if (LIST_EXISTS(defs))
-		free_list(&defs);
-
-	if (LIST_EXISTS(multiline_stack))
-		free_list(&multiline_stack);
+	free_def_list(&defs);
+	free_multiline_stack_list(&multiline_stack);
 }
 
 /* decomment() removes comments, the escaping of comment start characters,
@@ -1699,7 +1979,6 @@ read_line(char *buf, size_t size)
 	static def_t *def = NULL;
 	static const char *next_ptr = NULL;
 	static char *line_residue = NULL;
-
 	size_t len ;
 	bool eof = false;
 	size_t config_id_len;
@@ -1711,6 +1990,9 @@ read_line(char *buf, size_t size)
 	char *end;
 	size_t skip;
 	char *p;
+	list_head_t *next_value;
+	value_t *value;
+	param_t *param;
 
 	config_id_len = config_id ? strlen(config_id) : 0;
 	do {
@@ -1719,25 +2001,50 @@ read_line(char *buf, size_t size)
 			FREE(line_residue);
 			line_residue = NULL;
 		}
-		else if (!LIST_ISEMPTY(seq_list) &&
-			 seq_list->count > multiline_seq_depth) {
-			seq_t *seq = LIST_TAIL_DATA(seq_list);
-			char val[12];
-			snprintf(val, sizeof(val), "%d", seq->next);
-#ifdef _PARSER_DEBUG_
-			if (do_parser_debug)
-				log_message(LOG_INFO, "Processing seq %d of %s for '%s'",  seq->next, seq->var, seq->text);
-#endif
-			set_definition(seq->var, val);
-			strcpy(buf, seq->text);
-			seq->next += seq->step;
-			if ((seq->step > 0 && seq->next > seq->last) ||
-			    (seq->step < 0 && seq->next < seq->last)) {
+		else if (!list_empty(&seq_list) &&
+			seq_list_count > multiline_seq_depth) {
+			seq_t *seq = list_last_entry(&seq_list, seq_t, e_list);
+			if (list_empty(&seq->lst_params)) {
+				char val[21];
+				if (seq->hex)
+					snprintf(val, sizeof(val), "%lx", (unsigned long)seq->next);
+				else
+					snprintf(val, sizeof(val), "%ld", seq->next);
 #ifdef _PARSER_DEBUG_
 				if (do_parser_debug)
-					log_message(LOG_INFO, "Removing seq %s for '%s'", seq->var, seq->text);
+					log_message(LOG_INFO, "Processing seq %ld of %s for '%s'",  seq->next, seq->var, seq->text);
 #endif
-				list_remove(seq_list, seq_list->tail);
+				set_definition(seq->var, val);
+				strcpy(buf, seq->text);
+				seq->next += seq->step;
+				if ((seq->step > 0 && seq->next > seq->last) ||
+				    (seq->step < 0 && seq->next < seq->last)) {
+#ifdef _PARSER_DEBUG_
+					if (do_parser_debug)
+						log_message(LOG_INFO, "Removing seq %s for '%s'", seq->var, seq->text);
+#endif
+					free_seq(seq);
+				}
+			} else {
+				next_value = seq->next_var->values.next;
+				list_for_each_entry(param, &seq->lst_params, e_list) {
+					value = list_entry(next_value, value_t, e_list);
+#ifdef _PARSER_DEBUG_
+					if (do_parser_debug)
+						log_message(LOG_INFO, "Processing lst %s = '%s'",  param->name, value->val);
+#endif
+					set_definition(param->name, value->val);
+					strcpy(buf, seq->text);
+					next_value = next_value->next;
+				}
+				if (list_is_last(&seq->next_var->e_list, &seq->lst_values)) {
+#ifdef _PARSER_DEBUG_
+					if (do_parser_debug)
+						log_message(LOG_INFO, "Removing lst");
+#endif
+					free_seq_lst(seq);
+				} else
+					seq->next_var = list_entry(seq->next_var->e_list.next, value_set_t, e_list);
 			}
 		}
 		else if (next_ptr) {
@@ -1745,7 +2052,7 @@ read_line(char *buf, size_t size)
 			end = strchr(next_ptr, DEF_LINE_END[0]);
 			if (!end) {
 				strcpy(buf, next_ptr);
-				if (!LIST_ISEMPTY(multiline_stack))
+				if (!list_empty(&multiline_stack))
 					next_ptr = multiline_stack_pop();
 				else {
 					next_ptr = NULL;
@@ -1867,10 +2174,30 @@ read_line(char *buf, size_t size)
 				break;
 			}
 
+// TODO TODO TODO - how do we deal with multiple ~SEQ on one line?
+// Do we need to find closing ) and process rest of line?
+			if (!strncmp(buf, "~SEQ", 4) || !strncmp(buf, "~LST", 4)) {
+				if (buf[1] == 'S') {
+					if (!add_seq(buf))
+						report_config_error(CONFIG_GENERAL_ERROR, "Invalid ~SEQ specification '%s'", buf);
+				} else {
+					if (!add_lst(buf))
+						report_config_error(CONFIG_GENERAL_ERROR, "Invalid ~LST specification '%s'", buf);
+				}
+#ifdef _PARSER_DEBUG_
+				if (do_parser_debug) {
+					dump_definitions();
+					dump_seqs();
+				}
+#endif
+				buf[0] = '\0';
+				continue;
+			}
+
 			if (buf[0] == '~')
 				break;
 
-			if (!LIST_ISEMPTY(defs) && (p = strchr(buf, '$'))) {
+			if (!list_empty(&defs) && (p = strchr(buf, '$'))) {
 				if (!replace_param(buf, size, &next_ptr)) {
 					/* If nothing has changed, we don't need to do any more processing */
 					break;
@@ -1944,40 +2271,82 @@ read_line(char *buf, size_t size)
 }
 
 void
-alloc_value_block(void (*alloc_func) (const vector_t *), const char *block_type)
+alloc_value_block(void (*alloc_func) (const vector_t *), const vector_t *strvec)
 {
 	char *buf;
-	const char *str = NULL;
-	const vector_t *vec = NULL;
-	bool first_line = true;
+	const char *str;
+	vector_t *vec;
+	vector_t *first_vec = NULL;
+	bool need_bob = true;
+	bool had_eob = false;
+
+	if (vector_active(strvec) > 1) {
+		if (!strcmp(strvec_slot(strvec, 1), BOB)) {
+			need_bob = false;
+			if (vector_active(strvec) > 2) {
+				first_vec = vector_copy(strvec);
+				vector_unset(first_vec, 0);
+				vector_unset(first_vec, 1);
+				if (!strcmp(strvec_slot(strvec, vector_active(first_vec) - 1), EOB)) {
+					vector_unset(first_vec, vector_active(first_vec) - 1);
+					had_eob = true;
+				}
+				first_vec = vector_compact(first_vec);
+			}
+		} else
+			report_config_error(CONFIG_GENERAL_ERROR, "Block %s has extra parameters %s ..."
+								, strvec_slot(strvec, 0), strvec_slot(strvec, 1));
+	}
 
 	buf = (char *) MALLOC(MAXBUF);
-	while (read_line(buf, MAXBUF)) {
-		if (!(vec = alloc_strvec(buf)))
+	while (first_vec || read_line(buf, MAXBUF)) {
+		if (first_vec)
+			vec = first_vec;
+		else if (!(vec = alloc_strvec(buf)))
 			continue;
 
-		if (first_line) {
-			first_line = false;
+		if (!first_vec) {
+			if (need_bob) {
+				need_bob = false;
 
-			if (!strcmp(vector_slot(vec, 0), BOB)) {
-				free_strvec(vec);
-				continue;
+				if (!strcmp(vector_slot(vec, 0), BOB)) {
+					if (vector_size(vec) == 1) {
+						free_strvec(vec);
+						continue;
+					}
+
+					/* Remove the BOB */
+					vec = strvec_remove_slot(vec, 0);
+				} else
+					log_message(LOG_INFO, "'%s' missing from beginning of block %s", BOB, strvec_slot(strvec, 0));
 			}
 
-			log_message(LOG_INFO, "'%s' missing from beginning of block %s", BOB, block_type);
-		}
+			/* Check if line read ends with EOB */
+			str = vector_slot(vec, vector_active(vec) - 1);
+			if (!strcmp(str, EOB)) {
+				if (vector_active(vec) == 1) {
+					free_strvec(vec);
+					break;
+				}
 
-		str = vector_slot(vec, 0);
-		if (!strcmp(str, EOB)) {
-			free_strvec(vec);
-			break;
+				had_eob = true;
+				vec = strvec_remove_slot(vec, vector_active(vec) - 1);
+			}
 		}
 
 		if (vector_size(vec))
-			(*alloc_func) (vec);
+			(*alloc_func)(vec);
 
-		free_strvec(vec);
+		if (first_vec) {
+			vector_free(first_vec);
+			first_vec = NULL;
+		} else
+			free_strvec(vec);
+
+		if (had_eob)
+			break;
 	}
+
 	FREE(buf);
 }
 
@@ -2002,7 +2371,7 @@ read_value_block(const vector_t *strvec)
 {
 	vector_t *ret_vec;
 
-	alloc_value_block(read_value_block_line, vector_slot(strvec,0));
+	alloc_value_block(read_value_block_line, strvec);
 
 	ret_vec = read_value_block_vec;
 	read_value_block_vec = NULL;
@@ -2088,7 +2457,8 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void))
 
 	/* Report if there are missing '}'s. If there are missing '{'s it will already have been reported */
 	if (block_depth > 0)
-		report_config_error(CONFIG_MISSING_EOB, "There are %d missing '%s's or extra '%s's", block_depth, EOB, BOB);
+		report_config_error(CONFIG_MISSING_EOB, "There are %d missing '%s's or extra '%s's"
+						      , block_depth, EOB, BOB);
 
 	/* We have finished reading the configuration files, so any configuration
 	 * errors report from now mustn't include a reference to the config file name */
