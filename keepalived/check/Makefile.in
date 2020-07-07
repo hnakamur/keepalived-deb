@@ -98,7 +98,8 @@ POST_UNINSTALL = :
 @WITH_BFD_TRUE@am__append_4 = check_bfd.c
 subdir = keepalived/check
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
+	$(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -118,7 +119,8 @@ am_libcheck_a_OBJECTS = check_daemon.$(OBJEXT) check_data.$(OBJEXT) \
 	check_parser.$(OBJEXT) check_api.$(OBJEXT) check_tcp.$(OBJEXT) \
 	check_http.$(OBJEXT) check_ssl.$(OBJEXT) check_smtp.$(OBJEXT) \
 	check_misc.$(OBJEXT) check_dns.$(OBJEXT) check_print.$(OBJEXT) \
-	ipwrapper.$(OBJEXT) ipvswrapper.$(OBJEXT) libipvs.$(OBJEXT)
+	ipwrapper.$(OBJEXT) ipvswrapper.$(OBJEXT) libipvs.$(OBJEXT) \
+	check_udp.$(OBJEXT) check_ping.$(OBJEXT) check_file.$(OBJEXT)
 am__EXTRA_libcheck_a_SOURCES_DIST = check_snmp.c check_bfd.c
 libcheck_a_OBJECTS = $(am_libcheck_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
@@ -134,7 +136,7 @@ am__v_at_ = $(am__v_at_@AM_DEFAULT_V@)
 am__v_at_0 = @
 am__v_at_1 = 
 DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)/lib
-depcomp = $(SHELL) $(top_srcdir)/depcomp
+depcomp = $(SHELL) $(top_srcdir)/build-aux/depcomp
 am__depfiles_maybe = depfiles
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
@@ -176,7 +178,8 @@ am__define_uniq_tagged_files = \
   done | $(am__uniquify_input)`
 ETAGS = etags
 CTAGS = ctags
-am__DIST_COMMON = $(srcdir)/Makefile.in $(top_srcdir)/depcomp
+am__DIST_COMMON = $(srcdir)/Makefile.in \
+	$(top_srcdir)/build-aux/depcomp
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 ACLOCAL = @ACLOCAL@
 AMTAR = @AMTAR@
@@ -234,11 +237,11 @@ PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_URL = @PACKAGE_URL@
 PACKAGE_VERSION = @PACKAGE_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
-PID_DIR = @PID_DIR@
 PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
+RUN_DIR = @RUN_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -291,8 +294,8 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-AM_CPPFLAGS = $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS) -I$(srcdir)/../include \
-	-I$(srcdir)/../../lib
+AM_CPPFLAGS = -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib \
+	$(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS = $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBS		= $(KA_LIBS)
@@ -302,7 +305,8 @@ libcheck_a_SOURCES = \
 	check_daemon.c check_data.c check_parser.c \
 	check_api.c check_tcp.c check_http.c check_ssl.c \
 	check_smtp.c check_misc.c check_dns.c check_print.c \
-	ipwrapper.c ipvswrapper.c libipvs.c
+	ipwrapper.c ipvswrapper.c libipvs.c check_udp.c check_ping.c \
+	check_file.c
 
 EXTRA_libcheck_a_SOURCES = $(am__append_2) $(am__append_4)
 libcheck_a_LIBADD = $(am__append_1) $(am__append_3)
@@ -359,14 +363,17 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_daemon.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_data.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_dns.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_file.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_http.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_misc.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_parser.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_ping.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_print.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_snmp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_ssl.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_tcp.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_udp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/ipvswrapper.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/ipwrapper.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libipvs.Po@am__quote@

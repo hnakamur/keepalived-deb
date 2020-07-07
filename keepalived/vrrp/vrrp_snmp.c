@@ -122,8 +122,8 @@
 #include "vrrp_iprule.h"
 #endif
 #include "vrrp_scheduler.h"
+#include "track_file.h"
 #include "config.h"
-#include "list.h"
 #include "logger.h"
 #include "global_data.h"
 #include "bitops.h"
@@ -223,6 +223,8 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_INSTANCE_USE_LINKBEAT,
 	VRRP_SNMP_INSTANCE_VRRP_VERSION,
 	VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI,
+	VRRP_SNMP_INSTANCE_SCRIPTDELETED,
+	VRRP_SNMP_INSTANCE_NOTIFY_DELETED,
 	VRRP_SNMP_TRACKEDINTERFACE_NAME,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE,
@@ -374,16 +376,11 @@ enum snmp_next_hop_magic {
 };
 #endif
 
-#define HEADER_STATE_STATIC_ADDRESS 1
-#define HEADER_STATE_VIRTUAL_ADDRESS 2
-#define HEADER_STATE_EXCLUDED_VIRTUAL_ADDRESS 3
-#ifdef _HAVE_FIB_ROUTING_
-#define HEADER_STATE_STATIC_ROUTE 4
-#define HEADER_STATE_VIRTUAL_ROUTE 5
-#define HEADER_STATE_STATIC_RULE 6
-#define HEADER_STATE_VIRTUAL_RULE 7
-#endif
-#define HEADER_STATE_END 12
+enum iter_type {
+        ITER_ADDRESSES,
+        ITER_ROUTES,
+        ITER_RULES
+};
 
 #endif
 
@@ -513,7 +510,7 @@ static char buf[MAXBUF];
 
 /* global variable */
 #ifdef _WITH_SNMP_RFC_
-timeval_t vrrp_start_time;
+timeval_t snmp_vrrp_start_time;
 #endif
 
 
@@ -557,12 +554,14 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_script_t *scr;
+	list_head_t *e;
 	snmp_ret_t ret;
 
-	if ((scr = (vrrp_script_t *)snmp_header_list_table(vp, name, length, exact,
-							   var_len, write_method,
-							   vrrp_data->vrrp_script)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp_script)) == NULL)
 		return NULL;
+	scr = list_entry(e, vrrp_script_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_SCRIPT_NAME:
@@ -608,13 +607,15 @@ static u_char*
 vrrp_snmp_file(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
-	vrrp_tracked_file_t *file;
+	tracked_file_t *file;
+	list_head_t *e;
 	snmp_ret_t ret;
 
-	if ((file = (vrrp_tracked_file_t *)snmp_header_list_table(vp, name, length, exact,
-							   var_len, write_method,
-							   vrrp_data->vrrp_track_files)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp_track_files)) == NULL)
 		return NULL;
+	file = list_entry(e, tracked_file_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_FILE_NAME:
@@ -646,12 +647,14 @@ vrrp_snmp_bfd(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_tracked_bfd_t *bfd;
+	list_head_t *e;
 	snmp_ret_t ret;
 
-	if ((bfd = (vrrp_tracked_bfd_t *)snmp_header_list_table(vp, name, length, exact,
-							   var_len, write_method,
-							   vrrp_data->vrrp_track_bfds)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp_track_bfds)) == NULL)
 		return NULL;
+	bfd = list_entry(e, vrrp_tracked_bfd_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_BFD_NAME:
@@ -680,12 +683,14 @@ vrrp_snmp_process(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_tracked_process_t *proc;
+	list_head_t *e;
 	snmp_ret_t ret;
 
-	if ((proc = (vrrp_tracked_process_t *)snmp_header_list_table(vp, name, length, exact,
-							   var_len, write_method,
-							   vrrp_data->vrrp_track_processes)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp_track_processes)) == NULL)
 		return NULL;
+	proc = list_entry(e, vrrp_tracked_process_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_PROCESS_NAME:
@@ -755,22 +760,17 @@ vrrp_snmp_process(struct variable *vp, oid *name, size_t *length,
 }
 #endif
 
-/* Header function using a FSM. `state' is the initial state, either
-   HEADER_STATE_STATIC_ADDRESS, HEADER_STATE_STATIC_ROUTE or
-   HEADER_STATE_STATIC_RULE. We return the matching address, route or rule. */
-static void*
+static list_head_t *
 vrrp_header_ar_table(struct variable *vp, oid *name, size_t *length,
 		     int exact, size_t *var_len, WriteMethod **write_method,
-		     int *state)
+		     enum iter_type type, int *adv)
 {
-	oid *target, current[2], best[2];
+	oid *target, current[2];
 	int result;
 	size_t target_len;
-	element e1 = NULL, e2;
-	void *el, *bel = NULL;
-	list l2;
-	unsigned curinstance = 0;
-	int curstate, nextstate;
+	list_head_t *l2;
+	list_head_t *e;
+	vrrp_t *vrrp;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
 		memcpy(name, vp->name, sizeof(oid) * vp->namelen);
@@ -780,148 +780,107 @@ vrrp_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof(unsigned long);
 
-	/* We search the best match: equal if exact, the lower OID in
+	/* We search the best match: equal if exact, the lowest OID in
 	   the set of the OID strictly superior to the target
 	   otherwise. */
-	best[0] = best[1] = MAX_SUBID; /* Our best match */
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 
-	nextstate = *state;
-	while (nextstate != HEADER_STATE_END) {
-		curstate = nextstate;
-		switch (curstate) {
-		case HEADER_STATE_STATIC_ADDRESS:
-			/* Try static addresses */
-			l2 = vrrp_data->static_addresses;
-			current[1] = 0;
-			nextstate = HEADER_STATE_VIRTUAL_ADDRESS;
-			break;
-		case HEADER_STATE_VIRTUAL_ADDRESS:
-			/* Try virtual addresses */
-			if (LIST_ISEMPTY(vrrp_data->vrrp)) {
-				nextstate = HEADER_STATE_END;
-				continue;
-			}
-			curinstance++;
-			if (e1 == NULL)
-				e1 = LIST_HEAD(vrrp_data->vrrp);
-			else {
-				ELEMENT_NEXT(e1);
-				if (!e1) {
-					nextstate = HEADER_STATE_END;
-					continue;
-				}
-			}
-			l2 = ((vrrp_t *) ELEMENT_DATA(e1))->vip;
-			current[1] = 0;
-			nextstate = HEADER_STATE_EXCLUDED_VIRTUAL_ADDRESS;
-			break;
-		case HEADER_STATE_EXCLUDED_VIRTUAL_ADDRESS:
-			/* Try excluded virtual addresses */
-			/* coverity[var_deref_op] */
-			l2 = ((vrrp_t *)ELEMENT_DATA(e1))->evip;
-			nextstate = HEADER_STATE_VIRTUAL_ADDRESS;
-			break;
+	l2 = NULL;
+	vrrp = NULL;
+	current[0] = 0;
+	current[1] = 0;
+	while (true) {
+		/* Start with static addresses, then for each vrrp instance the VIPs then the eVIPs */
+		if (!l2) {
+			if (type == ITER_ADDRESSES)
+				l2 = &vrrp_data->static_addresses;
 #ifdef _HAVE_FIB_ROUTING_
-		case HEADER_STATE_STATIC_ROUTE:
-			/* Try static routes */
-			l2 = vrrp_data->static_routes;
-			current[1] = 0;
-			nextstate = HEADER_STATE_VIRTUAL_ROUTE;
-			break;
-		case HEADER_STATE_VIRTUAL_ROUTE:
-			/* Try virtual routes */
-			if (LIST_ISEMPTY(vrrp_data->vrrp) ||
-			    ((e1 != NULL) && (ELEMENT_NEXT(e1), !e1))) {
-				nextstate = HEADER_STATE_END;
-				continue;
-			}
-			curinstance++;
-			if (e1 == NULL)
-				e1 = LIST_HEAD(vrrp_data->vrrp);
-			l2 = ((vrrp_t *)ELEMENT_DATA(e1))->vroutes;
-			current[1] = 0;
-			nextstate = HEADER_STATE_VIRTUAL_ROUTE;
-			break;
-		case HEADER_STATE_STATIC_RULE:
-			/* Try static routes */
-			l2 = vrrp_data->static_rules;
-			current[1] = 0;
-			nextstate = HEADER_STATE_VIRTUAL_RULE;
-			break;
-		case HEADER_STATE_VIRTUAL_RULE:
-			/* Try virtual rules */
-			if (LIST_ISEMPTY(vrrp_data->vrrp) ||
-			    ((e1 != NULL) && (ELEMENT_NEXT(e1), !e1))) {
-				nextstate = HEADER_STATE_END;
-				continue;
-			}
-			curinstance++;
-			if (e1 == NULL)
-				e1 = LIST_HEAD(vrrp_data->vrrp);
-			l2 = ((vrrp_t *)ELEMENT_DATA(e1))->vrules;
-			current[1] = 0;
-			nextstate = HEADER_STATE_VIRTUAL_RULE;
-			break;
+			else if (type == ITER_ROUTES)
+				l2 = &vrrp_data->static_routes;
+			else /* if (type == ITER_RULES) */
+				l2 = &vrrp_data->static_rules;
 #endif
-		default:
-			return NULL; /* Big problem! */
+		} else if (!vrrp) {
+			if (list_empty(&vrrp_data->vrrp))
+				break;
+			vrrp = list_first_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+			if (type == ITER_ADDRESSES)
+				l2 = &vrrp->vip;
+#ifdef _HAVE_FIB_ROUTING_
+			else if (type == ITER_ROUTES)
+				l2 = &vrrp->vroutes;
+			else /* if (type == ITER_RULES) */
+				l2 = &vrrp->vrules;
+#endif
+			current[0]++;
+			current[1] = 0;
+			*adv = 1;
+		} else if (type == ITER_ADDRESSES && l2 == &vrrp->vip) {
+			l2 = &vrrp->evip;
+			*adv = 0;
+		} else {		/* if ITER_ADDRESSES, l2 == vrrp->evip */
+			if (list_is_last(&vrrp->e_list, &vrrp_data->vrrp))
+				break;
+			vrrp = list_entry(vrrp->e_list.next, vrrp_t, e_list);
+			if (type == ITER_ADDRESSES)
+				l2 = &vrrp->vip;
+#ifdef _HAVE_FIB_ROUTING_
+			else if (type == ITER_ROUTES)
+				l2 = &vrrp->vroutes;
+			else /* if (type == ITER_RULES) */
+				l2 = &vrrp->vrules;
+#endif
+			current[0]++;
+			current[1] = 0;
 		}
-		if (target_len && (curinstance < target[0]))
-			continue; /* Optimization: cannot be part of our set */
-		if (LIST_ISEMPTY(l2)) continue;
-		for (e2 = LIST_HEAD(l2); e2; ELEMENT_NEXT(e2)) {
-			el = ELEMENT_DATA(e2);
-			current[0] = curinstance;
+
+		if (target_len && current[0] < target[0])
+			continue;
+
+		/* Should not happen... */
+		if (!l2)
+			return NULL;
+
+		list_for_each(e, l2) {
 			current[1]++;
-			if ((result = snmp_oid_compare(current, 2, target,
-						       target_len)) < 0)
-				continue;
-			if ((result == 0) && !exact)
+			result = snmp_oid_compare(current, 2, target, target_len);
+			if (result < 0)
 				continue;
 			if (result == 0) {
-				return el;
+				if (!exact)
+					continue;
+			} else if (result > 0 && exact)
+				return NULL;
+
+			/* This is our best match */
+			if (!exact) {
+				memcpy(target, current, sizeof(oid) * 2);
+				*length = (unsigned)vp->namelen + 2;
 			}
-			if (snmp_oid_compare(current, 2, best, 2) < 0) {
-				/* This is our best match */
-				memcpy(best, current, sizeof(oid) * 2);
-				bel = el;
-				*state = curstate;
-				/* Optimization: (e1,e2) is strictly
-				   increasing, this is the lower
-				   element of our target set. */
-				nextstate = HEADER_STATE_END;
-				break;
-			}
+
+			return e;
 		}
 	}
 
-	if (bel == NULL)
-		/* No best match */
-		return NULL;
-	if (exact)
-		/* No exact match */
-		return NULL;
-	/* Let's use our best match */
-	memcpy(target, best, sizeof(oid) * 2);
-	*length = (unsigned)vp->namelen + 2;
-
-	return bel;
+	return NULL;
 }
+
 
 #ifdef _HAVE_FIB_ROUTING_
 #define MAX_PTR ((void*)((char *)NULL - 1))
-static nexthop_t*
+static nexthop_t *
 vrrp_header_nh_table(struct variable *vp, oid *name, size_t *length,
 		     int exact, size_t *var_len, WriteMethod **write_method)
 {
 	oid *target;
 	int result;
 	size_t target_len;
-	element e1, e2, e3;
-	list l2, l3;
+	list_head_t *l2;
 	oid curinstance[3];
+	vrrp_t *vrrp;
+	ip_route_t *route;
+	nexthop_t *nh;
 	bool same;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -940,37 +899,47 @@ vrrp_header_nh_table(struct variable *vp, oid *name, size_t *length,
 	if (exact && !target_len)
 		return NULL;
 
-	for (e1 = MAX_PTR, curinstance[0] = 0; e1; e1 = ((e1 == MAX_PTR) ? (LIST_ISEMPTY(vrrp_data->vrrp) ? NULL : LIST_HEAD(vrrp_data->vrrp)) : e1->next), curinstance[0]++) {
+	/* Perform static routes */
+
+	for (vrrp = MAX_PTR, curinstance[0] = 0; vrrp;
+	     vrrp = ((vrrp == MAX_PTR) ? (list_empty(&vrrp_data->vrrp) ? NULL :
+	       list_first_entry(&vrrp_data->vrrp, vrrp_t, e_list)) :
+		 list_is_last(&vrrp->e_list, &vrrp_data->vrrp) ? NULL :
+		   list_entry(vrrp->e_list.next, vrrp_t, e_list)), curinstance[0]++) {
 		if (exact && curinstance[0] > target[0])
 			return NULL;
 		if (target_len && curinstance[0] < target[0])
 			continue;
 		same = (target_len && curinstance[0] == target[0]);
-		l2 = (e1 == MAX_PTR) ? vrrp_data->static_routes : ((vrrp_t *)ELEMENT_DATA(e1))->vroutes;
-		if (LIST_ISEMPTY(l2))
+		l2 = (vrrp == MAX_PTR) ? &vrrp_data->static_routes : &vrrp->vroutes;
+		if (list_empty(l2))
 			continue;
-		for (e2 = LIST_HEAD(l2), curinstance[1] = 1; e2; ELEMENT_NEXT(e2), curinstance[1]++) {
+		curinstance[1] = 0;
+		list_for_each_entry(route, l2, e_list) {
+			curinstance[1]++;
 			if (exact && curinstance[1] > target[1])
 				return NULL;
 			if (same && curinstance[1] < target[1])
 				continue;
 			same = (same && curinstance[1] == target[1]);
-			l3 = ((ip_route_t *)ELEMENT_DATA(e2))->nhs;
-			if (LIST_ISEMPTY(l3))
+			if (list_empty(&route->nhs))
 				continue;
-			for (e3 = LIST_HEAD(l3), curinstance[2] = 1; e3; ELEMENT_NEXT(e3), curinstance[2]++) {
+			curinstance[2] = 0;
+			list_for_each_entry(nh, &route->nhs, e_list) {
+				curinstance[2]++;
 				if (exact && target_len && curinstance[2] > target[2])
 					return NULL;
 				if (same && curinstance[2] < target[2])
 					continue;
 
-				if (target_len && !exact && curinstance[0] == target[0] && curinstance[1] == target[1] && curinstance[2] == target[2])
+				if (target_len && !exact && curinstance[0] == target[0] &&
+				    curinstance[1] == target[1] && curinstance[2] == target[2])
 					continue;
 
 				memcpy(target, curinstance, sizeof(oid) * 3);
 				*length = (unsigned)vp->namelen + 3;
 
-				return ELEMENT_DATA(e3);
+				return nh;
 			}
 		}
 	}
@@ -978,18 +947,19 @@ vrrp_header_nh_table(struct variable *vp, oid *name, size_t *length,
 }
 #endif
 
-static u_char*
+static u_char *
 vrrp_snmp_address(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	ip_address_t *addr;
-	int state = HEADER_STATE_STATIC_ADDRESS;
+	list_head_t *e;
+	int adv = 0;
 
-	if ((addr = (ip_address_t *)
-	     vrrp_header_ar_table(vp, name, length, exact,
-				  var_len, write_method,
-				  &state)) == NULL)
+	if ((e = vrrp_header_ar_table(vp, name, length, exact,
+				      var_len, write_method,
+				      ITER_ADDRESSES, &adv)) == NULL)
 		return NULL;
+	addr = list_entry(e, ip_address_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_ADDRESS_ADDRESSTYPE:
@@ -1030,7 +1000,7 @@ vrrp_snmp_address(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = (addr->set)?1:2;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_ADDRESS_ISADVERTISED:
-		long_ret.u = (state == HEADER_STATE_VIRTUAL_ADDRESS)?1:2;
+		long_ret.u = (adv)?1:2;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_ADDRESS_PEER:
 		if (!addr->have_peer)
@@ -1060,14 +1030,15 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	ip_route_t *route;
-	int state = HEADER_STATE_STATIC_ROUTE;
+	list_head_t *e;
 	nexthop_t *gw2;
+	int gw2_cnt = 0, adv;
 
-	if ((route = (ip_route_t *)
-	     vrrp_header_ar_table(vp, name, length, exact,
-				  var_len, write_method,
-				  &state)) == NULL)
+	if ((e = vrrp_header_ar_table(vp, name, length, exact,
+				      var_len, write_method,
+				      ITER_ROUTES, &adv)) == NULL)
 		return NULL;
+	route = list_entry(e, ip_route_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_ROUTE_ADDRESSTYPE:
@@ -1107,9 +1078,13 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		*var_len = sizeof route->via->u.sin.sin_addr;
 		return (u_char *)&route->via->u.sin.sin_addr;
 	case VRRP_SNMP_ROUTE_SECONDARYGATEWAY:
-		if (LIST_ISEMPTY(route->nhs) || LIST_SIZE(route->nhs) != 1)
+		if (list_empty(&route->nhs))
 			break;
-		gw2 = LIST_HEAD(route->nhs)->data;
+		list_for_each_entry(gw2, &route->nhs, e_list)
+			gw2_cnt++;
+		if (gw2_cnt != 1)
+			break;
+		gw2 = list_first_entry(&route->nhs, nexthop_t, e_list);
 #if HAVE_DECL_RTA_ENCAP
 		if (gw2->encap.type != LWTUNNEL_ENCAP_NONE)
 			break;
@@ -1136,7 +1111,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = snmp_scope(route->scope);
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_ROUTE_TYPE:
-		if (!LIST_ISEMPTY(route->nhs))
+		if (!list_empty(&route->nhs))
 			long_ret.u = 2;
 		else if (route->type == RTN_BLACKHOLE)
 			long_ret.u = 3;
@@ -1373,9 +1348,10 @@ vrrp_snmp_encap(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	ip_route_t *route;
+	list_head_t *e;
 	nexthop_t *nh;
 	encap_t *encap;
-	int state = HEADER_STATE_STATIC_ROUTE;
+	int adv = 0;
 	static struct counter64 c64;
 #if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 	static char labels[11*MAX_MPLS_LABELS];
@@ -1384,15 +1360,15 @@ vrrp_snmp_encap(struct variable *vp, oid *name, size_t *length,
 #endif
 
 	if (vp->name[vp->namelen - 3] == 7) {
-		if ((route = (ip_route_t *)vrrp_header_ar_table(vp, name, length, exact,
-					  var_len, write_method,
-					  &state)) == NULL)
+		if ((e = vrrp_header_ar_table(vp, name, length, exact,
+					      var_len, write_method,
+					      ITER_ROUTES, &adv)) == NULL)
 			return NULL;
+		route = list_entry(e, ip_route_t, e_list);
 		encap = &route->encap;
-	}
-	else {
+	} else {
 		if ((nh = vrrp_header_nh_table(vp, name, length, exact,
-					  var_len, write_method)) == NULL)
+					      var_len, write_method)) == NULL)
 			return NULL;
 		encap = &nh->encap;
 	}
@@ -1481,12 +1457,12 @@ vrrp_snmp_encap(struct variable *vp, oid *name, size_t *length,
 
 static u_char*
 vrrp_snmp_next_hop(struct variable *vp, oid *name, size_t *length,
-		 int exact, size_t *var_len, WriteMethod **write_method)
+		   int exact, size_t *var_len, WriteMethod **write_method)
 {
 	nexthop_t *nh;
 
 	if ((nh = vrrp_header_nh_table(vp, name, length, exact,
-				  var_len, write_method)) == NULL)
+				       var_len, write_method)) == NULL)
 		return NULL;
 
 	switch (vp->magic) {
@@ -1540,7 +1516,7 @@ vrrp_snmp_next_hop(struct variable *vp, oid *name, size_t *length,
 	   next one. */
 	if (!exact && (name[*length-1] < MAX_SUBID))
 		return vrrp_snmp_next_hop(vp, name, length,
-				       exact, var_len, write_method);
+					  exact, var_len, write_method);
 	return NULL;
 }
 
@@ -1549,15 +1525,16 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		 int exact, size_t *var_len, WriteMethod **write_method)
 {
 	ip_rule_t *rule;
-	int state = HEADER_STATE_STATIC_RULE;
+	list_head_t *e;
+	int adv = 0;
 	const char *str;
 	ip_address_t *addr;
 
-	if ((rule = (ip_rule_t *)
-	     vrrp_header_ar_table(vp, name, length, exact,
-				  var_len, write_method,
-				  &state)) == NULL)
+	if ((e = vrrp_header_ar_table(vp, name, length, exact,
+				      var_len, write_method,
+				      ITER_RULES, &adv)) == NULL)
 		return NULL;
+	rule = list_entry(e, ip_rule_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_RULE_DIRECTION:	/* obsolete */
@@ -1806,18 +1783,19 @@ RELAX_CAST_QUAL_END
 }
 #endif	// _HAVE_FIB_ROUTING_
 
-static u_char*
+static u_char *
 vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
-		 int exact, size_t *var_len, WriteMethod **write_method)
+		    int exact, size_t *var_len, WriteMethod **write_method)
 {
 	vrrp_sgroup_t *group;
+	list_head_t *e;
 	snmp_ret_t ret;
 
-	if ((group = (vrrp_sgroup_t *)
-	     snmp_header_list_table(vp, name, length, exact,
-				    var_len, write_method,
-				    vrrp_data->vrrp_sync_group)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp_sync_group)) == NULL)
 		return NULL;
+	group = list_entry(e, vrrp_sgroup_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_SYNCGROUP_NAME:
@@ -1882,19 +1860,22 @@ vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
 	return NULL;
 }
 
-static u_char*
+static u_char *
 vrrp_snmp_syncgroupmember(struct variable *vp, oid *name, size_t *length,
 			  int exact, size_t *var_len, WriteMethod **write_method)
 {
 	snmp_ret_t ret;
 	vrrp_t *vrrp;
-	element e;
+	list_head_t *e;
 
-	e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, vrrp_instances));
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, vrrp_instances));
 	if (!e)
 		return NULL;
 
-	vrrp = ELEMENT_DATA(e);
+	vrrp = list_entry(e, vrrp_t, s_list);
 	ret.cp = vrrp->iname;
 	*var_len = strlen(ret.cp);
 	return ret.p;
@@ -1904,13 +1885,13 @@ static vrrp_t *
 _get_instance(oid *name, size_t name_len)
 {
 	oid instance;
-	element e;
 	vrrp_t *vrrp = NULL;
 
-	if (name_len < 1) return NULL;
+	if (name_len < 1)
+		return NULL;
 	instance = name[name_len - 1];
 
-	LIST_FOREACH(vrrp_data->vrrp, vrrp, e) {
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
 		if (--instance == 0) break;
 	}
 	return vrrp;
@@ -2074,13 +2055,15 @@ static u_char*
 vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		   int exact, size_t *var_len, WriteMethod **write_method)
 {
-	vrrp_t *rt;
 	snmp_ret_t ret;
+	list_head_t *e;
+	vrrp_t *rt;
 
-	if ((rt = (vrrp_t *)snmp_header_list_table(vp, name, length, exact,
-						    var_len, write_method,
-						    vrrp_data->vrrp)) == NULL)
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &vrrp_data->vrrp)) == NULL)
 		return NULL;
+	rt = list_entry(e, vrrp_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_INSTANCE_NAME:
@@ -2110,10 +2093,12 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->vipset?1:2;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_INSTANCE_PRIMARYINTERFACE:
+		if (!rt->ifp)
+			return NULL;
 		*var_len = strlen(rt->ifp->ifname);
 		return (u_char *)&rt->ifp->ifname;
 	case VRRP_SNMP_INSTANCE_TRACKPRIMARYIF:
-		long_ret.u = rt->track_ifp?1:2;
+		long_ret.u = (!list_empty(&rt->track_ifp)) ? 1 : 2;
 		return (u_char *)&long_ret;
 	case VRRP_SNMP_INSTANCE_ADVERTISEMENTSINT:
 		long_ret.u = (rt->version == VRRP_VERSION_2) ?
@@ -2191,6 +2176,13 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 			return (u_char *)buf;
 		}
 		break;
+	case VRRP_SNMP_INSTANCE_SCRIPTDELETED:
+		if (rt->script_deleted) {
+			cmd_str_r(rt->script_deleted, buf, sizeof(buf));
+			*var_len = strlen(buf);
+			return (u_char *)buf;
+		}
+		break;
 	case VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI:
 		if (rt->script_master_rx_lower_pri) {
 			cmd_str_r(rt->script_master_rx_lower_pri, buf, sizeof(buf));
@@ -2223,6 +2215,9 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_INSTANCE_VRRP_VERSION:
 		long_ret.u = rt->version;
 		return (u_char *)&long_ret;
+	case VRRP_SNMP_INSTANCE_NOTIFY_DELETED:
+		long_ret.u = rt->notify_deleted ? 1 : 2;
+		return (u_char *)&long_ret;
 	default:
 		return NULL;
 	}
@@ -2234,18 +2229,22 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 	return NULL;
 }
 
-static u_char*
+static u_char *
 vrrp_snmp_trackedinterface(struct variable *vp, oid *name, size_t *length,
 			   int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_if_t *bifp;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_ifp));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp,
+			      offsetof(vrrp_t, e_list),
+			      offsetof(vrrp_t, track_ifp));
 	if (!e)
 		return NULL;
 
-	bifp = ELEMENT_DATA(e);
+	bifp = list_entry(e, tracked_if_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_TRACKEDINTERFACE_NAME:
@@ -2267,13 +2266,17 @@ vrrp_snmp_trackedscript(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_sc_t *bscr;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_script));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp,
+			      offsetof(vrrp_t, e_list),
+			      offsetof(vrrp_t, track_script));
 	if (!e)
 		return NULL;
 
-	bscr = ELEMENT_DATA(e);
+	bscr = list_entry(e, tracked_sc_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_TRACKEDSCRIPT_NAME:
@@ -2294,14 +2297,18 @@ static u_char*
 vrrp_snmp_trackedfile(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	const tracked_file_t *bfile;
+	const tracked_file_monitor_t *bfile;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_file));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp,
+			      offsetof(vrrp_t, e_list),
+			      offsetof(vrrp_t, track_file));
 	if (!e)
 		return NULL;
 
-	bfile = ELEMENT_DATA(e);
+	bfile = list_entry(e, tracked_file_monitor_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_TRACKEDFILE_NAME:
@@ -2325,13 +2332,17 @@ vrrp_snmp_trackedbfd(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_bfd_t *bbfd;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_bfd));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp,
+			      offsetof(vrrp_t, e_list),
+			      offsetof(vrrp_t, track_bfd));
 	if (!e)
 		return NULL;
 
-	bbfd = ELEMENT_DATA(e);
+	bbfd = list_entry(e, tracked_bfd_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_TRACKEDBFD_NAME:
@@ -2356,13 +2367,17 @@ vrrp_snmp_trackedprocess(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_process_t *bproc;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp, offsetof(vrrp_t, track_process));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp,
+			      offsetof(vrrp_t, e_list),
+			      offsetof(vrrp_t, track_process));
 	if (!e)
 		return NULL;
 
-	bproc = ELEMENT_DATA(e);
+	bproc = list_entry(e, tracked_process_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_TRACKEDPROCESS_NAME:
@@ -2386,13 +2401,17 @@ vrrp_snmp_group_trackedinterface(struct variable *vp, oid *name, size_t *length,
 			   int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_if_t *bifp;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_ifp));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, track_ifp));
 	if (!e)
 		return NULL;
 
-	bifp = ELEMENT_DATA(e);
+	bifp = list_entry(e, tracked_if_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDINTERFACE_NAME:
@@ -2414,13 +2433,17 @@ vrrp_snmp_group_trackedscript(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_sc_t *bscr;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_script));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, track_script));
 	if (!e)
 		return NULL;
 
-	bscr = ELEMENT_DATA(e);
+	bscr = list_entry(e, tracked_sc_t, e_list);
 
 	switch (vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDSCRIPT_NAME:
@@ -2441,14 +2464,18 @@ static u_char*
 vrrp_snmp_group_trackedfile(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	const tracked_file_t *bfile;
+	const tracked_file_monitor_t *bfile;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_file));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, track_file));
 	if (!e)
 		return NULL;
 
-	bfile = ELEMENT_DATA(e);
+	bfile = list_entry(e, tracked_file_monitor_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDFILE_NAME:
@@ -2472,13 +2499,17 @@ vrrp_snmp_group_trackedbfd(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_bfd_t *bbfd;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_bfd));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, track_bfd));
 	if (!e)
 		return NULL;
 
-	bbfd = ELEMENT_DATA(e);
+	bbfd = list_entry(e, tracked_bfd_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDBFD_NAME:
@@ -2503,13 +2534,17 @@ vrrp_snmp_group_trackedprocess(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
 	const tracked_process_t *bproc;
+	list_head_t *e;
 	snmp_ret_t ret;
-	const element e = snmp_find_element(vp, name, length, exact, var_len, write_method, vrrp_data->vrrp_sync_group, offsetof(vrrp_sgroup_t, track_process));
 
+	e = snmp_find_element(vp, name, length, exact, var_len, write_method,
+			      &vrrp_data->vrrp_sync_group,
+			      offsetof(vrrp_sgroup_t, e_list),
+			      offsetof(vrrp_sgroup_t, track_process));
 	if (!e)
 		return NULL;
 
-	bproc = ELEMENT_DATA(e);
+	bproc = list_entry(e, tracked_process_t, e_list);
 
 	switch(vp->magic) {
 	case VRRP_SNMP_SGROUPTRACKEDPROCESS_NAME:
@@ -2608,15 +2643,19 @@ static struct variable8 vrrp_vars[] = {
 	{VRRP_SNMP_INSTANCE_SCRIPT, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_instance, 3, {3, 1, 26}},
 	{VRRP_SNMP_INSTANCE_ACCEPT, ASN_INTEGER, RWRITE,
-	 vrrp_snmp_instance, 3, {3, 1, 27} },
+	 vrrp_snmp_instance, 3, {3, 1, 27}},
 	{VRRP_SNMP_INSTANCE_PROMOTE_SECONDARIES, ASN_INTEGER, RWRITE,
-	 vrrp_snmp_instance, 3, {3, 1, 28} },
+	 vrrp_snmp_instance, 3, {3, 1, 28}},
 	{VRRP_SNMP_INSTANCE_USE_LINKBEAT, ASN_INTEGER, RWRITE,
-	 vrrp_snmp_instance, 3, {3, 1, 29} },
+	 vrrp_snmp_instance, 3, {3, 1, 29}},
 	{VRRP_SNMP_INSTANCE_VRRP_VERSION, ASN_INTEGER, RONLY,
-	 vrrp_snmp_instance, 3, {3, 1, 30} },
+	 vrrp_snmp_instance, 3, {3, 1, 30}},
 	{VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_instance, 3, {3, 1, 31}},
+	{VRRP_SNMP_INSTANCE_SCRIPTDELETED, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 32}},
+	{VRRP_SNMP_INSTANCE_NOTIFY_DELETED, ASN_INTEGER, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 33}},
 
 	/* vrrpTrackedInterfaceTable */
 	{VRRP_SNMP_TRACKEDINTERFACE_NAME, ASN_OCTET_STR, RONLY,
@@ -3036,6 +3075,8 @@ vrrp_snmp_instance_trap(vrrp_t *vrrp)
 		state = vrrp->state;
 	else if (vrrp->state == VRRP_STATE_STOP)
 		state = 5;
+	else if (vrrp->state == VRRP_STATE_DELETED)
+		state = 6;
 
 	/* snmpTrapOID */
 	snmp_varlist_add_variable(&notification_vars,
@@ -3175,7 +3216,7 @@ suitable_for_rfc2787(const vrrp_t* vrrp)
 		return false;
 
 	/* We are expected to have at least one VIP */
-	if (LIST_ISEMPTY(vrrp->vip))
+	if (list_empty(&vrrp->vip))
 		return false;
 
 	return true;
@@ -3183,11 +3224,10 @@ suitable_for_rfc2787(const vrrp_t* vrrp)
 
 static ip_address_t*
 vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
-		     int exact, size_t *var_len, WriteMethod **write_method)
+			   int exact, size_t *var_len, WriteMethod **write_method)
 {
-	element e, e2;
 	ip_address_t *vip;
-	vrrp_t *scr;
+	vrrp_t *vrrp;
 	ip_address_t *bel = NULL;
 	oid * target, current[2], best[2];
 	struct in_addr best_addr, target_addr, current_addr;
@@ -3199,7 +3239,7 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof(unsigned long);
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return NULL;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -3224,12 +3264,12 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	else
 		target_addr.s_addr = 0;
 
-	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
-		if (!suitable_for_rfc2787(scr))
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (!suitable_for_rfc2787(vrrp))
 			continue;
 
-		current[0] = IF_BASE_INDEX(scr->ifp);
-		current[1] = scr->vrid;
+		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
+		current[1] = vrrp->vrid;
 
 		if ((result = snmp_oid_compare(current, 2, target, target_len)) < 0)
 			continue;
@@ -3243,14 +3283,14 @@ vrrp_rfcv2_header_ar_table(struct variable *vp, oid *name, size_t *length,
 				continue;
 		}
 
-		if (LIST_ISEMPTY(scr->vip)) {
+		if (list_empty(&vrrp->vip)) {
 			if (exact)
 				return NULL;
 			continue;
 		}
 
 		found_better = false;
-		LIST_FOREACH(scr->vip, vip, e2) {
+		list_for_each_entry(vip, &vrrp->vip, e_list) {
 			/* We need the address to be MSB first, for numerical comparison */
 			current_addr.s_addr = htonl(vip->u.sin.sin_addr.s_addr);
 
@@ -3326,8 +3366,7 @@ static vrrp_t*
 snmp_rfcv2_header_list_table(struct variable *vp, oid *name, size_t *length,
 		  int exact, size_t *var_len, WriteMethod **write_method)
 {
-	element e;
-	vrrp_t *bel = NULL, *scr;
+	vrrp_t *bel = NULL, *vrrp;
 	oid * target, current[2], best[2];
 	int result;
 	size_t target_len;
@@ -3335,7 +3374,7 @@ snmp_rfcv2_header_list_table(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof (unsigned long);
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return NULL;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -3350,28 +3389,28 @@ snmp_rfcv2_header_list_table(struct variable *vp, oid *name, size_t *length,
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 
-	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
-		if (!suitable_for_rfc2787(scr))
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (!suitable_for_rfc2787(vrrp))
 			continue;
 
-		if (target_len && (IF_BASE_INDEX(scr->ifp) < target[0]))
+		if (target_len && (vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0 < target[0]))
 			continue; /* Optimization: cannot be part of our set */
 
-		current[0] = IF_BASE_INDEX(scr->ifp);
-		current[1] = scr->vrid;
+		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
+		current[1] = vrrp->vrid;
 		if ((result = snmp_oid_compare(current, 2, target, target_len)) < 0)
 			continue;
 		if (result == 0) {
 			if (!exact)
 				continue;
-			return scr;
+			return vrrp;
 		}
 
 		if (snmp_oid_compare(current, 2, best, 2) < 0) {
 			/* This is our best match */
 			memcpy(best, current, sizeof(best));
 
-			bel = scr;
+			bel = vrrp;
 		}
 	}
 
@@ -3401,6 +3440,8 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 
 	switch (vp->magic) {
 	case VRRP_RFC_SNMP_OPER_VMAC:
+		if (!rt->ifp)
+			return NULL;
 		*var_len = rt->ifp->hw_addr_len;
 		return (u_char*)&rt->ifp->hw_addr;
 	case VRRP_RFC_SNMP_OPER_STATE:
@@ -3414,17 +3455,16 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->base_priority;
 		return (u_char*)&long_ret;
 	case VRRP_RFC_SNMP_OPER_ADDR_CNT:
-		if (LIST_ISEMPTY(rt->vip))
-			long_ret.u = 0;
-		else
-			long_ret.u = LIST_SIZE(rt->vip);
+		long_ret.u = rt->vip_cnt;
 		return (u_char*)&long_ret;
 	case VRRP_RFC_SNMP_OPER_MIP:
 		*var_len = sizeof ((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 		return (u_char*)&((struct sockaddr_in *)&rt->master_saddr)->sin_addr.s_addr;
 	case VRRP_RFC_SNMP_OPER_PIP:
+		if (!rt->ifp)
+			return NULL;
 #ifdef _HAVE_VRRP_VMAC_
-		if (IS_VLAN(rt->ifp))
+		if (IS_MAC_IP_VLAN(rt->ifp))
 			ifp = rt->ifp->base_ifp;
 		else
 #endif
@@ -3450,7 +3490,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 	case VRRP_RFC_SNMP_OPER_VR_UPTIME:
 		if (rt->state == VRRP_STATE_BACK ||
 		    rt->state == VRRP_STATE_MAST) {
-			timersub(&rt->stats->uptime, &vrrp_start_time, &uptime);
+			timersub(&rt->stats->uptime, &snmp_vrrp_start_time, &uptime);
 			long_ret.s = uptime.tv_sec * 100 + uptime.tv_usec / 10000;	// unit is centi-seconds
 		}
 		else
@@ -3509,7 +3549,6 @@ static u_char*
 vrrp_rfcv2_snmp_stats(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
 {
-	element e;
 	vrrp_t *vrrp;
 
 	if (header_generic(vp, name, length, exact, var_len, write_method))
@@ -3522,13 +3561,11 @@ vrrp_rfcv2_snmp_stats(struct variable *vp, oid *name, size_t *length,
 
 	long_ret.u = 0;
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return (u_char*)&long_ret;
 
 	/* Work through all the vrrp instances that we can respond for */
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
 		if (!suitable_for_rfc2787(vrrp))
 			continue;
 
@@ -3547,6 +3584,7 @@ vrrp_rfcv2_snmp_stats(struct variable *vp, oid *name, size_t *length,
 
 	return (u_char *)&long_ret;
 }
+
 static u_char*
 vrrp_rfcv2_snmp_statstable(struct variable *vp, oid *name, size_t *length,
 			int exact, size_t *var_len, WriteMethod **write_method)
@@ -3695,7 +3733,7 @@ vrrp_rfcv2_snmp_new_master_trap(vrrp_t *vrrp)
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
 	/* OID for trap data vrrpOperMasterIPAddr */
-	oid masterip_oid[] = { VRRP_RFC_OID, 1, 3, 1, 7, IF_BASE_INDEX(vrrp->ifp), vrrp->vrid };
+	oid masterip_oid[] = { VRRP_RFC_OID, 1, 3, 1, 7, vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0, vrrp->vrid };
 	size_t masterip_oid_len = OID_LENGTH(masterip_oid);
 
 	netsnmp_variable_list *notification_vars = NULL;
@@ -3735,10 +3773,10 @@ vrrp_rfcv2_snmp_auth_err_trap(vrrp_t *vrrp, struct in_addr src, enum rfcv2_trap_
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
 	/* OID for trap data vrrpTrapPacketSrc */
-	oid packet_src_oid[] = { VRRP_RFC_OID, 1, 5, IF_INDEX(vrrp->ifp), vrrp->vrid };
+	oid packet_src_oid[] = { VRRP_RFC_OID, 1, 5, vrrp->ifp ? IF_INDEX(vrrp->ifp) : 0, vrrp->vrid };
 	size_t packet_src_oid_len = OID_LENGTH(packet_src_oid);
 	/* OID for trap data vrrpTrapAuthErrorType */
-	oid err_type_oid[] = { VRRP_RFC_OID, 1, 6, IF_INDEX(vrrp->ifp), vrrp->vrid };
+	oid err_type_oid[] = { VRRP_RFC_OID, 1, 6, vrrp->ifp ? IF_INDEX(vrrp->ifp) : 0, vrrp->vrid };
 	size_t err_type_oid_len = OID_LENGTH(err_type_oid);
 
 	netsnmp_variable_list *notification_vars = NULL;
@@ -3787,7 +3825,7 @@ suitable_for_rfc6527(const vrrp_t* vrrp)
 #endif
 
 	/* We are expected to have at least one VIP */
-	if (LIST_ISEMPTY(vrrp->vip))
+	if (list_empty(&vrrp->vip))
 		return false;
 
 	return true;
@@ -3812,11 +3850,10 @@ inet6_addr_compare(const struct in6_addr* l, const struct in6_addr* r)
 
 static ip_address_t*
 vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
-		     int exact, size_t *var_len, WriteMethod **write_method)
+			   int exact, size_t *var_len, WriteMethod **write_method)
 {
-	element e, e2;
 	ip_address_t *vip;
-	vrrp_t *scr;
+	vrrp_t *vrrp;
 	ip_address_t *bel = NULL;
 	oid * target, current[3], best[3];
 	struct in_addr target_addr, current_addr, best_addr;
@@ -3830,7 +3867,7 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof(unsigned long);
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return NULL;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -3860,13 +3897,13 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 			target_addr6.s6_addr[i] = (uint8_t)name[*length - sizeof(struct in6_addr) + i];
 	}
 
-	LIST_FOREACH(vrrp_data->vrrp, scr, e) {
-		if (!suitable_for_rfc6527(scr))
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (!suitable_for_rfc6527(vrrp))
 			continue;
 
-		current[0] = IF_BASE_INDEX(scr->ifp);
-		current[1] = scr->vrid;
-		current[2] = scr->family == AF_INET ? 1 : 2;
+		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
+		current[1] = vrrp->vrid;
+		current[2] = vrrp->family == AF_INET ? 1 : 2;
 
 		if ((result = snmp_oid_compare(current, 3, target, target_len)) < 0)
 			continue;
@@ -3880,15 +3917,15 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 				continue;
 		}
 
-		if (LIST_ISEMPTY(scr->vip)) {
+		if (list_empty(&vrrp->vip)) {
 			if (exact)
 				return NULL;
 			continue;
 		}
 
 		found_better = false;
-		LIST_FOREACH(scr->vip, vip, e2) {
-			if (scr->family == AF_INET) {
+		list_for_each_entry(vip, &vrrp->vip, e_list) {
+			if (vrrp->family == AF_INET) {
 				current_addr.s_addr = htonl(vip->u.sin.sin_addr.s_addr);
 
 				if (exact) {
@@ -3976,8 +4013,7 @@ static vrrp_t*
 snmp_rfcv3_header_list_table(struct variable *vp, oid *name, size_t *length,
 		  int exact, size_t *var_len, WriteMethod **write_method)
 {
-	element e;
-	vrrp_t *bel = NULL, *scr;
+	vrrp_t *bel = NULL, *vrrp;
 	oid * target, current[3], best[3];
 	int result;
 	size_t target_len;
@@ -3985,7 +4021,7 @@ snmp_rfcv3_header_list_table(struct variable *vp, oid *name, size_t *length,
 	*write_method = 0;
 	*var_len = sizeof (unsigned long);
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return NULL;
 
 	if ((result = snmp_oid_compare(name, *length, vp->name, vp->namelen)) < 0) {
@@ -4000,33 +4036,31 @@ snmp_rfcv3_header_list_table(struct variable *vp, oid *name, size_t *length,
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		scr = (vrrp_t *)ELEMENT_DATA(e);
-
-		if (!suitable_for_rfc6527(scr))
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (!suitable_for_rfc6527(vrrp))
 			continue;
 
-		if (target_len && (IF_BASE_INDEX(scr->ifp) < target[0] ||
-				   (IF_BASE_INDEX(scr->ifp) == target[0] &&
-				    scr->vrid < target[1])))
+		if (target_len && ((vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0) < target[0] ||
+				   ((vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0) == target[0] &&
+				    vrrp->vrid < target[1])))
 			continue; /* Optimization: cannot be part of our set */
 
-		current[0] = IF_BASE_INDEX(scr->ifp);
-		current[1] = scr->vrid;
-		current[2] = scr->family == AF_INET ? 1 : 2;
+		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
+		current[1] = vrrp->vrid;
+		current[2] = vrrp->family == AF_INET ? 1 : 2;
 		if ((result = snmp_oid_compare(current, 3, target, target_len)) < 0)
 			continue;
 		if (result == 0) {
 			if (!exact)
 				continue;
-			return scr;
+			return vrrp;
 		}
 
 		if (snmp_oid_compare(current, 3, best, 3) < 0) {
 			/* This is our best match */
 			memcpy(best, current, sizeof(best));
 
-			bel = scr;
+			bel = vrrp;
 		}
 	}
 
@@ -4067,8 +4101,10 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		/* If we are master, we want to return the Primary IP address */
 		/* Falls through. */
 	case VRRP_RFCv3_SNMP_OPER_PIP:
+		if (!rt->ifp)
+			return NULL;
 #ifdef _HAVE_VRRP_VMAC_
-		if (IS_VLAN(rt->ifp))
+		if (IS_MAC_IP_VLAN(rt->ifp))
 			ifp = rt->ifp->base_ifp;
 		else
 #endif
@@ -4080,6 +4116,8 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		*var_len = sizeof(struct in6_addr);
 		return (u_char*)&ifp->sin6_addr;
 	case VRRP_RFCv3_SNMP_OPER_VMAC:
+		if (!rt->ifp)
+			return NULL;
 		*var_len = rt->ifp->hw_addr_len;
 		return (u_char*)&rt->ifp->hw_addr;
 	case VRRP_RFCv3_SNMP_OPER_STATE:
@@ -4089,10 +4127,7 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->base_priority;
 		return (u_char*)&long_ret;
 	case VRRP_RFCv3_SNMP_OPER_ADDR_CNT:
-		if (LIST_ISEMPTY(rt->vip))
-			long_ret.u = 0;
-		else
-			long_ret.u = LIST_SIZE(rt->vip);
+		long_ret.u = rt->vip_cnt;
 		return (u_char*)&long_ret;
 	case VRRP_RFCv3_SNMP_OPER_ADVERT_INT:
 		long_ret.u = rt->adver_int / TIMER_CENTI_HZ;
@@ -4168,7 +4203,6 @@ vrrp_rfcv3_snmp_stats(struct variable *vp, oid *name, size_t *length,
 {
 	static struct counter64 c64;
 	static uint32_t ret;
-	element e;
 	vrrp_t *vrrp;
 	uint64_t count;
 
@@ -4184,7 +4218,7 @@ vrrp_rfcv3_snmp_stats(struct variable *vp, oid *name, size_t *length,
 	c64.high = c64.low = 0;
 	*var_len = sizeof(c64);
 
-	if (LIST_ISEMPTY(vrrp_data->vrrp))
+	if (list_empty(&vrrp_data->vrrp))
 		return (u_char*)&c64;
 
 	count = 0;
@@ -4198,9 +4232,7 @@ vrrp_rfcv3_snmp_stats(struct variable *vp, oid *name, size_t *length,
 	}
 
 	/* Work through all the vrrp instances that we can respond for */
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp = ELEMENT_DATA(e);
-
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
 		if (!suitable_for_rfc6527(vrrp))
 			continue;
 
@@ -4230,7 +4262,7 @@ vrrp_rfcv3_snmp_statstable(struct variable *vp, oid *name, size_t *length,
 	vrrp_t *rt;
 
 	if ((rt = snmp_rfcv3_header_list_table(vp, name, length, exact,
-					     var_len, write_method)) == NULL)
+					       var_len, write_method)) == NULL)
 		return NULL;
 
 	*var_len = sizeof(c64);
@@ -4367,9 +4399,9 @@ vrrp_rfcv3_snmp_new_master_notify(vrrp_t *vrrp)
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
 	/* OID for trap data vrrpOperMasterIPAddr */
-	oid masterip_oid[] = { VRRP_RFCv3_OID, 1, 1, 1, 1, 3, IF_BASE_INDEX(vrrp->ifp), vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
+	oid masterip_oid[] = { VRRP_RFCv3_OID, 1, 1, 1, 1, 3, vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0, vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
 	size_t masterip_oid_len = OID_LENGTH(masterip_oid);
-	oid master_reason_oid[] = { VRRP_RFCv3_OID, 1, 2, 5, 1, 2, IF_BASE_INDEX(vrrp->ifp), vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
+	oid master_reason_oid[] = { VRRP_RFCv3_OID, 1, 2, 5, 1, 2, vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0, vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
 	size_t master_reason_oid_len = OID_LENGTH(master_reason_oid);
 	uint32_t reason = vrrp->stats->master_reason;
 
@@ -4423,7 +4455,7 @@ vrrp_rfcv3_snmp_proto_err_notify(vrrp_t *vrrp)
 	oid objid_snmptrap[] = { SNMPTRAP_OID };
 	size_t objid_snmptrap_len = OID_LENGTH(objid_snmptrap);
 	/* OID for notify data vrrpTrapProtoErrorType */
-	oid err_type_oid[] = { VRRP_RFCv3_OID, 1, 2, 5, 1, 6, IF_INDEX(vrrp->ifp), vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
+	oid err_type_oid[] = { VRRP_RFCv3_OID, 1, 2, 5, 1, 6, vrrp->ifp ? IF_INDEX(vrrp->ifp) : 0, vrrp->vrid, vrrp->family == AF_INET ? 1 : 2 };
 	size_t err_type_oid_len = OID_LENGTH(err_type_oid);
 
 	netsnmp_variable_list *notification_vars = NULL;

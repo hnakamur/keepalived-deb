@@ -28,7 +28,6 @@
 #include <inttypes.h>
 
 #include "main.h"
-#include "check_bfd.h"
 #include "check_api.h"
 #include "ipwrapper.h"
 #include "logger.h"
@@ -48,7 +47,7 @@
 static thread_ref_t bfd_thread;
 static checker_t *new_checker;
 
-static int bfd_check_thread(thread_ref_t);
+static void bfd_check_thread(thread_ref_t);
 
 /* Configuration stream handling */
 static void
@@ -72,17 +71,41 @@ dump_bfd_check(FILE *fp, const checker_t *checker)
 //	conf_write(fp, "   weight = %d", bfd_checker->weight);
 }
 
-/* Dump a real server on a BFD's list */
-static void
-dump_bfds_rs(FILE *fp, const void *data)
+/* real server on a BFD's list */
+void
+free_checker_tracked_bfd_list(list_head_t *l)
 {
-	const checker_t *checker = data;
+	cref_tracked_bfd_t *tbfd, *tbfd_tmp;
 
+	list_for_each_entry_safe(tbfd, tbfd_tmp, l, e_list)
+		FREE(tbfd);
+}
+
+void
+free_bfds_rs_list(list_head_t *l)
+{
+	tracking_obj_t *top, *top_tmp;
+
+	list_for_each_entry_safe(top, top_tmp, l, e_list)
+		FREE(top);
+}
+
+static void
+dump_bfds_rs(FILE *fp, const checker_t *checker)
+{
 	conf_write(fp, "   %s", FMT_RS(checker->rs, checker->vs));
+}
+void
+dump_bfds_rs_list(FILE *fp, const list_head_t *l)
+{
+	tracking_obj_t *top;
+
+	list_for_each_entry(top, l, e_list)
+		dump_bfds_rs(fp, top->obj.checker);
 }
 
 static bool
-bfd_check_compare(const checker_t *old_c, const checker_t *new_c)
+bfd_check_compare(const checker_t *old_c, checker_t *new_c)
 {
 	const bfd_checker_t *old = old_c->data;
 	const bfd_checker_t *new = new_c->data;
@@ -96,12 +119,11 @@ bfd_check_compare(const checker_t *old_c, const checker_t *new_c)
 static checker_tracked_bfd_t * __attribute__ ((pure))
 find_checker_tracked_bfd_by_name(char *name)
 {
-	element e;
-	checker_tracked_bfd_t *bfd;
+	checker_tracked_bfd_t *cbfd;
 
-	LIST_FOREACH(check_data->track_bfds, bfd, e) {
-		if (!strcmp(bfd->bname, name))
-			return bfd;
+	list_for_each_entry(cbfd, &check_data->track_bfds, e_list) {
+		if (!strcmp(cbfd->bname, name))
+			return cbfd;
 	}
 
 	return NULL;
@@ -113,44 +135,57 @@ bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 	bfd_checker_t *new_bfd_checker;
 
 	PMALLOC(new_bfd_checker);
+	INIT_LIST_HEAD(&new_bfd_checker->e_list);
 
 	/* queue new checker */
-	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker, NULL, false);
+	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker,
+				    NULL, false);
 }
 
 static void
 bfd_name_handler(const vector_t *strvec)
 {
-	checker_tracked_bfd_t *tbfd;
-	bfd_checker_t *cbfd, *bfd_c;
+	checker_tracked_bfd_t *ctbfd;
+	cref_tracked_bfd_t *tbfd;
+	bfd_checker_t *bfdc;
 	bool config_error = true;
 	char *name;
-	element e;
 
 	if (!new_checker)
 		return;
 
-	cbfd = CHECKER_DATA(new_checker);
+	bfdc = CHECKER_DATA(new_checker);
 
 	if (vector_size(strvec) >= 2)
 		name = vector_slot(strvec, 1);
 
 	if (vector_size(strvec) != 2)
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - No or too many names specified - skipping checker", FMT_RS(new_checker->rs, new_checker->vs));
-	else if (!(tbfd = find_checker_tracked_bfd_by_name(name)))
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s not configured", FMT_RS(new_checker->rs, new_checker->vs), name);
-	else if (cbfd->bfd)
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s already specified as %s", FMT_RS(new_checker->rs, new_checker->vs), name, cbfd->bfd->bname);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - No or too many names specified"
+							  " - skipping checker"
+							, FMT_RS(new_checker->rs, new_checker->vs));
+	else if (!(ctbfd = find_checker_tracked_bfd_by_name(name)))
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s not configured"
+							, FMT_RS(new_checker->rs, new_checker->vs)
+							, name);
+	else if (bfdc->bfd)
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s already specified as %s"
+							, FMT_RS(new_checker->rs, new_checker->vs)
+							, name
+							, bfdc->bfd->bname);
 	else if (strlen(name) >= BFD_INAME_MAX)
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD name %s too long", FMT_RS(new_checker->rs, new_checker->vs), name);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD name %s too long"
+							, FMT_RS(new_checker->rs, new_checker->vs)
+							, name);
 	else
 		config_error = false;
 
 	/* Now check we are not already monitoring it */
 	if (!config_error) {
-		LIST_FOREACH(new_checker->rs->tracked_bfds, bfd_c, e) {
-			if (tbfd == bfd_c->bfd) {
-				report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - RS already monitoring %s", FMT_RS(new_checker->rs, new_checker->vs), strvec_slot(strvec, 1));
+		list_for_each_entry(tbfd, &new_checker->rs->tracked_bfds, e_list) {
+			if (ctbfd == tbfd->bfd) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - RS already monitoring %s"
+									, FMT_RS(new_checker->rs, new_checker->vs)
+									, strvec_slot(strvec, 1));
 				config_error = true;
 				break;
 			}
@@ -163,7 +198,7 @@ bfd_name_handler(const vector_t *strvec)
 		return;
 	}
 
-	cbfd->bfd = tbfd;
+	bfdc->bfd = ctbfd;
 }
 
 static void
@@ -190,32 +225,35 @@ bfd_alpha_handler(const vector_t *strvec)
 static void
 bfd_end_handler(void)
 {
-	bfd_checker_t *cbfd;
-       
+	bfd_checker_t *bfdc;
+	tracking_obj_t *top;
+	cref_tracked_bfd_t *tbfd;
+
 	if (!new_checker)
 		return;
 
-	cbfd = CHECKER_DATA(new_checker);
+	bfdc = CHECKER_DATA(new_checker);
 
-	if (!cbfd->bfd) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) No name has been specified for BFD_CHECKER - skipping", FMT_RS(new_checker->rs, new_checker->vs));
+	if (!bfdc->bfd) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) No name has been specified for BFD_CHECKER - skipping"
+							, FMT_RS(new_checker->rs, new_checker->vs));
 		dequeue_new_checker();
 		new_checker = NULL;
 		return;
 	}
 
-//	if (!bdfc->weight)
-//		bdfc->weight = 
-
 	/* Add the bfd to the RS's list */
-	if (!LIST_EXISTS(new_checker->rs->tracked_bfds))
-		new_checker->rs->tracked_bfds = alloc_list(NULL, NULL);
-	list_add(new_checker->rs->tracked_bfds, cbfd);
+	PMALLOC(tbfd);
+	INIT_LIST_HEAD(&tbfd->e_list);
+	tbfd->bfd = bfdc->bfd;
+	list_add_tail(&tbfd->e_list, &new_checker->rs->tracked_bfds);
 
 	/* Add the checker to the BFD */
-	if (!LIST_EXISTS(cbfd->bfd->tracking_rs))
-		cbfd->bfd->tracking_rs = alloc_list(NULL, dump_bfds_rs);
-	list_add(cbfd->bfd->tracking_rs, new_checker);
+	PMALLOC(top);
+	INIT_LIST_HEAD(&top->e_list);
+	top->type = TRACK_CHECKER;
+	top->obj.checker = new_checker;
+	list_add_tail(&top->e_list, &bfdc->bfd->tracking_rs);
 
 	new_checker = NULL;
 }
@@ -234,11 +272,11 @@ install_bfd_check_keyword(void)
 static void
 bfd_check_handle_event(bfd_event_t * evt)
 {
-	element e, e1;
 	struct timeval cur_time;
 	struct timeval timer_tmp;
 	uint32_t delivery_time;
 	checker_tracked_bfd_t *cbfd;
+	tracking_obj_t *top;
 	checker_t *checker;
 	char message[80];
 	bool checker_was_up;
@@ -253,20 +291,21 @@ bfd_check_handle_event(bfd_event_t * evt)
 			    evt->iname, BFD_STATE_STR(evt->state), delivery_time);
 	}
 
-	LIST_FOREACH(check_data->track_bfds, cbfd, e) {
+	list_for_each_entry(cbfd, &check_data->track_bfds, e_list) {
 		if (strcmp(cbfd->bname, evt->iname))
 			continue;
 
 		/* We can't assume the state of the bfd instance up state
 		 * matches the checker up state due to the potential of
 		 * alpha state for some checkers and not others */
-		LIST_FOREACH(cbfd->tracking_rs, checker, e1) {
+		list_for_each_entry(top, &cbfd->tracking_rs, e_list) {
+			checker = top->obj.checker;
 			if ((evt->state == BFD_STATE_UP) == checker->is_up &&
 			    checker->has_run)
 				continue;
 
-			log_message(LOG_INFO, "BFD check of [%s] RS(%s) is %s",
-				    evt->iname, FMT_RS(checker->rs, checker->vs), evt->state == BFD_STATE_UP ? "UP" : "DOWN");
+			log_message(LOG_INFO, "BFD check of [%s] RS(%s) is %s"
+					    , evt->iname, FMT_RS(checker->rs, checker->vs), evt->state == BFD_STATE_UP ? "UP" : "DOWN");
 
 			checker_was_up = checker->is_up;
 			rs_was_alive = checker->rs->alive;
@@ -282,7 +321,7 @@ bfd_check_handle_event(bfd_event_t * evt)
 	}
 }
 
-static int
+static void
 bfd_check_thread(thread_ref_t thread)
 {
 	bfd_event_t evt;
@@ -291,12 +330,10 @@ bfd_check_thread(thread_ref_t thread)
 				     thread->u.f.fd, TIMER_NEVER, false);
 
 	if (thread->type != THREAD_READY_READ_FD)
-		return 0;
+		return;
 
 	while (read(thread->u.f.fd, &evt, sizeof(bfd_event_t)) != -1)
 		bfd_check_handle_event(&evt);
-
-	return 0;
 }
 
 void

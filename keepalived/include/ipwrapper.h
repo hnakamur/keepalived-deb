@@ -45,7 +45,7 @@
 static inline bool __attribute((pure))
 rs_iseq(const real_server_t *rs_a, const real_server_t *rs_b)
 {
-        return sockstorage_equal(&rs_a->addr, &rs_b->addr);
+	return sockstorage_equal(&rs_a->addr, &rs_b->addr);
 }
 
 /* prototypes */
@@ -55,7 +55,7 @@ extern void update_svr_checker_state(bool, checker_t *);
 extern bool init_services(void);
 extern void clear_services(void);
 extern void set_quorum_states(void);
-extern void clear_diff_services(list);
+extern void clear_diff_services(list_head_t *);
 extern void check_new_rs_state(void);
 extern void link_vsg_to_vs(void);
 

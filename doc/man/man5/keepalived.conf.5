@@ -1,4 +1,4 @@
-.TH keepalived.conf 5 2019-03-24 "Keepalived" "Keepalived Configuration's Manual"
+.TH keepalived.conf 5 2020-05-31 "Keepalived" "Keepalived Configuration's Manual"
 .SH NAME
 keepalived.conf - configuration file for Keepalived
 .br
@@ -128,6 +128,12 @@ and
 # Note: the namespace cannot be changed on a configuration reload.
 \fBnet_namespace \fRNAME
 
+# Add the IPVS configuration in the specified net namespace. It allows to easily
+# split the VIP traffic on a given namespace and keep the healthchecks traffic
+# in another namespace. If NAME is not specified, then the default namespace
+# will be used.
+\fBnet_namespace_ipvs\fRNAME
+
 # ipsets wasn't network namespace aware until Linux 3.13, and so
 # if running with # an earlier version of the kernel, by default
 # use of ipsets is disabled if using a namespace and vrrp_ipsets
@@ -164,6 +170,25 @@ and
     \fBvrrp_process_name\fR NAME
     \fBipvs_process_name\fR NAME
     \fBbfd_process_name\fR NAME
+
+    # The startup and shutdown scripts are run once, when keepalived starts
+    # before any child processes are run, and when keepalived stops after
+    # all child processes have terminated, respectively.
+    # The original motivation for adding this feature was that although
+    # keepalived can setup IPVS configuration using firewall marks, there
+    # was no mechanism for adding configuration to set the firewall marks
+    # (or for removing it afterwards).
+    # This feature can also be used to setup the iptables framework required
+    # if using iptables (see vrrp_iptables option below), modify interface
+    # settings, or anything else that can be done from a script or program.
+    # Only one startup script and one shutdown script can be specified.
+    # The timeouts (in seconds default 10 seconds) are the time allowed for
+    # scripts to run; if the timeout expires the scripts will be killed (this
+    # is to stop keepalived hanging waiting for the scripts to terminate).
+    \fBstartup_script\fR SCRIPT_NAME [username [groupname]]
+    \fBstartup_script_timeout\fR SECONDS    # range [1,1000]
+    \fBshutdown_script\fR SCRIPT_NAME [username [groupname]]
+    \fBshutdown_script_timeout\fR SECONDS   # range [1,1000]
 
     # Set of email To: notify
     \fBnotification_email \fR{
@@ -218,18 +243,29 @@ and
     # (default: eth0)
     \fBdefault_interface \fRp33p1.3
 
-    # Sync daemon as provided by IPVS kernel code only support
-    # a single daemon instance at a time to synchronize connection table.
-    # Binding interface, vrrp instance and optional
-    #  syncid for lvs syncd
-    #  syncid (0 to 255) for lvs syncd
-    #  maxlen (1..65507) maximum packet length
-    #  port (1..65535) UDP port number to use
+    # The sync daemon as provided by the IPVS kernel code only supports
+    #  one master and one backup daemon instance at a time to synchronize
+    #  the IPVS connection table.
+    # See ipvsadm(8) man page for more details of the sync daemon.
+    # Parameters are binding interface, and optional:
+    #  inst VRRP_INSTANCE (inst can be omitted for backward compatibility)
+    #  syncid (0 to 255) for lvs syncd, default is the VRID of vrrp instance,
+    #    or 0 if no vrrp instance
+    #  maxlen (1..65507) maximum packet length (limit is mtu - 20 - 8)
+    #  port (1..65535) UDP port number to use, default 8848
     #  ttl (1..255)
-    #  group - multicast group address (IPv4 or IPv6)
+    #  group - multicast group address(IPv4 or IPv6), default 224.0.0.81
+    # If VRRP_INSTANCE is not specified, both the master and backup sync daemons
+    #  will be run as long as keepalived is running, otherwise the sync daemon
+    #  master/backup state tracks the state of the specified vrrp instance: if
+    #  the vrrp instance is in master state, only the master sync daemon will run,
+    #  if the vrrp instance is not master, only the backup sync daemon will run.
     # NOTE: maxlen, port, ttl and group are only available on Linux 4.3 or later.
-    \fBlvs_sync_daemon \fR<INTERFACE> <VRRP_INSTANCE> [id <SYNC_ID>] [maxlen <LEN>] \e
-                    [port <PORT>] [ttl <TTL>] [group <IP ADDR>]
+    # See kernel source doc/Documentation/networking/ipvs-sysctl.txt for details of
+    # parameters controlling IPVS and the sync daemon.
+    # /proc/net/ip_vs* provide some details about the state of IPVS.
+    \fBlvs_sync_daemon \fR<INTERFACE> [[inst] <VRRP_INSTANCE>] [id <SYNC_ID>] \e
+                    [maxlen <LEN>] [port <PORT>] [ttl <TTL>] [group <IP ADDR>]
 
     # flush any existing LVS configuration at startup
     \fBlvs_flush\fR
@@ -302,35 +338,18 @@ and
     # (default: 2, but IPv6 instances will use version 3)
     \fBvrrp_version \fR<2 or 3>
 
-    # Specify the iptables chain for ensuring a version 3 instance
-    # doesn't respond on addresses that it doesn't own.
-    # Note: it is necessary for the specified chain to exist in
-    # the iptables and/or ip6tables configuration, and for the chain
-    # to be called from an appropriate point in the iptables configuration.
-    # It will probably be necessary to have this filtering after accepting
-    # any ESTABLISHED,RELATED packets, because IPv4 might select the VIP as
-    # the source address for outgoing connections.
-    # (default: INPUT)
-    \fBvrrp_iptables \fRkeepalived
+    # keepalived uses a firewall (either nftables or iptables) for two purposes:
+    #  i)  To implement no_accept mode
+    #  ii) To stop IGMP/MLD packets being sent on VMAC interfaces, and to move
+    #      them onto the underlying interface.
+    # If both vrrp_iptables and vrrp_nftables are specified, keepalived will use
+    # nftables and not iptables. Similarly, if the iptables command is generating
+    # nftables configuration, or there is no iptables command installed,
+    # keepalived will use nftables rather than iptables.
+    # If neither vrrp_nftables or vrrp_iptables are specified but VMACs are in use
+    # or no_accept is specified, keepalived will use nftables if it is available.
 
-    # or for outbound filtering as well
-    # Note, outbound filtering won't work with IPv4, since the VIP can be
-    # selected as the source address for an outgoing connection. With IPv6
-    # this is unlikely since the addresses are deprecated.
-    \fBvrrp_iptables \fRkeepalived_in keepalived_out
-
-    # or to not add any iptables rules:
-    \fBvrrp_iptables\fR
-
-    # Keepalived may have the option to use ipsets in conjunction with
-    # iptables. If so, then the ipset names can be specified, defaults
-    # as below. If no names are specified, ipsets will not be used,
-    # otherwise any omitted names will be constructed by adding "_if"
-    # and/or "6" and _igmp/_mld to previously specified names.
-    \fBvrrp_ipsets \fR[keepalived [keepalived6 [keepalived_if6 [keepalived_igmp [keepalived_mld]]]]]
-
-    # Use nftables to implement no_accept mode and only send IGMP/MLD
-    #   messages on the parent interface of a VMAC.
+    # Use nftables as the firewall.
     #   TABLENAME must not exist, and must be different for each
     #   instance of keepalived running in the same network namespace.
     #   Default tablename is keepalived, and priority is -1.
@@ -346,6 +365,32 @@ and
     \fBnftables_priority \fRPRIORITY
     \fBnftables_counters\fR
     \fBnftables_ifindex\fR
+
+    # Use iptables as the firewall.
+    # Note: it is necessary for the specified chain to exist in
+    # the iptables and/or ip6tables configuration, and for the chain
+    # to be called from an appropriate point in the iptables configuration.
+    # It will probably be necessary to have this filtering after accepting
+    # any ESTABLISHED,RELATED packets, because IPv4 might select the VIP as
+    # the source address for outgoing connections.
+    # (default: INPUT)
+    \fBvrrp_iptables \fRkeepalived
+
+    # or for outbound filtering as well
+    # Note, outbound filtering won't work with IPv4, since the VIP can be
+    # selected as the source address for an outgoing connection. With IPv6
+    # this is unlikely since the addresses are deprecated.
+    \fBvrrp_iptables \fRkeepalived_in keepalived_out
+
+    # or to to use default chains (INPUT and OUTPUT)
+    \fBvrrp_iptables\fR
+
+    # Keepalived may have the option to use ipsets in conjunction with
+    # iptables. If so, then the ipset names can be specified, defaults
+    # as below. If no names are specified, ipsets will not be used,
+    # otherwise any omitted names will be constructed by adding "_if"
+    # and/or "6" and _igmp/_mld to previously specified names.
+    \fBvrrp_ipsets \fR[keepalived [keepalived6 [keepalived_if6 [keepalived_igmp [keepalived_mld]]]]]
 
     # The following enables checking that when in unicast mode, the
     # source address of a VRRP packet is one of our unicast peers.
@@ -369,9 +414,28 @@ and
 
     # The following options can be used if vrrp, checker or bfd  processes
     # are timing out. This can be seen by a backup vrrp instance becoming
-    # master even when the master is still running because the master or
+    # master even when the master is still running, because the master or
     # backup system is too busy to process vrrp packets.
     # --
+    # keepalived can, if it detects that it is not running sufficiently
+    # soon after a timer should expire, increase its priority, first
+    # of all switching to realtime scheduling, and if that is not
+    # sufficient, it will then increase its realtime priority by one each
+    # time it detects a further delay in running. If the event that realtime
+    # scheduling is enabled, RLIMIT_RTTIME will be set, using the values for
+    # {bfd,checker,vrrp}_rlimit_rttime (see below). These values may need
+    # to be increased for slower processors.
+    # --
+    # To limit the maximum increased automatic priority, specify the following
+    # (0 doesn't use automatic priority increases, and is the default. -1 disables
+    # the warning message at startup). Omitting the priority sets the maximum value.
+    \fBmax_auto_priority\fR [<-1 to 99>]  # 99 is really sched_get_priority_max(SCHED_RR)
+
+    # Minimum delay in microseconds after timer expires before keeplalived is
+    # scheduled after which the process priority will be auto incremented
+    # (default is 1000000 usecs (1 second), maximum is 10000000 (10 seconds))
+    \fBmin_auto_priority_delay\fR <delay in usecs>
+
     # Set the vrrp child process priority (Negative values increase priority)
     \fBvrrp_priority \fR<-20 to 19>
 
@@ -422,10 +486,10 @@ and
 
     # Set the limit on CPU time between blocking system calls,
     # in microseconds
-    # (default: 1000)
-    \fBvrrp_rlimit_rtime \fR>=1
-    \fBchecker_rlimit_rtime \fR>=1
-    \fBbfd_rlimit_rtime \fR>=1
+    # (default: 10000)
+    \fBvrrp_rlimit_rttime \fR>=2
+    \fBchecker_rlimit_rttime \fR>=2
+    \fBbfd_rlimit_rttime \fR>=2
 
     # If Keepalived has been build with SNMP support, the following
     # keywords are available.
@@ -600,6 +664,45 @@ and
     # is to use a seed based on the time, so that each time a different configuration
     # will be generated).
     \fBrandom_seed \fRUNSIGNED_INT
+
+    # reload_time_file allows a reload of keepalived to be scheduled in the future. This is
+    # particularly useful if there is a master keepalived and one or more backup keepalived
+    # instances and the new configuration is incompatible with the previous configuration,
+    # e.g. adding or removing VIPs which would cause adverts to be rejected.
+    # All the instances can be scheduled to reload at the same time, thereby ensuring that
+    # no mismatching adverts are received by the backup instances.
+    # The configuration specifies a file which keepalived will monitor. The first line of
+    # the file must contain a valid time or date/time exactly in the formats specified below.
+    # When keepalived starts up, it reads the file if it exists, and schedules a reload at
+    # the specified time. If the file does not exist, then when it is subsequently created
+    # a reload will be scheduled. If the file is updated, the reload time will be modified
+    # accordingly. If the file is deleted, the reload is cancelled.
+    # Normally when the reload occurs the specified file is deleted, since the reload has
+    # been done; if the file included a date then the reload will be in the past and so
+    # ignored. However, if there is no date, then if the file were reread following the
+    # reload, a reload would be scheduled for 24 hours time. In order to stop this, the
+    # file is deleted (unlinked) by default. If reload_repeat is specified, then the
+    # file is not deleted, and if the file contains a time only with no date, then
+    # keepalived will keep reloading at that time every day until the file is removed or
+    # modified.
+    # If the directory containing the file does not exist at startup/reload, or if the
+    # directory is removed or renamed, then no future scheduled reloads will occur until
+    # a manual (SIGHUP) reload is done or keepalived restarts.
+    # The permitted formats of the entry in the timer file are precisely:
+    #   HH:MM:SS
+    #   YY-MM-DD HH:MM:SS
+    #   YYYY-MM-DD HH:MM:SS
+    # each with an optional 'Z' at the end.
+    # There must be no leading or trailing whitespace, and only one space between the date
+    # and the time.
+    # If there is a 'Z' at the end of the time, the time is parsed as UTC, otherwise the
+    # time is the localtime for the environment in which keepalived is running. If the
+    # systems which are being reloaded are in different timezones, it is probably safer to
+    # use UTC.
+    # If using local time with daylight savings, beware that some times don't exist and
+    # some times are duplicated and hence ambiguous.
+    \fBreload_time_file\fR ABSOLUTE-PATHNAME-OF-FILE
+    \fBreload_repeat\fR
 }
 .fi
 .SH Linkbeat interfaces
@@ -619,7 +722,7 @@ ETHTOOL is used, and if that isn't supported then ioctl polling. The preferred t
 of polling to use can be specified with MII or ETHTOOL or IOCTL after the interface
 name, but if that type isn't supported, a supported type will be used.
 .PP
-The synfax for linkbeat_interfaces is:
+The syntax for linkbeat_interfaces is:
 .nf
     \fBlinkbeat_interfaces\fR {
         eth2
@@ -723,6 +826,59 @@ To force a route/rule to be IPv6, add the keyword "inet6".
     }
 .fi
 .PP
+.SH Track files
+.PP
+Adds a file to be monitored. The file will be read whenever it is
+modified. The value in the file will be recorded for all VRRP instances,
+sync groups and real servers which monitor it.
+Note that the file will only be read if at least one VRRP instance,
+sync group or real server monitors it.
+
+A value will be read as a number in text from the file.  If the weight
+configured against the track_file is 0, a non-zero value in the file will
+be treated as a failure status, and a zero value will be treated as
+an OK status, otherwise the value will be  multiplied by the weight configured
+in the track_file statement.
+
+For VRRP instances, if the result is less than -253 anything monitoring the
+script will transition to the fault state (the weight can be 254 to allow
+for a negative value being read from the file).
+
+If the vrrp instance or sync group is not the address owner and the result is between
+-253 and 253, the result will be added to the initial priority of the VRRP instance
+(a negative value will reduce the priority), although the effective priority will
+be limited to the range [1,254]. Likewise for real servers.
+
+If a vrrp instance using a track_file is a member of a sync group, unless
+sync_group_tracking_weight is set on the group weight 0 must be set.
+Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
+
+For real servers monitoring the file, the limits of values read from the track
+file are 2147483646 to -2147483647. The value, once multiplied by the weight, will
+be added to the real server's IPVS weight.
+NOTE: weights for track_file for real servers are not fully implemented yet. In
+particular allowing weight 0, handling negative calculated values and reloading.
+.PP
+.nf
+The syntax for track file is:
+
+\fBtrack_file \fR<STRING> {	# vrrp_track_file is a deprecated synonym
+    # file to track (weight defaults to 1)
+    \fBfile \fR<QUOTED_STRING>
+
+    # optional default weight
+    \fBweight \fR<-2147483647..2147483647> [reverse]
+
+    # create the file and/or initialise the value
+    # This causes VALUE (default 0) to be written to
+    # the specified file at startup if the file doesn't
+    # exist, unless overwrite is specified in which case
+    # any existing file contents will be overwritten with
+    # the specified value.
+    \fBinit_file \fR[VALUE] [overwrite]
+}
+.fi
+.PP
 .SH VRRP track processes
 .PP
 .nf
@@ -778,7 +934,7 @@ The configuration block looks like:
         #   parameters are specified.
         #   This option forces matching the full command line
         \fBfull_command\fR
-   }
+    }
 .fi
 .PP
 To avoid having to frequently run a track_script to monitor the existance
@@ -971,51 +1127,6 @@ The syntax for the vrrp script is:
     \fBinit_fail\fR
 }
 .fi
-.PP
-.SH VRRP track files
-.PP
-Adds a file to be monitored. The file will be read whenever it is
-modified. The value in the file will be recorded for all VRRP instances
-and sync groups which monitor it.
-Note that the file will only be read if at least one VRRP instance
-or sync group monitors it.
-
-A value will be read as a number in text from the file.  If the weight
-configured against the track_file is 0, a non-zero value in the file will
-be treated as a failure status, and a zero value will be treated as
-an OK status, otherwise the value will be  multiplied by the weight configured
-in the track_file statement. If the result is less than -253 any VRRP
-instance or sync group monitoring the script will transition to the fault state
-(the weight can be 254 to allow for a negative value being read from the file).
-
-If the vrrp instance or sync group is not the address owner and the result is between
--253 and 253, the result will be added to the initial priority of the VRRP instance
-(a negative value will reduce the priority), although the effective priority will
-be limited to the range [1,254].
-
-If a vrrp instance using a track_file is a member of a sync group, unless
-sync_group_tracking_weight is set on the group weight 0 must be set.
-Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
-.PP
-.nf
-The syntax for vrrp track file is :
-
-\fBvrrp_track_file \fR<STRING> {
-    # file to track (weight defaults to 1)
-    \fBfile \fR<QUOTED_STRING>
-
-    # optional default weight
-    \fBweight \fR<-254..254> [reverse]
-
-    # create the file and/or initialise the value
-    # This causes VALUE (default 0) to be written to
-    # the specified file at startup if the file doesn't
-    # exist, unless overwrite is specified in which case
-    # any existing file contents will be overwritten with
-    # the specified value.
-    \fBinit_file \fR[VALUE] [overwrite]
-}
-.fi
 .SH VRRP synchronization group(s)
 .PP
 VRRP Sync Group is an extension to VRRP protocol. The main goal is to define a bundle
@@ -1070,8 +1181,8 @@ The syntax for vrrp_sync_group is :
     }
 
     # Files whose state we monitor, value is added to effective priority.
-    # <STRING> is the name of a vrrp_track_file
-    # weight defaults to weight configured in vrrp_track_file
+    # <STRING> is the name of a track_file
+    # weight defaults to weight configured in track_file
     \fBtrack_file \fR{
         <STRING>
         <STRING> weight <-254..254> [reverse|noreverse]
@@ -1119,6 +1230,12 @@ The syntax for vrrp_sync_group is :
     # executed when stopping vrrp
     \fBnotify_stop \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
+    # notify_deleted causes DELETED to be sent to notifies rather
+    # than the default FAULT after a vrrp instance is deleted during a
+    # reload. If a script is specified, that script will be executed
+    # as well.
+    \fBnotify_deleted [\fR<STRING>|<QUOTED-STRING> [username [groupname]]]
+
     # for ANY state transition.
     # "notify" script is called AFTER the notify_* script(s) and
     # is executed with 4 additional arguments after the configured
@@ -1126,12 +1243,12 @@ The syntax for vrrp_sync_group is :
     #   $(n-3) = "GROUP"|"INSTANCE"
     #   $(n-2) = name of the group or instance
     #   $(n-1) = target state of transition (stop only applies to instances)
-    #            ("MASTER"|"BACKUP"|"FAULT"|"STOP")
+    #            ("MASTER"|"BACKUP"|"FAULT"|"STOP"|"DELETED")
     #   $(n)   = priority value
     #   $(n-3) and $(n-1) are ALWAYS sent in uppercase, and the possible
     # strings sent are the same ones listed above
-    #   ("GROUP"/"INSTANCE", "MASTER"/"BACKUP"/"FAULT"/"STOP")
-    # (note: STOP is only applicable to instances)
+    #   ("GROUP"/"INSTANCE", "MASTER"/"BACKUP"/"FAULT"/"STOP"/"DELETED")
+    # (note: STOP and DELETED are only applicable to instances)
     \fBnotify \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
     # The notify fifo output is the same as the last 4 parameters for the "notify"
@@ -1217,7 +1334,13 @@ The syntax for vrrp_instance is :
     # So the entry here doesn't matter a whole lot.
     \fBstate \fRMASTER
 
-    # interface for inside_network, bound by vrrp
+    # interface for inside_network, bound by vrrp.
+    # Note: if using unicasting, the interface can be omitted as long
+    #   as the unicast addresses are not IPv6 link local addresses (this is
+    #   necessary, for example, if using asymmetric routing).
+    #   If the interface is omitted, then all VIPs and eVIPs should specify
+    #   the interface they are to be configured on, otherwise they will be
+    #   added to the default interface.
     \fBinterface \fReth0
 
     # Use VRRP Virtual MAC.
@@ -1287,7 +1410,7 @@ The syntax for vrrp_instance is :
     }
 
     # Files whose state we monitor, value is added to effective priority.
-    # <STRING> is the name of a vrrp_track_file
+    # <STRING> is the name of a track_file
     \fBtrack_file \fR{
         <STRING>
         <STRING>
@@ -1336,16 +1459,27 @@ The syntax for vrrp_instance is :
     #  always use version 3.
     \fBversion \fR<2 or 3>
 
+    # The following enables checking that when in unicast mode, the
+    # source address of a VRRP packet is one of our unicast peers.
+    \fBcheck_unicast_src\fR
+
     # Do not send VRRP adverts over a VRRP multicast group.
     # Instead it sends adverts to the following list of
     # ip addresses using unicast. It can be cool to use
     # the VRRP FSM and features in a networking
     # environment where multicast is not supported!
     # IP addresses specified can be IPv4 as well as IPv6.
+    # If min_ttl and/or max_ttl are specified, the TTL/hop limit
+    # of any received packet is checked against the specified
+    # TTL range, and is discarded if it is outside the range.
+    # Specifying min_ttl or max_ttl turns on check_unicast_src.
     \fBunicast_peer \fR{
-        <IPADDR>
+        <IPADDR> [min_ttl {0..255}] [max_ttl {0..255}]
         ...
     }
+
+    # Specify the unicast TTL/HLIM for sending unicast adverts
+    \fBunicast_ttl\fR {0..255}
 
     # The checksum calculation when using VRRPv3 changed after v1.3.6.
     #  Setting this flag forces the old checksum algorithm to be used
@@ -1411,7 +1545,7 @@ The syntax for vrrp_instance is :
     # addresses add|del on change to MASTER, to BACKUP.
     # With the same entries on other machines,
     # the opposite transition will be occurring.
-    # For virutal_ipaddress, virtual_ipaddress_excluded,
+    # For virtual_ipaddress, virtual_ipaddress_excluded,
     #   virtual_routes and virtual_rules most of the options
     #   match the options of the command ip address/route/rule add.
     #   The track_group option only applies to static addresses/routes/rules.
@@ -1595,8 +1729,14 @@ and will optimize healthchecking task by only spawning one healthchecking where
 multiple virtual server declaration will spawn a dedicated healthchecker for every
 real server which will waste system resources.
 .PP
-Any combination of IP addresses, IP address ranges and firewall marks can be used. Use
-of this option is intended for very large LVSs.
+Any combination of IP addresses, IP address ranges and firewall marks can be used, provided
+that the family of the IP addresses of the virtual server group match the IP address family
+of all the real servers of any virtual server using the virtual server group. The one
+exception to this is that the virtual server group can be configured with both IPv4 and IPv6
+addresses and fwmarks provided that all the real servers (and sorry servers) of all virtual
+servers using the virtual server group use tunnel forwarding; if fwmarks are specified in
+this case, the address family must be specified.
+Use of this option is intended for very large LVSs.
 .PP
 .nf
 The syntax for virtual_server_group is :
@@ -1613,8 +1753,10 @@ The syntax for virtual_server_group is :
     <IPADDR RANGE> [<PORT>]
     ...
     # Firewall Mark (fwmark)
+    # inet/inet6 should only be specified for virtual server groups
+    # where all real servers of the virtual servers are tunnelled.
     \fBfwmark \fR<INTEGER>
-    \fBfwmark \fR<INTEGER>
+    \fBfwmark \fR<INTEGER> [inet|inet6]
     ...
 }
 .fi
@@ -1655,7 +1797,7 @@ The syntax for virtual_server is :
     # Enable One-Packet-Scheduling for UDP (-O in ipvsadm)
     \fBops\fR
 
-    # Default LVS forwarding method.
+    # Override default LVS forwarding method (default is NAT).
     # Default tunnel type is ipip. Since Linux 5.2 the GUE tunnel type can
     # be specified. If using GUE, a port number is required. Since Linux 5.3
     # if the tunnel type is GUE, the checksum option can also be specified.
@@ -1721,11 +1863,13 @@ The syntax for virtual_server is :
 
     # RS to add to LVS topology when the quorum isn't achieved.
     #  If a sorry server is configured, all real servers will
-    #  be brought down when the quorum is not achieved.
+    #  be brought down when the quorum is not achieved and be
+    #  replaced with the sorry server.
     \fBsorry_server \fR<IPADDR> [<PORT>]
     # applies inhibit_on_failure behaviour to the sorry_server
     \fBsorry_server_inhibit\fR
-    # Sorry server LVS forwarding method
+    # Sorry server LVS forwarding method. Default is the virtual
+    #  server's default.
     # For details of tunnel type, see virtual_server details.
     \fBsorry_server_lvs_method \fRNAT|DR
     or
@@ -1760,7 +1904,8 @@ The syntax for virtual_server is :
         # relative weight to use, default: 1
         \fBweight \fR<INTEGER>
         # LVS forwarding method
-        # For details of tunnel type, see virtual_server details.
+        # For details of tunnel type, see virtual_server details. The default
+        # setting is taken from the virtual_server's setting.
         \fBlvs_method \fRNAT|DR
         or
         \fBlvs_method \fRTUN [type {ipip|gue port NUM|gre} [nocsum|csum|remcsum]]
@@ -1797,10 +1942,10 @@ The syntax for virtual_server is :
         \fBlog_all_failures \fR<BOOL>         # log all failures when checker up
 
         # healthcheckers. Can be multiple of each type
-        # HTTP_GET|SSL_GET|TCP_CHECK|SMTP_CHECK|DNS_CHECK|MISC_CHECK|BFD_CHECK
+        # HTTP_GET|SSL_GET|TCP_CHECK|SMTP_CHECK|DNS_CHECK|MISC_CHECK|BFD_CHECK|UDP_CHECK|PING_CHECK|FILE_CHECK
 
-        # All checkers have the following options, except MISC_CHECK
-        # which only has options alpha onwards, and BFD_CHECK which has none
+        # All checkers have the following options, except MISC_CHECK which only
+        # has options alpha onwards, and BFD_CHECK and FILE_CHECK which have none
         # of the standard options:
         CHECKER_TYPE {
             # ======== generic connection options
@@ -1858,48 +2003,48 @@ The syntax for virtual_server is :
             # An url to test
             # can have multiple entries here
             \fBurl \fR{
-              #eg path / , or path /mrtg2/
-              \fBpath \fR<STRING>
-              # healthcheck needs digest
-              # or status_code and digest
-              # Digest computed with genhash
-              # eg digest 9b3a0c85a887a256d6939da88aabd8cd
-              \fBdigest \fR<STRING>
-              # status code returned in the HTTP header
-              # eg status_code 200 or status_code 200-299 400-499 503 505
-              # Default is 200-299
-              \fBstatus_code \fR<INTEGER|RANGE> [<INTEGER|RANGE>] ...
-              # VirtualHost string. eg virtualhost www.firewall.loc
-              # If not set, uses virtualhost from real or virtual server
-              \fBvirtualhost \fR<STRING>
-              # Regular expression to search returned data against.
-              # A failure to match causes the check to fail.
-              \fBregex \fR<STRING>
-              # Reverse the sense of the match, so a match of the
-              # returned text causes the check to fail.
-              \fBregex_no_match\fR
-              # Space separated list of options for regex.
-              #  See man pcre2api for a description of the options.
-              #  The following option are supported:
-              #   allow_empty_class alt_bsux auto_callout caseless
-              #   dollar_endonly dotall dupnames extended firstline
-              #   match_unset_backref multiline never_ucp never_utf
-              #   no_auto_capture no_auto_possess no_dotstar_anchor
-              #   no_start_optimize ucp ungreedy utf never_backslash_c
-              #   alt_circumflex alt_verbnames use_offset_limit
-              \fBregex_options \fR<OPTIONS>
-              # For complicated regular expressions a larger stack
-              #   may be needed, and this allows the start and maximum
-              #   sizes in bytes to be specified. For more details see
-              #   the documentation for pcre2_jit_stack_create()
-              \fBregex_stack \fR<START> <MAX>
-              # The minimum offset into the returned data to start
-              #   checking for the regex pattern match. This can save
-              #   processing time if the returned data is large.
-              \fBregex_min_offset \fR<OFFSET>
-              # The maximum offset into the returned data for the
-              #   start of the subject match.
-              \fBregex_max_offset \fR<OFFSET>
+                #eg path / , or path /mrtg2/
+                \fBpath \fR<STRING>
+                # healthcheck needs digest
+                # or status_code and digest
+                # Digest computed with genhash
+                # eg digest 9b3a0c85a887a256d6939da88aabd8cd
+                \fBdigest \fR<STRING>
+                # status code returned in the HTTP header
+                # eg status_code 200 or status_code 200-299 400-499 503 505
+                # Default is 200-299
+                \fBstatus_code \fR<INTEGER|RANGE> [<INTEGER|RANGE>] ...
+                # VirtualHost string. eg virtualhost www.firewall.loc
+                # If not set, uses virtualhost from real or virtual server
+                \fBvirtualhost \fR<STRING>
+                # Regular expression to search returned data against.
+                # A failure to match causes the check to fail.
+                \fBregex \fR<STRING>
+                # Reverse the sense of the match, so a match of the
+                # returned text causes the check to fail.
+                \fBregex_no_match\fR
+                # Space separated list of options for regex.
+                #  See man pcre2api for a description of the options.
+                #  The following option are supported:
+                #   allow_empty_class alt_bsux auto_callout caseless
+                #   dollar_endonly dotall dupnames extended firstline
+                #   match_unset_backref multiline never_ucp never_utf
+                #   no_auto_capture no_auto_possess no_dotstar_anchor
+                #   no_start_optimize ucp ungreedy utf never_backslash_c
+                #   alt_circumflex alt_verbnames use_offset_limit
+                \fBregex_options \fR<OPTIONS>
+                # For complicated regular expressions a larger stack
+                #   may be needed, and this allows the start and maximum
+                #   sizes in bytes to be specified. For more details see
+                #   the documentation for pcre2_jit_stack_create()
+                \fBregex_stack \fR<START> <MAX>
+                # The minimum offset into the returned data to start
+                #   checking for the regex pattern match. This can save
+                #   processing time if the returned data is large.
+                \fBregex_min_offset \fR<OFFSET>
+                # The maximum offset into the returned data for the
+                #   start of the subject match.
+                \fBregex_max_offset \fR<OFFSET>
             }
         }
 
@@ -1965,6 +2110,40 @@ The syntax for virtual_server is :
         \fBBFD_CHECK \fR{
             \fBname \fR<STRING>
         }
+
+        # PING healthchecker
+        # Note: using this checker may cause /proc/sys/net/ipv4/ping_group_range to be
+        # updated to allow root to use an IPPROTO_ICMP socket.
+        \fBPING_CHECK \fR{
+            # No additional options
+        }
+
+        # UDP healthchecker
+        # Note: for this checker to work properly, it relies on ICMP error messages such as
+        #   HOST_UNREACH, NET_UNREACH, PORT_UNREACH. HOST_UNREACH relies on ARP requests
+        #   timing out, and so connect_timeout should be long enough to allow for this (e.g.
+        #   at least 4 seconds).
+        # It may be that you will want to use PING_CHECK to the same server as well.
+        \fBUDP_CHECK \fR{
+	        \fBrequire_reply\fR		# Require a reply packet for check to be successful
+        }
+
+        # File checker
+        # This reads and monitors the contents of a file, where STRING is the name specified
+        # in the track_file configuration block (see above).
+        # NOTE: weights for track_file for real servers are not fully implemented yet. In
+        # particular allowing weight 0, handling negative calculated values and reloading.
+        \fBFILE_CHECK \fR{
+            \fBtrack_file \fR<STRING>
+
+            # If dynamic is set, the value from the file is used
+            # to dynamically adjust the weight by adding the weight
+            # to the quorum and the LVS weight
+            \fBdynamic\fR
+
+            # The weight multiplier to apply to the value read from the file
+            \fBweight\fR <-2147483647..2147483647> [reverse]
+        }
     }
 }
 .fi
@@ -1989,7 +2168,7 @@ The syntax for virtual_server is :
 .PP
 Configuration parser has been extended to support advanced features such as
 conditional configuration and parameter substitution. These features are
-very usefull for any scripted env where configuration template are
+very useful for any scripted environment where configuration templates are
 generated (datacenters).
 .PP
 .SH Conditional configuration and configuration id
@@ -2204,23 +2383,49 @@ line to be processed multiple times, with the variable \fB$var\fR set initially 
 \fBstart\fR, and then \fB$var\fR will be incremented by \fBstep\fR repeatedly, terminating when
 it is greater than \fBend\fR. \fBstep\fR may be omitted, in which case it defaults to 1 or
 -1, depending on whether \fBend\fR is greater or less than \fBstart\fR. \fBstart\fR may also be
-omitted, in which case it defaults to 1 if \fBend\fR > 0 or -1 if \fBend\fR < 0. so, for example:
+omitted, in which case it defaults to 1 if \fBend\fR > 0 or -1 if \fBend\fR < 0.
+~SEQx(...) is the same as ~SEQ(...), except the variable $var will for formatted in hexadecimal,
+which would be useful for IPv6 addresses.
+
+Note: At the moment it is necessary to use different variables for the ~SEQ block from any
+previously defined variable, including one used as the variable in a previous ~SEQ block.
+This may change in the future, so do not rely on a ~SEQ block variable being defined after
+the end of the block.
+
+Examples:
 .PP
 .nf
-    ~SEQ(SUBNET, 0, 3) ip_address 10.0.$SUBNET.1
+    ~SEQ(SUBNET, 0, 3) ip_address 10.0.${SUBNET}.1
 
     would produce:
         ip_address 10.0.0.1
         ip_address 10.0.1.1
         ip_address 10.0.2.1
         ip_address 10.0.3.1
+
+and
+    ~SEQx(SUBNET, 144, 16, 192) ip_address fe80::20:${SUBNET}:1
+  or better
+    ~SEQx(SUBNET, 0x90, 0x10, 0xc0) ip_address fe80::20:${SUBNET}:1
+
+    would produce:
+        ip_address fe80::20:90:1
+        ip_address fe80::20:a0:1
+        ip_address fe80::20:b0:1
+        ip_address fe80::20:c0:1
+
+   Another example:
+
+	virtual_ipaddress {
+	    ~SEQx(AD2, 0x90, 0x10, 0xc0) ~SEQx(AD1, 0x12, -1, 0x0c) fe81::10:${AD2}:${AD1}
+	}
 .fi
 .PP
 There can be multiple ~SEQ elements on a line, so for example:
 .PP
 .nf
     $VI4= \e
-    \fBvrrp_track_file \fRoffset_instance_4.${IF}.${NUM}.${ID} { \e
+    \fBtrack_file \fRoffset_instance_4.${IF}.${NUM}.${ID} { \e
         \fBfile \fR"${_PWD}/679/track_files/4.${IF}.${NUM}.${ID}" \e
         \fBweight \fR-100 \e
     } \e
@@ -2242,6 +2447,70 @@ There can be multiple ~SEQ elements on a line, so for example:
     will produce 65024 vrrp instances with names from vrrp4.0.0.1 through to
     vrrp4.7.31.254.
 .fi
+.SH List blocks
+.PP
+List blocks are similar to sequence blocks, except that the values to substitute into
+the variable are listed in the ~LST specification.
+
+A line starting \fB~LST(var, val1, val2, val3)\fR will cause the remainder of the
+line to be processed multiple times, with the variable \fB$var\fR set initially to
+\fBval1\fR, and then \fBval2\fR, and finally \fBval3\fR. Any number of values can be
+specified, as long as at least one value is (although only one value would be pointless).
+
+If it is desired to substitute more than one variable at a time, the variables and values
+need to be enclosed in {...} blocks. For example:
+
+    ~LST({IP, IP1}, {10,1},{20,4},{5,6},{12,8}) 192.168.${IP}.${IP1}
+
+would first set IP=10 and IP1=1, then IP=20 and IP1=4, etc, and produces:
+
+    192.168.10.1
+    192.168.20.4
+    192.168.5.6
+    192.168.12.8
+
+List blocks can be nested, so:
+
+    ~LST(IP, 1, 2, 3, 4) ~LST(IP1, 5,6,7) 192.169.${IP}.${IP1}
+
+produces:
+    192.169.1.5
+    192.169.1.6
+    192.169.1.7
+    192.169.2.5
+    192.169.2.6
+    192.169.2.7
+    192.169.3.5
+    192.169.3.6
+    192.169.3.7
+    192.169.4.5
+    192.169.4.6
+    192.169.4.7
+
+Finally, list blocks and sequence blocks can be combined, so:
+
+    ~LST({IP, IP1}, {10,1},{20,4},{5,6},{12,8}) ~SEQ(IP2,168,2,172) 192.${IP2}.${IP}.${IP1}
+
+produces:
+
+    192.168.10.1
+    192.170.10.1
+    192.172.10.1
+    192.168.20.4
+    192.170.20.4
+    192.172.20.4
+    192.168.5.6
+    192.170.5.6
+    192.172.5.6
+    192.168.12.8
+    192.170.12.8
+    192.172.12.8
+.PP
+.SH KERNEL SETTINGS
+It has been identified that if \fBproxy_arp\fR and \fBproxy_arp_pvlan\fR are enabled
+on an interface that has VIPs or eVIPs configured on it, it can cause incorrect replies
+to ARP requests due to the proxy replying to the ARP request as well as the keepalived
+host. Both need to be set to 0 to function properly.
 .PP
 .SH AUTHORS
 .br

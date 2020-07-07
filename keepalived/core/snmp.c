@@ -22,12 +22,14 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include "scheduler.h"
 #include "snmp.h"
 #include "logger.h"
 #include "global_data.h"
 #include "main.h"
 #include "utils.h"
+#include "list_head.h"
 #include "warnings.h"
 
 #include <net-snmp/agent/agent_sysORTable.h>
@@ -41,11 +43,6 @@ snmp_keepalived_log(__attribute__((unused)) int major, __attribute__((unused)) i
 	if (slm_len && slm->msg[slm_len-1] == '\n')
 		slm_len--;
 	log_message(slm->priority, "%.*s", slm_len, slm->msg);
-
-	/* If we get an AgentX subagent connected message when we think
-	 * we are connected, we need to re-register the fds for epoll */
-	if (master->snmp_fdsetsize && slm->priority == 6)
-		snmp_epoll_reset(master);
 
 	return 0;
 }
@@ -65,65 +62,57 @@ snmp_scope(int scope)
 	return 0;
 }
 
-void*
-snmp_header_list_table(struct variable *vp, oid *name, size_t *length,
-		  int exact, size_t *var_len, WriteMethod **write_method, list dlist)
+list_head_t *
+snmp_header_list_head_table(struct variable *vp, oid *name, size_t *length,
+			    int exact, size_t *var_len, WriteMethod **write_method,
+			    list_head_t *l)
 {
-	element e;
-	void *scr;
-	oid target, current;
+	oid target, current = 0;
+	list_head_t *e;
 
 	if (header_simple_table(vp, name, length, exact, var_len, write_method, -1) != MATCH_SUCCEEDED)
 		return NULL;
 
-	if (LIST_ISEMPTY(dlist))
+	if (list_empty(l))
 		return NULL;
 
 	target = name[*length - 1];
-	current = 0;
 
-	/* If there are insufficent entries in the list, just return no match */
-	if (LIST_SIZE(dlist) < target)
-		return NULL;
-
-	LIST_FOREACH(dlist, scr, e) {
+	list_for_each(e, l) {
 		if (++current < target)
 			/* No match found yet */
 			continue;
 		if (current == target)
 			/* Exact match */
-			return scr;
+			return e;
 		if (exact)
 			/* No exact match found */
 			return NULL;
 		/* current is the best match */
 		name[*length - 1] = current;
-		return scr;
+		return e;
 	}
 
-	/* No match found at end */
+	/* There are insufficent entries in the list or no match
+	 * at the end then just return no match */
 	return NULL;
 }
 
-/* This is the equivalent of snmp_header_list_table where each element of the first
- * list has a list itself for which each element in turn needs to be returned. */
-element
+list_head_t *
 snmp_find_element(struct variable *vp, oid *name, size_t *length,
-	     int exact, size_t *var_len, WriteMethod **write_method,
-	     list list1, size_t list2_offset)
+		  int exact, size_t *var_len, WriteMethod **write_method,
+		  list_head_t *l, size_t offset_outer, size_t offset_inner)
 {
 	oid *target, current[2];
-	int result;
 	size_t target_len;
-	element e, e1;
-	void *element_data;
-	__attribute__((unused)) void *dummy;
-	list list2;
+	list_head_t *e, *e1;
+	list_head_t *l1;
+	int result;
 
 	*write_method = 0;
 	*var_len = sizeof(long);
 
-	if (LIST_ISEMPTY(list1))
+	if (list_empty(l))
 		return NULL;
 
 	if (exact && *length != (size_t)vp->namelen + 2)
@@ -135,16 +124,13 @@ snmp_find_element(struct variable *vp, oid *name, size_t *length,
 	}
 
 	/* We search the best match: equal if exact, the lower OID in
-	   the set of the OID strictly superior to the target
-	   otherwise. */
+	 * the set of the OID strictly superior to the target
+	 * otherwise. */
 	target = &name[vp->namelen];   /* Our target match */
 	target_len = *length - vp->namelen;
 	current[0] = 0;
 
-	if (target_len && LIST_SIZE(list1) < target[0])
-		return NULL;
-
-	LIST_FOREACH(list1, element_data, e) {
+	list_for_each(e, l) {
 		current[0]++;
 
 		if (target_len) {
@@ -154,16 +140,11 @@ snmp_find_element(struct variable *vp, oid *name, size_t *length,
 				return NULL;
 		}
 
-		list2 = *(list *)((char *)element_data + list2_offset);
-
-		if (target_len && LIST_SIZE(list2) < target[1]) {
-			if (exact)
-				return NULL;
-			continue;
-		}
+		/* Find the list head of the inner list in the outer entry */
+		l1 = (list_head_t *) ((char *)e - offset_outer + offset_inner);
 
 		current[1] = 0;
-		LIST_FOREACH(list2, dummy, e1) {
+		list_for_each(e1, l1) {
 			current[1]++;
 
 			/* Compare to our target match */
@@ -337,20 +318,24 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 	return NULL;
 }
 
-static u_char*
+static u_char *
 snmp_mail(struct variable *vp, oid *name, size_t *length,
-		 int exact, size_t *var_len, WriteMethod **write_method)
+	  int exact, size_t *var_len, WriteMethod **write_method)
 {
-	char *m;
-	if ((m = (char *)snmp_header_list_table(vp, name, length, exact,
-						 var_len, write_method,
-						 global_data->email)) == NULL)
+	email_t *email;
+	list_head_t *e;
+
+	if ((e = snmp_header_list_head_table(vp, name, length, exact,
+					     var_len, write_method,
+					     &global_data->email)) == NULL)
 		return NULL;
+
+	email = list_entry(e, email_t, e_list);
 
 	switch (vp->magic) {
 	case SNMP_MAIL_EMAILADDRESS:
-		*var_len = strlen(m);
-		return (u_char *)m;
+		*var_len = strlen(email->addr);
+		return (u_char *)email->addr;
 	default:
 		break;
 	}
@@ -496,6 +481,9 @@ snmp_agent_init(const char *snmp_socket_name, bool base_mib)
 
 	master->snmp_timer_thread = thread_add_timer(master, snmp_timeout_thread, 0, TIMER_NEVER);
 
+	/* Set up the fd threads */
+	snmp_epoll_info(master);
+
 	snmp_running = true;
 }
 
@@ -504,6 +492,8 @@ snmp_agent_close(bool base_mib)
 {
 	if (!snmp_running)
 		return;
+
+	snmp_epoll_clear(master);
 
 	if (base_mib)
 		snmp_unregister_mib(global_oid, OID_LENGTH(global_oid));

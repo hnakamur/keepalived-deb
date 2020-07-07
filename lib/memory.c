@@ -42,6 +42,7 @@
 #include "bitops.h"
 #include "logger.h"
 #include "scheduler.h"
+#include "process.h"
 
 #ifdef _MEM_CHECK_
 #include "timer.h"
@@ -163,12 +164,12 @@ typedef struct {
 } MEMCHECK;
 
 /* Last free pointers */
-static LH_LIST_HEAD(free_list);
+static LIST_HEAD_INITIALIZE(free_list);
 static unsigned free_list_size;
 
 /* alloc_list entries used for 1000 VRRP instance each with VMAC interfaces is 33589 */
 static rb_root_t alloc_list = RB_ROOT;
-static LH_LIST_HEAD(bad_list);
+static LIST_HEAD_INITIALIZE(bad_list);
 
 static unsigned number_alloc_list;	/* number of alloc_list allocation entries */
 static unsigned max_alloc_list;
@@ -222,7 +223,7 @@ get_free_alloc_entry(void)
 		entry = malloc(sizeof *entry);
 	else {
 		entry = list_first_entry(&free_list, MEMCHECK, l);
-		list_head_del(&entry->l);
+		list_del_init(&entry->l);
 		free_list_size--;
 	}
 
@@ -669,7 +670,7 @@ mem_log_init(const char* prog_name, const char *banner)
 	if (log_op)
 		fclose(log_op);
 
-	log_name_len = 5 + strlen(prog_name) + 5 + 7 + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
+	log_name_len = 5 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
 	log_name = malloc(log_name_len);
 	if (!log_name) {
 		log_message(LOG_INFO, "Unable to malloc log file name");

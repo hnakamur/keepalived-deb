@@ -307,7 +307,7 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 			return false;
 
 		if (!ifp->base_ifp &&
-		    IS_VLAN(vrrp->configured_ifp) &&
+		    IS_MAC_IP_VLAN(vrrp->configured_ifp) &&
 		    vrrp->configured_ifp == vrrp->configured_ifp->base_ifp) {
 			/* If the base interface is a MACVLAN/IPVLAN that has been moved into a
 			 * different network namespace from its parent, we can't find the parent */
@@ -387,8 +387,8 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 			ipaddress.ifp = ifp;
 			if (vrrp->saddr.ss_family == AF_INET6)
 				ipaddress.u.sin6_addr = ((struct sockaddr_in6*)&vrrp->saddr)->sin6_addr;
-			else if (ifp->base_ifp->sin6_addr.s6_addr32[0])
-				ipaddress.u.sin6_addr = ifp->base_ifp->sin6_addr;
+			else if (vrrp->configured_ifp->sin6_addr.s6_addr32[0])
+				ipaddress.u.sin6_addr = vrrp->configured_ifp->sin6_addr;
 			else
 				make_link_local_address(&ipaddress.u.sin6_addr, ifp->base_ifp->hw_addr);
 			ipaddress.ifa.ifa_family = AF_INET6;
@@ -449,14 +449,14 @@ typedef struct {
 static void
 dump_bufn(const char *msg, req_t *req)
 {
-        size_t i;
+	size_t i;
 	char buf[3 * req->n.nlmsg_len + 3];
 	char *ptr = buf;
 
-        log_message(LOG_INFO, "%s: message length is %d\n", msg, req->n.nlmsg_len);
-        for (i = 0; i < req->n.nlmsg_len; i++)
-                ptr += snprintf(ptr, buf + sizeof buf - ptr, "%2.2x ", ((unsigned char *)&req->n)[i]);
-        log_message(LOG_INFO, "%s", buf);
+	log_message(LOG_INFO, "%s: message length is %d\n", msg, req->n.nlmsg_len);
+	for (i = 0; i < req->n.nlmsg_len; i++)
+		ptr += snprintf(ptr, buf + sizeof buf - ptr, "%2.2x ", ((unsigned char *)&req->n)[i]);
+	log_message(LOG_INFO, "%s", buf);
 }
 #endif
 
@@ -695,18 +695,17 @@ netlink_update_vrf(vrrp_t *vrrp)
 void
 update_vmac_vrfs(interface_t *ifp)
 {
+	tracking_obj_t *top;
 	vrrp_t *vrrp;
-        tracking_vrrp_t *tvp;
-        element e;
 
-        LIST_FOREACH(ifp->tracking_vrrp, tvp, e) {
-                vrrp = tvp->vrrp;
+	list_for_each_entry(top, &ifp->tracking_vrrp, e_list) {
+		vrrp = top->obj.vrrp;
 
-                /* We only need to look for vmacs we created that
+		/* We only need to look for vmacs we created that
 		 * are configured on the interface which has changed
 		 * VRF */
-                if (vrrp->configured_ifp != ifp ||
-                    !vrrp->ifp->is_ours)
+		if (vrrp->configured_ifp != ifp ||
+		    !vrrp->ifp->is_ours)
 			continue;
 
 		vrrp->ifp->vrf_master_ifp = ifp->vrf_master_ifp;

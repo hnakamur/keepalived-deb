@@ -60,7 +60,7 @@ extern bool do_eintr_debug;
 /* Some library functions that take pointer parameters should have them
  * specified as const pointers, but don't. We need to cast away the constness,
  * but also want to avoid compiler warnings for doing so. The following "trick"
- * achieves that. */ 
+ * achieves that. */
 #define no_const(type, var_cp) \
 ({ union { type *p; const type *cp; } ps = { .cp = var_cp }; \
  ps.p;})
@@ -210,8 +210,9 @@ static inline uint16_t csum_incremental_update16(const uint16_t old_csum, const 
 	return ~acc & 0xffff;
 }
 
+/* The following definition produces some warnings: (dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1)) */
 #define strcpy_safe(dst, src) \
-	(dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1))
+	(strncpy(dst, src, sizeof(dst) - 1), dst[sizeof(dst) - 1] = '\0')
 
 /* global vars exported */
 extern unsigned long debug;
@@ -258,15 +259,12 @@ extern int integer_to_string(const int, char *, size_t);
 extern FILE *fopen_safe(const char *, const char *);
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
-#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-extern int fork_exec(const char * const []);
-#endif
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
 extern int open_pipe(int [2]);
 #endif
 extern int memcmp_constant_time(const void *, const void *, size_t);
 
-#if defined _WITH_LVS_ || defined _LIBIPSET_DYNAMIC_
+#if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 extern bool keepalived_modprobe(const char *);
 #endif
 

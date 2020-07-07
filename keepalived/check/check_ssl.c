@@ -209,7 +209,7 @@ ssl_connect(thread_ref_t thread, int new_req)
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
-	url_t *url = ELEMENT_DATA(http_get_check->url_it);
+	url_t *url = http_get_check->url_it;
 	const char* vhost = NULL;
 #endif
 	int ret = 0;
@@ -278,20 +278,22 @@ ssl_send_request(SSL * ssl, const char *str_request, int request_len)
 }
 
 /* Asynchronous SSL stream reader */
-int
+void
 ssl_read_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
-	url_t *url = ELEMENT_DATA(http_get_check->url_it);
+	url_t *url = http_get_check->url_it;
 	unsigned timeout = checker->co->connection_to;
 	unsigned char digest[MD5_DIGEST_LENGTH];
 	int r = 0;
 
 	/* Handle read timeout */
-	if (thread->type == THREAD_READ_TIMEOUT && !req->extracted)
-		return timeout_epilog(thread, "Timeout SSL read");
+	if (thread->type == THREAD_READ_TIMEOUT && !req->extracted) {
+		timeout_epilog(thread, "Timeout SSL read");
+		return;
+	}
 
 	/* read the SSL stream - allow for terminating the data with '\0 */
 	r = SSL_read(req->ssl, req->buffer + req->len, (int)(MAX_BUFFER_LENGTH - 1 - req->len));
@@ -321,14 +323,14 @@ ssl_read_thread(thread_ref_t thread)
 
 		r = (req->error == SSL_ERROR_ZERO_RETURN) ? SSL_shutdown(req->ssl) : 0;
 
-		if (r && !req->extracted)
-			return timeout_epilog(thread, "SSL read error from");
+		if (r && !req->extracted) {
+			timeout_epilog(thread, "SSL read error from");
+			return;
+		}
 
 		/* Handle response stream */
 		http_handle_response(thread, digest, !req->extracted);
 	}
-
-	return 0;
 }
 
 #ifdef THREAD_DUMP

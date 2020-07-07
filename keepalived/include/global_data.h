@@ -48,7 +48,7 @@
 #endif
 
 /* local includes */
-#include "list.h"
+#include "list_head.h"
 #include "vrrp_if.h"
 #include "timer.h"
 #ifdef _WITH_VRRP_
@@ -59,10 +59,6 @@
 #endif
 #include "notify.h"
 
-#ifndef _HAVE_LIBIPTC_
-#define	XT_EXTENSION_MAXNAMELEN		29
-#endif
-
 /* constants */
 #define DEFAULT_SMTP_CONNECTION_TIMEOUT (30 * TIMER_HZ)
 
@@ -72,9 +68,16 @@
 #define RX_BUFS_SIZE			0x04
 #endif
 
+#ifdef _WITH_LVS_
+#define LVS_MAX_TIMEOUT			(86400*31)      /* 31 days */
+#endif
+
 /* email link list */
 typedef struct _email {
 	char				*addr;
+
+	/* Linked list member */
+	list_head_t			e_list;
 } email_t;
 
 #ifdef _WITH_LVS_
@@ -87,7 +90,7 @@ typedef enum {
 
 /* Configuration data root */
 typedef struct _data {
-	const char 			*process_name;
+	const char			*process_name;
 #ifdef _WITH_VRRP_
 	const char			*vrrp_process_name;
 #endif
@@ -98,8 +101,9 @@ typedef struct _data {
 	const char			*bfd_process_name;
 #endif
 #if HAVE_DECL_CLONE_NEWNET
-	const char			*network_namespace;	/* network namespace name */
-	bool				namespace_with_ipsets;	/* override for namespaces with ipsets on Linux < 3.13 */
+	const char			*network_namespace;		/* network namespace name */
+	const char			*network_namespace_ipvs;	/* network namespace name for ipvs */
+	bool				namespace_with_ipsets;		/* override for namespaces with ipsets on Linux < 3.13 */
 #endif
 	const char			*local_name;
 	const char			*instance_name;		/* keepalived instance name */
@@ -111,8 +115,18 @@ typedef struct _data {
 	struct sockaddr_storage		smtp_server;
 	const char			*smtp_helo_name;
 	unsigned long			smtp_connection_to;
-	list				email;
+	list_head_t			email;
 	int				smtp_alert;
+	notify_script_t			*startup_script;
+	unsigned			startup_script_timeout;
+	notify_script_t			*shutdown_script;
+	unsigned			shutdown_script_timeout;
+#ifndef _ONE_PROCESS_DEBUG_
+	const char			*reload_time_file;
+	bool				reload_repeat;
+	time_t				reload_time;
+	bool				reload_date_specified;
+#endif
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
 	bool				allow_if_changes;
@@ -133,6 +147,8 @@ typedef struct _data {
 	bool				lvs_flush;		/* flush any residual LVS config at startup */
 	lvs_flush_t			lvs_flush_onstop;	/* flush any LVS config at shutdown */
 #endif
+	int				max_auto_priority;
+	long				min_auto_priority_delay;
 #ifdef _WITH_VRRP_
 	struct sockaddr_in		vrrp_mcast_group4;
 	struct sockaddr_in6		vrrp_mcast_group6;
@@ -148,16 +164,16 @@ typedef struct _data {
 	bool				vrrp_higher_prio_send_advert;
 	int				vrrp_version;		/* VRRP version (2 or 3) */
 #ifdef _WITH_IPTABLES_
-	char				vrrp_iptables_inchain[XT_EXTENSION_MAXNAMELEN];
-	char				vrrp_iptables_outchain[XT_EXTENSION_MAXNAMELEN];
+	const char			*vrrp_iptables_inchain;
+	const char			*vrrp_iptables_outchain;
 #ifdef _HAVE_LIBIPSET_
-	bool				using_ipsets;
-	char				vrrp_ipset_address[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_address6[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_address_iface6[IPSET_MAXNAMELEN];
+	unsigned			using_ipsets;
+	const char			*vrrp_ipset_address;
+	const char			*vrrp_ipset_address6;
+	const char			*vrrp_ipset_address_iface6;
 #ifdef HAVE_IPSET_ATTR_IFACE
-	char				vrrp_ipset_igmp[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_mld[IPSET_MAXNAMELEN];
+	const char			*vrrp_ipset_igmp;
+	const char			*vrrp_ipset_mld;
 #endif
 #endif
 #endif
@@ -166,7 +182,6 @@ typedef struct _data {
 	int				vrrp_nf_chain_priority;
 	bool				vrrp_nf_counters;
 	bool				vrrp_nf_ifindex;
-	unsigned			nft_version;
 #endif
 	bool				vrrp_check_unicast_src;
 	bool				vrrp_skip_check_adv_addr;

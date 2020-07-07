@@ -23,6 +23,7 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -108,6 +109,8 @@ get_signum(const char *sigfunc)
 		return SIGUSR1;
 	else if (!strcmp(sigfunc, "STATS"))
 		return SIGUSR2;
+	else if (!strcmp(sigfunc, "STATS_CLEAR"))
+		return SIGSTATS_CLEAR;
 #ifdef _WITH_JSON_
 	else if (!strcmp(sigfunc, "JSON"))
 		return SIGJSON;
@@ -183,7 +186,7 @@ signal_pending(void)
 /* Signal flag */
 #ifndef HAVE_SIGNALFD
 static void
-signal_handler(uint32_t sig)
+signal_handler(int sig)
 {
 	if (write(signal_pipe[1], &sig, sizeof(uint32_t)) != sizeof(uint32_t))
 		log_message(LOG_INFO, "BUG - write to signal_pipe[1] error %d (%s) - please report", errno, strerror(errno));
@@ -305,7 +308,7 @@ signal_ignore(int signo)
 }
 
 /* Handlers callback  */
-static int
+static void
 signal_run_callback(thread_ref_t thread)
 {
 	uint32_t sig;
@@ -333,8 +336,7 @@ signal_run_callback(thread_ref_t thread)
 		 * do a thread_add_signal() to reinstate itself. */
 		list_for_each_entry_safe(t, t_tmp, &m->signal, next) {
 			if (t->u.val == sig) {
-				list_head_del(&t->next);
-				INIT_LIST_HEAD(&t->next);
+				list_del_init(&t->next);
 				list_add_tail(&t->next, &m->ready);
 				t->type = THREAD_READY;
 			}
@@ -346,8 +348,6 @@ signal_run_callback(thread_ref_t thread)
 	}
 
 	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, false);
-
-	return 0;
 }
 
 static void
@@ -590,6 +590,6 @@ void signal_fd_close(int min_fd)
 void
 register_signal_thread_addresses(void)
 {
-        register_thread_address("signal_run_callback", signal_run_callback);
+	register_thread_address("signal_run_callback", signal_run_callback);
 }
 #endif
