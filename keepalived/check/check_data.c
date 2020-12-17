@@ -98,8 +98,10 @@ free_vsg_entry_list(list_head_t *l)
 {
 	virtual_server_group_entry_t *vsge, *vsge_tmp;
 
-	list_for_each_entry_safe(vsge, vsge_tmp, l, e_list)
+	list_for_each_entry_safe(vsge, vsge_tmp, l, e_list) {
+		list_del_init(&vsge->e_list);
 		FREE(vsge);
+	}
 }
 static void
 dump_vsg_entry(FILE *fp, const virtual_server_group_entry_t *vsg_entry)
@@ -244,7 +246,7 @@ alloc_vsg_entry(const vector_t *strvec)
 			port_str = NULL;
 
 		if (inet_stosockaddr(strvec_slot(strvec, 0), port_str, &new->addr)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "Invalid virtual server group IP address%s %s%s%s - skipping", strvec_slot(strvec, 0),
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid virtual server group IP address %s %s%s%s - skipping", strvec_slot(strvec, 0),
 						port_str ? "/port" : "", port_str ? "/" : "", port_str ? port_str : "");
 			FREE(new);
 			return;

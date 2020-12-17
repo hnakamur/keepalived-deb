@@ -340,8 +340,7 @@ lbflags_handler(const vector_t *strvec)
 	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
 	const char *str = strvec_slot(strvec, 0);
 
-	if (!strcmp(str, "hashed"))
-		vs->flags |= IP_VS_SVC_F_HASHED;
+	if (false) {}
 #ifdef IP_VS_SVC_F_ONEPACKET
 	else if (!strcmp(str, "ops"))
 		vs->flags |= IP_VS_SVC_F_ONEPACKET;
@@ -682,7 +681,8 @@ rs_end_handler(void)
 			vs->af = rs->addr.ss_family;
 		else if (vs->af != rs->addr.ss_family) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Address family of virtual server and real server %s don't match - skipping real server.", inet_sockaddrtos(&rs->addr));
-			free(rs);
+			list_del_init(&rs->e_list);
+			FREE(rs);
 		}
 	}
 }
