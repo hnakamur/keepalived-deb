@@ -202,6 +202,18 @@
    don't. */
 #undef HAVE_DECL_NFTA_DUP_MAX
 
+/* Define to 1 if you have the declaration of `nftnl_udata_buf_alloc', and to
+   0 if you don't. */
+#undef HAVE_DECL_NFTNL_UDATA_BUF_ALLOC
+
+/* Define to 1 if you have the declaration of `nftnl_udata_put_u32', and to 0
+   if you don't. */
+#undef HAVE_DECL_NFTNL_UDATA_PUT_U32
+
+/* Define to 1 if you have the declaration of `NFT_USERDATA_MAXLEN', and to 0
+   if you don't. */
+#undef HAVE_DECL_NFT_USERDATA_MAXLEN
+
 /* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
    */
 #undef HAVE_DECL_O_PATH
@@ -336,9 +348,6 @@
 /* Define to 1 if you have the <libiptc/libxtc.h> header file. */
 #undef HAVE_LIBIPTC_LIBXTC_H
 
-/* Define to 1 if you have the <libnftnl/udata.h> header file. */
-#undef HAVE_LIBNFTNL_UDATA_H
-
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
 
@@ -390,8 +399,7 @@
 /* Define to 1 if you have the <linux/types.h> header file. */
 #undef HAVE_LINUX_TYPES_H
 
-/* Define to 1 if your system has a GNU libc compatible `malloc' function, and
-   to 0 otherwise. */
+/* Define to 1 if you have the `malloc' function. */
 #undef HAVE_MALLOC
 
 /* Define to 1 if you have the `memmove' function. */
@@ -434,8 +442,8 @@
 /* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS and NFT_LOOKUP_F_INV defined */
 #undef HAVE_NFTNL_EXPR_LOOKUP_FLAG_INV
 
-/* Define to 1 if nftnl_udata_put_u32 declared */
-#undef HAVE_NFTNL_UDATA_PUT_U32
+/* Define to 1 if have nftnl udata support */
+#undef HAVE_NFTNL_UDATA
 
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
@@ -458,8 +466,7 @@
 /* Define to 1 if you have the `pipe2' function. */
 #undef HAVE_PIPE2
 
-/* Define to 1 if your system has a GNU libc compatible `realloc' function,
-   and to 0 otherwise. */
+/* Define to 1 if you have the `realloc' function. */
 #undef HAVE_REALLOC
 
 /* Define to 1 if you have the `select' function. */
@@ -754,6 +761,10 @@
 /* Define to 1 if using libnl-3 */
 #undef _HAVE_LIBNL3_
 
+/* Define to 1 if have linux/if_ether.h then netinet/in.h then linux/in.h
+   namespace collision */
+#undef _HAVE_LINUX_IF_ETHER_H_COLLISION_
+
 /* Define to 1 if have linux/if_ether.h then netinet/if_ether.h namespace
    collision */
 #undef _HAVE_NETINET_LINUX_IF_ETHER_H_COLLISION_
@@ -963,14 +974,8 @@
    such a type exists and the standard includes do not define it. */
 #undef int64_t
 
-/* Define to rpl_malloc if the replacement function should be used. */
-#undef malloc
-
 /* Define to `int' if <sys/types.h> does not define. */
 #undef pid_t
-
-/* Define to rpl_realloc if the replacement function should be used. */
-#undef realloc
 
 /* Define to `unsigned int' if <sys/types.h> does not define. */
 #undef size_t

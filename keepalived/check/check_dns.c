@@ -129,7 +129,7 @@ dns_final(thread_ref_t thread, bool error, const char *fmt, ...)
 				va_start(args, fmt);
 				len = vsnprintf(buf, sizeof (buf), fmt, args);
 				va_end(args);
-				if (checker->has_run && checker->retry_it >= checker->retry && !checker->has_run)
+				if (checker->has_run && checker->retry_it >= checker->retry )
 					snprintf(buf + len, sizeof(buf) - len, " after %u retries", checker->retry);
 				dns_log_message(thread, LOG_INFO, "%s", buf);
 			}
@@ -281,7 +281,9 @@ dns_make_query(thread_ref_t thread)
 		memcpy(p, s, n);
 		p += n;
 	}
-	*(p++) = 0;	/* Terminate the name */
+	
+	if (dns_check->name[0] != '.' || dns_check->name[1] != '\0')
+		*(p++) = 0;
 
 	APPEND16(p, dns_check->type);
 	APPEND16(p, 1);		/* IN */
@@ -484,7 +486,6 @@ dns_check_handler(__attribute__((unused)) const vector_t *strvec)
 
 	PMALLOC(dns_check);
 	dns_check->type = DNS_DEFAULT_TYPE;
-	dns_check->name = DNS_DEFAULT_NAME;
 	checker = queue_checker(dns_free, dns_dump, dns_connect_thread,
 				dns_check_compare, dns_check, CHECKER_NEW_CO(), true);
 
@@ -511,16 +512,49 @@ static void
 dns_name_handler(const vector_t *strvec)
 {
 	dns_check_t *dns_check = CHECKER_GET();
-	dns_check->name = set_value(strvec);
+	const char *name;
+	bool name_invalid = false;
+	const char *p;
+
+	if (dns_check->name) {
+		report_config_error(CONFIG_GENERAL_ERROR, "DNS_CHECK name already specified - ignoring");
+		return;
+	}
+
+	/* Check name does not have an empty label */
+	name = strvec_slot(strvec, 1);
+	if (name[0] == '.' && name[1] != '\0')
+		name_invalid = true;
+	else {
+		for (p = name; p; p = strchr(p + 1, '.')) {
+			if (p[1] == '.') {
+				name_invalid = true;
+				break;
+			}
+		}
+	}
+
+	if (name_invalid) {
+		report_config_error(CONFIG_GENERAL_ERROR, "DNS_CHECK name '%s' has empty label - ignoring", name);
+		return;
+	}
+
+	dns_check->name = STRDUP(name);
 }
 
 static void
 dns_check_end(void)
 {
+	dns_check_t *dns_check;
+
 	if (!check_conn_opts(CHECKER_GET_CO())) {
 		dequeue_new_checker();
+		return;
 	}
-// Is name needed?
+
+	dns_check = CHECKER_GET();
+	if (!dns_check->name)
+		dns_check->name = STRDUP(DNS_DEFAULT_NAME);
 }
 
 void
