@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.1.3], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.1.5], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
@@ -952,9 +952,13 @@ AC_C_CONST
 
 # Checks for library functions.
 AC_FUNC_FORK
-AC_FUNC_MALLOC
-AC_FUNC_REALLOC
-AC_CHECK_FUNCS([dup2 getcwd gettimeofday memmove memset select setenv socket strcasecmp strchr strdup strerror strpbrk strstr strtol strtoul uname])
+# We don't want the following two, since autoconf, if malloc(0) returns NULL, refines malloc as rpl_malloc
+# and we have to provide our own rpl_malloc() and likewise rpl_realloc() functions.
+# keepalived doesn't do 0 length malloc()s so it is not an issue.
+# We add malloc and realloc to AC_CHECK_FUNCS instead.
+#AC_FUNC_MALLOC
+#AC_FUNC_REALLOC
+AC_CHECK_FUNCS([dup2 getcwd gettimeofday malloc memmove memset realloc select setenv socket strcasecmp strchr strdup strerror strpbrk strstr strtol strtoul uname])
 dnl - pipe2() since Linux 2.6.27 and glibc 2.9.
 AC_CHECK_FUNCS([pipe2], [add_system_opt([PIPE2])])
 dnl - signalfd() since Linux 2.6.22 and glibc 2.8
@@ -1179,7 +1183,7 @@ IPV4_DEVCONF=No
 if test .$enable_vrrp != .no; then
   dnl ----[Check have IPV4_DEVCONF defines - since Linux 3.11]----
   SAV_CPPFLAGS="$CPPFLAGS"
-  CPPFLAGS="$CPP_FLAGS $kernelinc"
+  CPPFLAGS="$CPPFLAGS $kernelinc"
   IPV4_DEVCONF=Yes
   AC_CHECK_DECLS([
     IPV4_DEVCONF_ARP_IGNORE,
@@ -1273,7 +1277,7 @@ if test .$enable_lvs != .no -a .${enable_libnl} != .no; then
 
   if test $NETLINK_VER -ne 0; then
     SAV_CPPFLAGS="$CPPFLAGS"
-    CPPFLAGS="$SAV_CPPFLAGS $NL3_CPPFLAGS"
+    CPPFLAGS="$CPPFLAGS $kernel_inc $NL3_CPPFLAGS"
     AC_CHECK_HEADERS([netlink/netlink.h], [], [AC_MSG_ERROR([netlink headers missing])])
     AC_CHECK_HEADERS([netlink/genl/ctrl.h netlink/genl/genl.h], [], [AC_MSG_ERROR([netlink genl headers missing])])
     CPPFLAGS="$SAV_CPPFLAGS"
@@ -1687,25 +1691,25 @@ if test .${enable_nftables} != .no; then
       AC_CHECK_DECLS([NFTA_DUP_MAX], [], [],
         [#include <linux/netfilter/nf_tables.h>])
 
-      AC_CHECK_HEADERS([libnftnl/udata.h],
+      # NFT_USERDATA_MAXLEN since Linux 3.15. Check nftnl_udata_buf_alloc for libnftnl support of userdata
+      USE_NFT_USERDATA=Yes
+      AC_CHECK_DECLS([NFT_USERDATA_MAXLEN, nftnl_udata_buf_alloc],
+	[], [USE_NFT_USERDATA=No],
 	[
-          AC_MSG_CHECKING([for nftnl_udata_put_u32])
-          SAV_LIBS="$LIBS"
-          LIBS="$LIBS `$PKG_CONFIG --libs libnftnl`"
-          AC_LINK_IFELSE([AC_LANG_SOURCE([[
+	  #include <linux/netfilter/nf_tables.h>
+	  #include <libnftnl/udata.h>
+	]
+      )
+
+      AS_IF([test $USE_NFT_USERDATA = Yes],
+	[
+	  AC_DEFINE([HAVE_NFTNL_UDATA], [ 1 ], [Define to 1 if have nftnl udata support])
+          AC_CHECK_DECLS([nftnl_udata_put_u32],
+	    [], [],
+	    [
+	      #include <linux/netfilter/nf_tables.h>
 	      #include <libnftnl/udata.h>
-	      int main(void)
-	      {
-	        nftnl_udata_put_u32(NULL, 0, 0);
-	        return 0;
-	      }
-	    ]])], [
-	      AC_MSG_RESULT(yes)
-	      AC_DEFINE([HAVE_NFTNL_UDATA_PUT_U32], [ 1 ], [Define to 1 if nftnl_udata_put_u32 declared])
-	    ],[
-	      AC_MSG_RESULT(no)
 	    ])
-          LIBS="$SAV_LIBS"
 	])
     fi
   fi
@@ -1734,6 +1738,26 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
     AC_MSG_RESULT([yes])
     AC_DEFINE([_HAVE_NET_LINUX_IF_H_COLLISION_], [ 1 ], [Define to 1 if have linux/if.h followed by net/if.h namespace collision])
     add_system_opt([NET_LINUX_IF_H_COLLISION])
+  ])
+CPPFLAGS="$SAV_CPPFLAGS"
+
+dnl ----[Check if linux/if_ether.h then netinet/in.h then linux/if.h namespace collision]----
+# This issue was resolved in Linux 4.15.7/4.16
+AC_MSG_CHECKING([for linux/if_ether.h then netinet/in.h then linux/if.h namespace collision])
+SAV_CPPFLAGS="$CPPFLAGS"
+CPPFLAGS="$CPPFLAGS $kernelinc"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+    #include <linux/if_ether.h>
+    #include <netinet/in.h>
+    #include <linux/in.h>
+  ]])],
+  [
+    AC_MSG_RESULT([no])
+  ],
+  [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([_HAVE_LINUX_IF_ETHER_H_COLLISION_], [ 1 ], [Define to 1 if have linux/if_ether.h then netinet/in.h then linux/in.h namespace collision])
+    add_system_opt([NET_LINUX_IF_ETHER_H_COLLISION])
   ])
 CPPFLAGS="$SAV_CPPFLAGS"
 
@@ -2037,7 +2061,7 @@ AC_CHECK_DECL([IPVS_SVC_ATTR_PE_NAME],
 dnl ----[ Checks for O_PATH support ]----
 # Introduced in Linux 2.6.39
 SAV_CPPFLAGS="$CPPFLAGS"
-CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE"
+CPPFLAGS="$CPPFLAGS $kernel_inc -D_GNU_SOURCE"
 AC_CHECK_DECLS([O_PATH],
   [
     add_system_opt([O_PATH])
@@ -2050,7 +2074,7 @@ AC_CHECK_DECLS([GLOB_BRACE], [add_system_opt([GLOB_BRACE])], [], [[#include <glo
 dnl ----[ Check for timegm() support ]----
 AC_MSG_CHECKING([for timegm()])
 SAV_CPPFLAGS="$CPPFLAGS"
-CPPFLAGS="$KA_CPPFLAGS"
+CPPFLAGS="$KA_CPPFLAGS $kernel_inc"
 AC_LINK_IFELSE([AC_LANG_SOURCE([[
     #include <time.h>
     int main(void)
@@ -2211,7 +2235,7 @@ if test "$enable_snmp" = yes -o \
   # check for net-snmp headers
   # Some ancient distributions may miss <net-snmp/agent/util_funcs.h> header
   SAV_CPPFLAGS="$CPPFLAGS"
-  CPPFLAGS="$CPPFLAGS $NETSNMP_CFLAGS"
+  CPPFLAGS="$CPPFLAGS $kernel_inc $NETSNMP_CFLAGS"
   AC_CHECK_HEADERS(net-snmp/agent/agent_sysORTable.h net-snmp/agent/snmp_vars.h net-snmp/agent/util_funcs.h,[],
     [AC_MSG_ERROR([missing net-snmp headers])],[[
       #include <net-snmp/net-snmp-config.h>

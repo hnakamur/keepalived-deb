@@ -132,7 +132,7 @@ and
 # split the VIP traffic on a given namespace and keep the healthchecks traffic
 # in another namespace. If NAME is not specified, then the default namespace
 # will be used.
-\fBnet_namespace_ipvs\fRNAME
+\fBnet_namespace_ipvs \fRNAME
 
 # ipsets wasn't network namespace aware until Linux 3.13, and so
 # if running with # an earlier version of the kernel, by default
@@ -221,7 +221,9 @@ and
     # Sets default state for checker smtp_alerts
     \fBsmtp_alert_checker \fR<BOOL>
 
-    # Sets logging all checker failes while checker up
+    # Logs every failed real server check in syslog
+    # (nevertheless, SMTP alert is only sent when all retry checks failed
+    # and real server transitions to DOWN state)
     \fBchecker_log_all_failures \fR<BOOL>
 
     # Don't send smtp alerts for fault conditions
@@ -232,7 +234,8 @@ and
     \fBrouter_id \fR<STRING>
 
     # Multicast Group to use for IPv4 VRRP adverts
-    # (default: 224.0.0.18)
+    # Defaults to the RFC5798 IANA assigned VRRP multicast address 224.0.0.18
+    # which You typically do not want to change.
     \fBvrrp_mcast_group4 \fR224.0.0.18
 
     # Multicast Group to use for IPv6 VRRP adverts
@@ -266,6 +269,11 @@ and
     # /proc/net/ip_vs* provide some details about the state of IPVS.
     \fBlvs_sync_daemon \fR<INTERFACE> [[inst] <VRRP_INSTANCE>] [id <SYNC_ID>] \e
                     [maxlen <LEN>] [port <PORT>] [ttl <TTL>] [group <IP ADDR>]
+
+    # lvs_timeouts specifies the tcp, tcp_fin and udp connection tracking timeouts
+    # in seconds. At least one value must be specified; not setting a value leaves
+    # it unchanged from when keepalived started.
+    \fBlvs_timeouts\fR [tcp SECS] [tcpfin SECS] [udp SECS]
 
     # flush any existing LVS configuration at startup
     \fBlvs_flush\fR
@@ -753,7 +761,7 @@ moved by vrrpd, they stay on the machine.
 If you already have IPs and routes on your machines and
 your machines can ping each other, you don't need this section.
 The syntax for rules and routes is that same as for ip rule add/ip route add
-(except shorted option names aren't supported due to ambiguities).
+(except shortened option names are not supported due to ambiguities).
 The track_group specification refers to a named track_group which lists
 the vrrp instances which will track the address, i.e. if the address is
 deleted the vrrp instances will transition to backup.
@@ -1498,8 +1506,6 @@ The syntax for vrrp_instance is :
     \fBgarp_lower_prio_repeat \fR1
     \fBgarp_master_refresh \fR60
     \fBgarp_master_refresh_repeat \fR2
-    \fBgarp_interval \fR100
-    \fBgna_interval \fR100
 
     # If a lower priority advert is received, don't send another advert.
     # This causes adherence to the RFCs (defaults to global
@@ -1651,8 +1657,8 @@ The syntax for vrrp_instance is :
     \fBskip_check_adv_addr \fR[on|off|true|false|yes|no]
 
     # See description of global vrrp_strict
-    # If vrrp_strict is not specified, it takes the value of vrrp_strict
-    # If strict_mode without a parameter is specified, it defaults to on
+    # If strict_mode is not specified, it takes the value of vrrp_strict.
+    # If strict_mode without a parameter is specified, it defaults to on.
     \fBstrict_mode \fR[on|off|true|false|yes|no]
 
     # Debug level, not implemented yet.
@@ -1778,8 +1784,6 @@ The syntax for virtual_server is :
     # LVS scheduler
     \fBlvs_sched \fRrr|wrr|lc|wlc|lblc|sh|mh|dh|fo|ovf|lblcr|sed|nq
 
-    # Enable hashed entry
-    \fBhashed\fR
     # Enable flag-1 for scheduler (-b flag-1 in ipvsadm)
     \fBflag-1\fR
     # Enable flag-2 for scheduler (-b flag-2 in ipvsadm)
@@ -1883,7 +1887,8 @@ The syntax for virtual_server is :
     # of an alive server fails. Default: 1 unless specified below
     \fBretry \fR<INTEGER>
 
-    # delay before retry after failure
+    # delay before retry after failure. Defaults to delay_loop for DNS_CHECK,
+    # 3 seconds for HTTP_CHECK and SSL_CHECK, and 1 second otherwise.
     \fBdelay_before_retry \fR<TIMER>
 
     # Optional random delay to start the initial check
@@ -1893,7 +1898,7 @@ The syntax for virtual_server is :
     # the maximum at delay_loop. Specify 0 to disable
     \fBwarmup \fR<TIMER>
 
-    # delay timer for checker polling
+    # delay timer for checker polling (60 seconds if not specified)
     \fBdelay_loop \fR<TIMER>
 
     # Set weight to 0 when healthchecker detects failure
@@ -1939,7 +1944,6 @@ The syntax for virtual_server is :
         \fBwarmup \fR<TIMER>                  # see above
         \fBdelay_loop \fR<TIMER>              # see above
         \fBinhibit_on_failure \fR<BOOL>       # see above
-        \fBlog_all_failures \fR<BOOL>         # log all failures when checker up
 
         # healthcheckers. Can be multiple of each type
         # HTTP_GET|SSL_GET|TCP_CHECK|SMTP_CHECK|DNS_CHECK|MISC_CHECK|BFD_CHECK|UDP_CHECK|PING_CHECK|FILE_CHECK
@@ -1979,6 +1983,7 @@ The syntax for virtual_server is :
             \fBdelay_before_retry \fR<TIMER>      # see above
             \fBwarmup \fR<TIMER>                  # see above
             \fBdelay_loop \fR<TIMER>              # see above
+            \fBlog_all_failures \fR<BOOL>         # log all failures when checker up
         }
 
         # The following options are additional checker specific
@@ -2064,7 +2069,7 @@ The syntax for virtual_server is :
             \fBhelo_name \fR<STRING>|<QUOTED-STRING>
         }
 
-        # DNS healthchecker
+        # DNS healthchecker. Uses UDP protocol.
         \fBDNS_CHECK \fR{
             # The retry default is 3.
 
@@ -2371,6 +2376,10 @@ The following pre-defined definitions are defined:
 .br
 \fB${_RANDOM [MIN [MAX]]} : \fRThis is replaced by a random integer in the range [MIN, MAX],
 where MIN and MAX are optional non-negative integers. Defaults are MIN=0 and MAX=32767.
+.br
+\fB${_HASH} : \fR This is replaced by a '#' character, which would otherwise start a comment
+.br
+\fB${_BANG} : \fR This is replaced by a '!' character, which would otherwise start a comment
 .PP
 Additional pre-defined definitions will be added as their need is identified.
 It will normally be quite straightforward to add additional pre-defined
