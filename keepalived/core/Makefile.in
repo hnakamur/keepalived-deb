@@ -100,14 +100,12 @@ POST_UNINSTALL = :
 @LIBNL_DYNAMIC_TRUE@am__append_6 = libnl_link.c
 @TRACK_PROCESS_TRUE@am__append_7 = track_process.o
 @TRACK_PROCESS_TRUE@am__append_8 = track_process.c
-@ONE_PROCESS_DEBUG_FALSE@@WITH_SYSTEMD_NOTIFY_TRUE@am__append_9 = systemd.o
-@ONE_PROCESS_DEBUG_FALSE@@WITH_SYSTEMD_NOTIFY_TRUE@am__append_10 = systemd.c
-@ONE_PROCESS_DEBUG_FALSE@am__append_11 = reload_monitor.o config_notify.o
-@ONE_PROCESS_DEBUG_FALSE@am__append_12 = reload_monitor.c config_notify.c
+@ONE_PROCESS_DEBUG_FALSE@am__append_9 = reload_monitor.o config_notify.o
+@ONE_PROCESS_DEBUG_FALSE@am__append_10 = reload_monitor.c config_notify.c
 subdir = keepalived/core
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -123,14 +121,13 @@ am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 libcore_a_AR = $(AR) $(ARFLAGS)
 libcore_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
-	$(am__append_5) $(am__append_7) $(am__append_9) \
-	$(am__append_11)
+	$(am__append_5) $(am__append_7) $(am__append_9)
 am_libcore_a_OBJECTS = main.$(OBJEXT) daemon.$(OBJEXT) \
 	pidfile.$(OBJEXT) layer4.$(OBJEXT) smtp.$(OBJEXT) \
 	global_data.$(OBJEXT) global_parser.$(OBJEXT) \
 	keepalived_netlink.$(OBJEXT) namespaces.$(OBJEXT)
 am__EXTRA_libcore_a_SOURCES_DIST = snmp.c nftables.c libnl_link.c \
-	track_process.c systemd.c reload_monitor.c config_notify.c
+	track_process.c reload_monitor.c config_notify.c
 libcore_a_OBJECTS = $(am_libcore_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -154,8 +151,7 @@ am__depfiles_remade = ./$(DEPDIR)/config_notify.Po \
 	./$(DEPDIR)/main.Po ./$(DEPDIR)/namespaces.Po \
 	./$(DEPDIR)/nftables.Po ./$(DEPDIR)/pidfile.Po \
 	./$(DEPDIR)/reload_monitor.Po ./$(DEPDIR)/smtp.Po \
-	./$(DEPDIR)/snmp.Po ./$(DEPDIR)/systemd.Po \
-	./$(DEPDIR)/track_process.Po
+	./$(DEPDIR)/snmp.Po ./$(DEPDIR)/track_process.Po
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
@@ -214,6 +210,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -224,6 +221,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -250,6 +248,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -262,7 +261,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -331,10 +331,9 @@ libcore_a_SOURCES = main.c daemon.c pidfile.c layer4.c smtp.c \
 			  namespaces.c
 
 libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
-	$(am__append_7) $(am__append_9) $(am__append_11)
+	$(am__append_7) $(am__append_9)
 EXTRA_libcore_a_SOURCES = $(am__append_2) $(am__append_4) \
-	$(am__append_6) $(am__append_8) $(am__append_10) \
-	$(am__append_12)
+	$(am__append_6) $(am__append_8) $(am__append_10)
 all: all-am
 
 .SUFFIXES:
@@ -397,7 +396,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/reload_monitor.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/smtp.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/snmp.Po@am__quote@ # am--include-marker
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/systemd.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/track_process.Po@am__quote@ # am--include-marker
 
 $(am__depfiles_remade):
@@ -559,7 +557,6 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/reload_monitor.Po
 	-rm -f ./$(DEPDIR)/smtp.Po
 	-rm -f ./$(DEPDIR)/snmp.Po
-	-rm -f ./$(DEPDIR)/systemd.Po
 	-rm -f ./$(DEPDIR)/track_process.Po
 	-rm -f Makefile
 distclean-am: clean-am distclean-compile distclean-generic \
@@ -620,7 +617,6 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/reload_monitor.Po
 	-rm -f ./$(DEPDIR)/smtp.Po
 	-rm -f ./$(DEPDIR)/snmp.Po
-	-rm -f ./$(DEPDIR)/systemd.Po
 	-rm -f ./$(DEPDIR)/track_process.Po
 	-rm -f Makefile
 maintainer-clean-am: distclean-am maintainer-clean-generic

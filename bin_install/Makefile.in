@@ -93,8 +93,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = bin_install
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -140,6 +140,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -150,6 +151,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -176,6 +178,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -188,7 +191,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -351,6 +355,7 @@ maintainer-clean-generic:
 	@echo "This command is intended for maintainers to use"
 	@echo "it deletes files that may require special tools to rebuild."
 	-test -z "$(MAINTAINERCLEANFILES)" || rm -f $(MAINTAINERCLEANFILES)
+@WITH_IPVS_FALSE@uninstall-local:
 clean: clean-am
 
 clean-am: clean-generic clean-local mostlyclean-am
@@ -415,7 +420,7 @@ ps: ps-am
 
 ps-am:
 
-uninstall-am:
+uninstall-am: uninstall-local
 
 .MAKE: install-am install-strip
 
@@ -428,7 +433,7 @@ uninstall-am:
 	install-pdf-am install-ps install-ps-am install-strip \
 	installcheck installcheck-am installdirs maintainer-clean \
 	maintainer-clean-generic mostlyclean mostlyclean-generic pdf \
-	pdf-am ps ps-am tags-am uninstall uninstall-am
+	pdf-am ps ps-am tags-am uninstall uninstall-am uninstall-local
 
 .PRECIOUS: Makefile
 
@@ -454,6 +459,9 @@ $(top_builddir)/bin/keepalived: $(top_builddir)/keepalived/keepalived
 @WITH_IPVS_TRUE@	else \
 @WITH_IPVS_TRUE@		rm -f $(top_builddir)/bin/genhash; \
 @WITH_IPVS_TRUE@	fi)
+
+@WITH_IPVS_TRUE@uninstall-local:
+@WITH_IPVS_TRUE@	rm -f $(DESTDIR)$(bindir)/genhash
 
 clean-local:
 @WITH_IPVS_TRUE@	rm -f $(top_builddir)/bin/genhash

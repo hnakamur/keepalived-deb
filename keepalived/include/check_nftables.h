@@ -27,13 +27,14 @@
 
 #include "nftables.h"
 #include "check_data.h"
+#include "sockaddr.h"
 
 #define	DEFAULT_NFTABLES_IPVS_TABLE	"keepalived_ipvs"
 #define DEFAULT_IPVS_NF_START_FWMARK    1000
 
 #ifdef _INCLUDE_UNUSED_CODE_
-extern void nft_add_ipvs_entry(const struct sockaddr_storage *, uint16_t, uint32_t);
-extern void nft_remove_ipvs_entry(const struct sockaddr_storage *, uint16_t, uint32_t);
+extern void nft_add_ipvs_entry(const sockaddr_t *, uint16_t, uint32_t);
+extern void nft_remove_ipvs_entry(const sockaddr_t *, uint16_t, uint32_t);
 #endif
 extern void nft_ipvs_end(void);
 extern unsigned set_vs_fwmark(virtual_server_t *);

@@ -294,6 +294,7 @@ dump_vscript(FILE *fp, const vrrp_script_t *vscript)
 	conf_write(fp, "   Weight = %d%s", vscript->weight, vscript->weight_reverse ? " reverse" : "");
 	conf_write(fp, "   Rise = %d", vscript->rise);
 	conf_write(fp, "   Fall = %d", vscript->fall);
+	conf_write(fp, "   Result = %d", vscript->result);
 	conf_write(fp, "   Insecure = %s", vscript->insecure ? "yes" : "no");
 
 	switch (vscript->init_state) {
@@ -301,10 +302,13 @@ dump_vscript(FILE *fp, const vrrp_script_t *vscript)
 		str = "INIT"; break;
 	case SCRIPT_INIT_STATE_FAILED:
 		str = "INIT/FAILED"; break;
+	case SCRIPT_INIT_STATE_INIT_RELOAD:
+		str = "INIT/RELOAD"; break;
 	default:
-		str = (vscript->result >= vscript->rise) ? "GOOD" : "BAD";
+		str = "unknown";
 	}
-	conf_write(fp, "   Status = %s", str);
+	conf_write(fp, "   Init state = %s", str);
+	conf_write(fp, "   Status = %s", vscript->result >= vscript->rise ? "GOOD" : "BAD");
 	conf_write(fp, "   Script uid:gid = %u:%u", vscript->script.uid, vscript->script.gid);
 	conf_write(fp, "   VRRP instances :");
 	dump_tracking_obj_list(fp, &vscript->tracking_vrrp, dump_tracking_vrrp);
@@ -453,16 +457,14 @@ free_sock_list(list_head_t *l)
 static void
 dump_sock(FILE *fp, const sock_t *sock)
 {
-	conf_write(fp, "VRRP sockpool: [ifindex(%3u), family(%s), proto(%d), fd(%d,%d)%s%s%s%s]"
+	conf_write(fp, "VRRP sockpool: [ifindex(%3u), family(%s), proto(%d), fd(%d,%d) %sicast, address(%s)]"
 			    , sock->ifp ? sock->ifp->ifindex : 0
 			    , sock->family == AF_INET ? "IPv4" : sock->family == AF_INET6 ? "IPv6" : "unknown"
 			    , sock->proto
 			    , sock->fd_in
 			    , sock->fd_out
-			    , !!sock->unicast_src ? ", unicast" : ""
-			    , sock->unicast_src ? ", address(" : ""
-			    , sock->unicast_src ? inet_sockaddrtos(sock->unicast_src) : ""
-			    , sock->unicast_src ? ")" : ""
+			    , sock->unicast_src ? ", un" : "mult"
+			    , sock->unicast_src ? inet_sockaddrtos(sock->unicast_src) : inet_sockaddrtos(sock->mcast_daddr)
 			    );
 }
 void
@@ -483,6 +485,10 @@ dump_sock_pool(FILE *fp, const list_head_t *l)
 	list_for_each_entry(sock, l, e_list) {
 		conf_write(fp, " fd_in %d fd_out = %d", sock->fd_in, sock->fd_out);
 		conf_write(fp, "   Interface = %s", sock->ifp->ifname);
+#ifdef _HAVE_VRF_
+		if (sock->vrf_ifp)
+			conf_write(fp, "   VRF = %s", sock->vrf_ifp->ifname);
+#endif
 		conf_write(fp, "   Family = %s", sock->family == AF_INET ? "IPv4" : sock->family == AF_INET6 ? "IPv6" : "unknown");
 		conf_write(fp, "   Protocol = %s", sock->proto == IPPROTO_AH ? "AH" : sock->proto == IPPROTO_VRRP ? "VRRP" : "unknown");
 		conf_write(fp, "   Type = %sicast", sock->unicast_src ? "Un" : "Mult");
@@ -577,7 +583,7 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #ifdef _WITH_VRRP_AUTH_
 	char auth_data[sizeof(vrrp->auth_data) + 1];
 #endif
-	char time_str[26];
+	char time_str[32];	// Allow for decimal point and microseconds
 
 	/* If fp is NULL, we are writing configuration to syslog at
 	 * startup, so there is no point writing transient state information.
@@ -598,37 +604,53 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 				conf_write(fp, "   Master advert int = %.2f sec", vrrp->master_adver_int / TIMER_HZ_DOUBLE);
 		}
 	}
+	if (vrrp->flags) {
+		conf_write(fp, "   Flags:");
+		if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags))
+			conf_write(fp, "     Using unicast%s", __test_bit(VRRP_FLAG_UNICAST_DUPLICATE_VRID, &vrrp->flags) ? " with VRID duplication" : "");
+		else if (__test_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags))
+			conf_write(fp, "     Unicast config option specified but using multicast");
+		if (__test_bit(VRRP_FLAG_UNICAST_FAULT_NO_PEERS, &vrrp->flags))
+			conf_write(fp, "     If unicast go to fault state if no peers");
+	} else
+		conf_write(fp, "   Flags: none");
+
 	conf_write(fp, "   Wantstate = %s", get_state_str(vrrp->wantstate));
+	conf_write(fp, "   Number of config faults = %u", vrrp->num_config_faults);
 	if (fp) {
 		conf_write(fp, "   Number of interface and track script faults = %u", vrrp->num_script_if_fault);
 #ifdef _HAVE_VRRP_VMAC_
-		if (vrrp->duplicate_vrid_fault)
+		if (__test_bit(VRRP_FLAG_DUPLICATE_VRID_FAULT, &vrrp->flags))
 			conf_write(fp, "   Duplicate VRID");
 #endif
 		conf_write(fp, "   Number of track scripts init = %u", vrrp->num_script_init);
-		ctime_r(&vrrp->last_transition.tv_sec, time_str);
-		conf_write(fp, "   Last transition = %ld.%6.6ld (%.24s.%6.6ld)", vrrp->last_transition.tv_sec, vrrp->last_transition.tv_usec, time_str, vrrp->last_transition.tv_usec);
+		conf_write(fp, "   Last transition = %ld.%6.6ld (%s)", vrrp->last_transition.tv_sec, vrrp->last_transition.tv_usec, ctime_us_r(&vrrp->last_transition, time_str));
 		if (!ctime_r(&vrrp->sands.tv_sec, time_str))
 			strcpy(time_str, "invalid time ");
 		if (vrrp->sands.tv_sec == TIMER_DISABLED)
 			conf_write(fp, "   Read timeout = DISABLED");
 		else
-			conf_write(fp, "   Read timeout = %ld.%6.6ld (%.19s.%6.6ld)", vrrp->sands.tv_sec, vrrp->sands.tv_usec, time_str, vrrp->sands.tv_usec);
+			conf_write(fp, "   Read timeout = %ld.%6.6ld (%s)", vrrp->sands.tv_sec, vrrp->sands.tv_usec, ctime_us_r(&vrrp->sands, time_str));
 		conf_write(fp, "   Master down timer = %u usecs", vrrp->ms_down_timer);
 	}
 #ifdef _HAVE_VRRP_VMAC_
-	if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
+	if (__test_bit(VRRP_VMAC_BIT, &vrrp->flags)) {
 		conf_write(fp, "   Use VMAC, i/f name %s, is_up = %s, xmit_base = %s",
 				vrrp->vmac_ifname,
-				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
-				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? "true" : "false");
-	if (__test_bit(VRRP_VMAC_ADDR_BIT, &vrrp->vmac_flags))
+				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->flags) ? "true" : "false",
+				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags) ? "true" : "false");
+		if (__test_bit(VRRP_VMAC_MAC_SPECIFIED, &vrrp->flags))
+			conf_write(fp, "     MAC = %2.2x:%2.2x:%2.2x:%2.2x:%2.2x:%2.2x%s",
+					vrrp->ll_addr[0], vrrp->ll_addr[1], vrrp->ll_addr[2], vrrp->ll_addr[3], vrrp->ll_addr[4], vrrp->ll_addr[5],
+					__test_bit(VRRP_VMAC_MAC_USE_VRID, &vrrp->flags) ? " (using VRID)" : "");
+	}
+	if (__test_bit(VRRP_VMAC_ADDR_BIT, &vrrp->flags))
 		conf_write(fp, "   Use VMAC for VIPs on other interfaces");
 #ifdef _HAVE_VRRP_IPVLAN_
-	else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags))
+	else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->flags))
 		conf_write(fp, "   Use IPVLAN, i/f %s, is_up = %s%s%s, type %s",
 				vrrp->vmac_ifname,
-				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
+				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->flags) ? "true" : "false",
 				vrrp->ipvlan_addr ? ", i/f address = " : "",
 				vrrp->ipvlan_addr ? ipaddresstos(NULL, vrrp->ipvlan_addr) : "",
 #if HAVE_DECL_IFLA_IPVLAN_FLAGS	/* Since Linux v4.15 */
@@ -640,9 +662,9 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #endif
 	if (vrrp->ifp && vrrp->ifp->is_ours) {
 		conf_write(fp, "   Interface = %s, %s on %s%s", IF_NAME(vrrp->ifp),
-				__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) ? "vmac" : "ipvlan",
+				__test_bit(VRRP_VMAC_BIT, &vrrp->flags) ? "vmac" : "ipvlan",
 				vrrp->ifp != vrrp->ifp->base_ifp ? vrrp->ifp->base_ifp->ifname : "(unknown)",
-				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? ", xmit base i/f" : "");
+				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags) ? ", xmit base i/f" : "");
 	} else
 #endif
 		conf_write(fp, "   Interface = %s", vrrp->ifp ? IF_NAME(vrrp->ifp) : "not configured");
@@ -650,16 +672,26 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 	if (vrrp->ifp && vrrp->configured_ifp && vrrp->configured_ifp != vrrp->ifp->base_ifp && vrrp->ifp->is_ours)
 		conf_write(fp, "   Configured interface = %s", vrrp->configured_ifp->ifname);
 #endif
-	if (vrrp->dont_track_primary)
+#ifdef _HAVE_VRF_
+	if (vrrp->vrf_ifp)
+		conf_write(fp, "   VRF = %s", vrrp->vrf_ifp->ifname);
+#endif
+	if (__test_bit(VRRP_FLAG_DONT_TRACK_PRIMARY, &vrrp->flags))
 		conf_write(fp, "   VRRP interface tracking disabled");
-	if (vrrp->skip_check_adv_addr)
+	if (__test_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &vrrp->flags))
 		conf_write(fp, "   Skip checking advert IP addresses");
 	if (vrrp->strict_mode)
 		conf_write(fp, "   Enforcing strict VRRP compliance");
 	conf_write(fp, "   Using src_ip = %s%s", vrrp->saddr.ss_family != AF_UNSPEC
 						    ? inet_sockaddrtos(&vrrp->saddr)
 						    : "(none)",
-						  vrrp->saddr_from_config ? " (from configuration)" : "");
+						  __test_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags) ? " (from configuration)" : "");
+	if (!__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
+		if (vrrp->family == AF_INET)
+			conf_write(fp, "   Multicast address %s", inet_sockaddrtos(&vrrp->mcast_daddr));
+		else
+			conf_write(fp, "   Multicast address %s, ifindex %u", inet_sockaddrtos(&vrrp->mcast_daddr), PTR_CAST_CONST(struct sockaddr_in6, &vrrp->mcast_daddr)->sin6_scope_id);
+	}
 	conf_write(fp, "   Gratuitous ARP delay = %u",
 		       vrrp->garp_delay/TIMER_HZ);
 	conf_write(fp, "   Gratuitous ARP repeat = %u", vrrp->garp_rep);
@@ -671,7 +703,7 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 	conf_write(fp, "   Down timer adverts = %u", vrrp->down_timer_adverts);
 #ifdef _HAVE_VRRP_VMAC_
 	if (vrrp->vmac_garp_intvl.tv_sec) {
-		conf_write(fp, "   Gratuitous ARP for each secondary %s = %ld", vrrp->vmac_garp_all_if ? "i/f" : "VMAC", vrrp->vmac_garp_intvl.tv_sec);
+		conf_write(fp, "   Gratuitous ARP for each secondary %s = %ld", __test_bit(VRRP_FLAG_VMAC_GARP_ALL_IF, &vrrp->flags) ? "i/f" : "VMAC", vrrp->vmac_garp_intvl.tv_sec);
 		ctime_r(&vrrp->vmac_garp_timer.tv_sec, time_str);
 		conf_write(fp, "   Next gratuitous ARP for such secondary = %ld.%6.6ld (%.24s.%6.6ld)", vrrp->vmac_garp_timer.tv_sec, vrrp->vmac_garp_timer.tv_usec, time_str, vrrp->vmac_garp_timer.tv_usec);
 	}
@@ -693,11 +725,11 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #ifdef _WITH_FIREWALL_
 	conf_write(fp, "   Accept = %s", vrrp->accept ? "enabled" : "disabled");
 #endif
-	conf_write(fp, "   Preempt = %s", vrrp->nopreempt ? "disabled" : "enabled");
+	conf_write(fp, "   Preempt = %s", __test_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags) ? "disabled" : "enabled");
 	if (vrrp->preempt_delay)
 		conf_write(fp, "   Preempt delay = %g secs",
 		       vrrp->preempt_delay / TIMER_HZ_DOUBLE);
-	conf_write(fp, "   Promote_secondaries = %s", vrrp->promote_secondaries ? "enabled" : "disabled");
+	conf_write(fp, "   Promote_secondaries = %s", __test_bit(VRRP_FLAG_PROMOTE_SECONDARIES, &vrrp->flags) ? "enabled" : "disabled");
 #if defined _WITH_VRRP_AUTH_
 	if (vrrp->auth_type) {
 		conf_write(fp, "   Authentication type = %s",
@@ -725,17 +757,17 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #endif
 
 	if (!list_empty(&vrrp->vip)) {
-		conf_write(fp, "   Virtual IP :");
+		conf_write(fp, "   Virtual IP (%u):", vrrp->vip_cnt);
 		dump_ipaddress_list(fp, &vrrp->vip);
 	}
 	if (!list_empty(&vrrp->evip)) {
 		conf_write(fp, "   Virtual IP Excluded :");
 		dump_ipaddress_list(fp, &vrrp->evip);
 	}
-	if (!list_empty(&vrrp->unicast_peer)) {
+	if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
 		if (vrrp->ttl != -1)
 			conf_write(fp, "   Unicast TTL = %d", vrrp->ttl);
-		conf_write(fp, "   Check unicast src : %s", vrrp->check_unicast_src ? "yes" : "no");
+		conf_write(fp, "   Check unicast src : %s", __test_bit(VRRP_FLAG_CHECK_UNICAST_SRC, &vrrp->flags) ? "yes" : "no");
 		conf_write(fp, "   Unicast Peer :");
 		dump_unicast_peer_list(fp, &vrrp->unicast_peer);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
@@ -926,7 +958,9 @@ alloc_vrrp(const char *iname)
 	new->smtp_alert = -1;
 	new->notify_priority_changes = -1;
 
-	new->skip_check_adv_addr = global_data->vrrp_skip_check_adv_addr;
+	if (global_data->vrrp_skip_check_adv_addr)
+		__set_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &new->flags);
+
 	new->strict_mode = PARAMETER_UNSET;
 
 	list_add_tail(&new->e_list, &vrrp_data->vrrp);
@@ -977,7 +1011,7 @@ alloc_vrrp_unicast_peer(const vector_t *strvec)
 				report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown unicast_peer option %s", vrrp->iname, strvec_slot(strvec, i));
 				break;
 			}
-			vrrp->check_unicast_src = true;
+			__set_bit(VRRP_FLAG_CHECK_UNICAST_SRC, &vrrp->flags);
 		}
 	}
 
@@ -1141,7 +1175,7 @@ alloc_vrrp_script(const char *sname)
 	new->timeout = VRRP_SCRIPT_DT * TIMER_HZ;
 	new->weight = VRRP_SCRIPT_DW;
 //	new->last_status = VRRP_SCRIPT_STATUS_NOT_SET;
-	new->init_state = SCRIPT_INIT_STATE_INIT;
+	new->init_state = reload ? SCRIPT_INIT_STATE_INIT_RELOAD : SCRIPT_INIT_STATE_INIT;
 	new->state = SCRIPT_STATE_IDLE;
 	new->rise = 1;
 	new->fall = 1;

@@ -96,10 +96,12 @@ POST_UNINSTALL = :
 @WITH_VRRP_TRUE@am__append_2 = rttables.c rttables.h
 @ASSERTS_TRUE@am__append_3 = assert.o
 @ASSERTS_TRUE@am__append_4 = assert.c
+@ONE_PROCESS_DEBUG_FALSE@@WITH_SYSTEMD_NOTIFY_TRUE@am__append_5 = systemd.o
+@ONE_PROCESS_DEBUG_FALSE@@WITH_SYSTEMD_NOTIFY_TRUE@am__append_6 = systemd.c systemd.h
 subdir = lib
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -113,13 +115,15 @@ am__v_AR_ = $(am__v_AR_@AM_DEFAULT_V@)
 am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 liblib_a_AR = $(AR) $(ARFLAGS)
-liblib_a_DEPENDENCIES = $(am__append_1) $(am__append_3)
+liblib_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
+	$(am__append_5)
 am_liblib_a_OBJECTS = memory.$(OBJEXT) utils.$(OBJEXT) \
 	notify.$(OBJEXT) timer.$(OBJEXT) scheduler.$(OBJEXT) \
 	vector.$(OBJEXT) html.$(OBJEXT) parser.$(OBJEXT) \
 	signals.$(OBJEXT) logger.$(OBJEXT) list_head.$(OBJEXT) \
 	rbtree.$(OBJEXT) process.$(OBJEXT) json_writer.$(OBJEXT)
-am__EXTRA_liblib_a_SOURCES_DIST = rttables.c rttables.h assert.c
+am__EXTRA_liblib_a_SOURCES_DIST = rttables.c rttables.h assert.c \
+	systemd.c systemd.h
 liblib_a_OBJECTS = $(am_liblib_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -142,8 +146,9 @@ am__depfiles_remade = ./$(DEPDIR)/assert.Po ./$(DEPDIR)/html.Po \
 	./$(DEPDIR)/notify.Po ./$(DEPDIR)/parser.Po \
 	./$(DEPDIR)/process.Po ./$(DEPDIR)/rbtree.Po \
 	./$(DEPDIR)/rttables.Po ./$(DEPDIR)/scheduler.Po \
-	./$(DEPDIR)/signals.Po ./$(DEPDIR)/timer.Po \
-	./$(DEPDIR)/utils.Po ./$(DEPDIR)/vector.Po
+	./$(DEPDIR)/signals.Po ./$(DEPDIR)/systemd.Po \
+	./$(DEPDIR)/timer.Po ./$(DEPDIR)/utils.Po \
+	./$(DEPDIR)/vector.Po
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
@@ -202,6 +207,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -212,6 +218,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -238,6 +245,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -250,7 +258,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -319,12 +328,13 @@ liblib_a_SOURCES = memory.c utils.c notify.c timer.c scheduler.c \
 			  list_head.c rbtree.c process.c json_writer.c \
 			  bitops.h timer.h scheduler.h vector.h parser.h \
 			  signals.h notify.h logger.h memory.h html.h utils.h \
-			  keepalived_magic.h list_head.h rbtree.h process.h \
-			  rbtree_augmented.h assert_debug.h json_writer.h \
-			  warnings.h container.h align.h
+			  keepalived_magic.h list_head.h rbtree_ka.h rbtree.h \
+			  rbtree_types.h process.h rbtree_augmented.h assert_debug.h \
+			  json_writer.h warnings.h container.h align.h sockaddr.h
 
-liblib_a_LIBADD = $(am__append_1) $(am__append_3)
-EXTRA_liblib_a_SOURCES = $(am__append_2) $(am__append_4)
+liblib_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5)
+EXTRA_liblib_a_SOURCES = $(am__append_2) $(am__append_4) \
+	$(am__append_6)
 EXTRA_DIST = $(GIT_COMMIT_FILE)
 CLEANFILES = $(GIT_COMMIT_FILE)
 all: $(BUILT_SOURCES) config.h config_warnings.h
@@ -412,6 +422,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/rttables.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/scheduler.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/signals.Po@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/systemd.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/timer.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/utils.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vector.Po@am__quote@ # am--include-marker
@@ -578,6 +589,7 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/rttables.Po
 	-rm -f ./$(DEPDIR)/scheduler.Po
 	-rm -f ./$(DEPDIR)/signals.Po
+	-rm -f ./$(DEPDIR)/systemd.Po
 	-rm -f ./$(DEPDIR)/timer.Po
 	-rm -f ./$(DEPDIR)/utils.Po
 	-rm -f ./$(DEPDIR)/vector.Po
@@ -639,6 +651,7 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/rttables.Po
 	-rm -f ./$(DEPDIR)/scheduler.Po
 	-rm -f ./$(DEPDIR)/signals.Po
+	-rm -f ./$(DEPDIR)/systemd.Po
 	-rm -f ./$(DEPDIR)/timer.Po
 	-rm -f ./$(DEPDIR)/utils.Po
 	-rm -f ./$(DEPDIR)/vector.Po
@@ -695,7 +708,7 @@ $(GIT_COMMIT_FILE): FORCE
 		LATEST_FILE_DATE=`date -u --reference=$${LATEST_FILE} "+%m/%d,%Y"`; \
 		echo "/* Dates are UTC */" >$(abs_builddir)/$@; \
 		echo "#define GIT_DATE	\"$${LATEST_FILE_DATE}\"" >>$(abs_builddir)/$@; \
-		echo "#define GIT_YEAR	\"`echo $${LATEST_FILE_DATE} | sed -e "s/.*,//"`\"" >>$(abs_builddir)/$@; \
+		echo "#define GIT_YEAR	\"`echo $${LATEST_FILE_DATE} | @SED@ -e "s/.*,//"`\"" >>$(abs_builddir)/$@; \
 	fi; \
 	if [ -x `type -p git` ]; then \
 		cd $(srcdir); \
@@ -721,8 +734,8 @@ $(GIT_COMMIT_FILE): FORCE
 			if test -n "$${GIT_DATE}"; then \
 				GIT_YEAR=`date -u +"%Y" -d "1970-01-01 $${SECONDS_STR}"`; \
 			else \
-				GIT_DATE=`git log -1 --date=iso | grep Date: | sed -e "s/^[^ ]* *\(....\)-\(..\)-\(..\).*/\2\/\3,\1/"`; \
-				GIT_YEAR=`echo $${GIT_DATE} | sed -e "s/.*,//"`; \
+				GIT_DATE=`git log -1 --date=iso | grep Date: | @SED@ -e "s/^[^ ]* *\(....\)-\(..\)-\(..\).*/\2\/\3,\1/"`; \
+				GIT_YEAR=`echo $${GIT_DATE} | @SED@ -e "s/.*,//"`; \
 			fi; \
 			if [ "`git status --porcelain | \
 			       grep -v '^??' | \

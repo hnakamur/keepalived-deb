@@ -17,6 +17,9 @@
 /* The configuration options from which the package is built */
 #undef CONFIGURATION_OPTIONS
 
+/* Directory for installing DBUS data files */
+#undef DBUS_DATADIR
+
 /* Define to 1 if need to call g_type_init() */
 #undef DBUS_NEED_G_TYPE_INIT
 
@@ -137,6 +140,10 @@
    0 if you don't. */
 #undef HAVE_DECL_IPV4_DEVCONF_RP_FILTER
 
+/* Define to 1 if you have the declaration of `IPV6_MULTICAST_ALL', and to 0
+   if you don't. */
+#undef HAVE_DECL_IPV6_MULTICAST_ALL
+
 /* Define to 1 if you have the declaration of `IPVLAN_MODE_L3S', and to 0 if
    you don't. */
 #undef HAVE_DECL_IPVLAN_MODE_L3S
@@ -216,6 +223,10 @@
 /* Define to 1 if you have the declaration of `nftnl_udata_put_u32', and to 0
    if you don't. */
 #undef HAVE_DECL_NFTNL_UDATA_PUT_U32
+
+/* Define to 1 if you have the declaration of `NFT_META_OIFKIND', and to 0 if
+   you don't. */
+#undef HAVE_DECL_NFT_META_OIFKIND
 
 /* Define to 1 if you have the declaration of `NFT_SET_CONCAT', and to 0 if
    you don't. */
@@ -557,11 +568,11 @@
 /* Define the ipset library name */
 #undef IPSET_LIB_NAME
 
+/* Defined in linux/in6.h but not in netinet/in.h */
+#undef IPV6_MULTICAST_ALL
+
 /* Location for temporary files */
 #undef KA_TMP_DIR
-
-/* Length of KA_TMP_DIR */
-#undef KA_TMP_DIR_LEN
 
 /* configure options specified */
 #undef KEEPALIVED_CONFIGURE_OPTIONS
@@ -581,6 +592,9 @@
 /* Define to not inline if using GCC LTO */
 #undef LTO_NOINLINE
 
+/* Define if using VERY old (i.e. pre 2.19 - 2014) glibc */
+#undef NEED_FAVOR_BSD
+
 /* Define to 1 if can use concats with ranges in nftables */
 #undef NFT_RANGE_CONCATS
 
@@ -592,6 +606,9 @@
 
 /* Define the nl library name */
 #undef NL_LIB_NAME
+
+/* The old default configuration file */
+#undef OLD_DEFAULT_CONFIG_FILE
 
 /* Name of package */
 #undef PACKAGE
@@ -620,8 +637,8 @@
 /* Define printf format specifier for rlim_t */
 #undef PRI_rlim_t
 
-/* Parent directory of /run */
-#undef RUN_DIR_ROOT
+/* Directory for runtime state files */
+#undef RUNSTATEDIR
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
@@ -632,8 +649,14 @@
 /* Define to 1 to build with thread dumping support */
 #undef THREAD_DUMP
 
+/* Define to 1 if sizeof(time_t) is 4 bytes */
+#undef TIME_T_ADD_OVERFLOWS
+
 /* Use syscall for memfd_create */
 #undef USE_MEMFD_CREATE_SYSCALL
+
+/* Define to 1 if use sockaddr_storage */
+#undef USE_SOCKADDR_STORAGE
 
 /* Version number of package */
 #undef VERSION
@@ -666,6 +689,9 @@
 /* Define to 1 if can have _Pragma GCC diagnostic push/pop */
 #undef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
 
+/* Define to 1 if function __attribute__((error(msg))) supported */
+#undef _HAVE_FUNCTION_ATTRIBUTE_ERROR_
+
 /* Define to 1 if can have _Pragma GCC diagnostic in functions */
 #undef _HAVE_FUNCTION_DIAGNOSTIC_PRAGMAS_
 
@@ -690,6 +716,9 @@
 /* Define to 1 if have libiptc/libiptc.h linux/if.h and net/if.h namespace
    collision */
 #undef _HAVE_LIBIPTC_LINUX_NET_IF_H_COLLISION_
+
+/* Define to 1 if have libkmod */
+#undef _HAVE_LIBKMOD_
 
 /* Define to 1 if have magic library */
 #undef _HAVE_LIBMAGIC_

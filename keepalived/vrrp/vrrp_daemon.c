@@ -515,12 +515,6 @@ start_vrrp(data_t *prev_global_data)
 
 	init_data(conf_file, vrrp_init_keywords, false);
 
-#ifndef _ONE_PROCESS_DEBUG_
-	/* Notify parent config has been read if appropriate */
-	if (!__test_bit(CONFIG_TEST_BIT, &debug))
-		notify_config_read();
-#endif
-
 	/* Update process name if necessary */
 	if ((!reload && global_data->vrrp_process_name) ||
 	    (reload &&
@@ -621,14 +615,22 @@ start_vrrp(data_t *prev_global_data)
 		return;
 
 	/* Start or stop gratuitous arp/ndisc as appropriate */
-	if (have_ipv4_instance)
-		gratuitous_arp_init();
-	else
+	if (have_ipv4_instance) {
+		if (!gratuitous_arp_init())
+			stop_vrrp(KEEPALIVED_EXIT_MISSING_PERMISSION);
+	} else
 		gratuitous_arp_close();
-	if (have_ipv6_instance)
-		ndisc_init();
-	else
+	if (have_ipv6_instance) {
+		if (!ndisc_init())
+			stop_vrrp(KEEPALIVED_EXIT_MISSING_PERMISSION);
+	} else
 		ndisc_close();
+
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
+#endif
 
 	if (!reload)
 		vrrp_restore_interfaces_startup();
@@ -822,7 +824,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 	cancel_vrrp_threads();
 #endif
 	cancel_kernel_netlink_threads();
-	thread_cleanup_master(master);
+	thread_cleanup_master(master, true);
 	thread_add_base_threads(master, with_snmp);
 
 	/* Remove the notify fifo - we don't know if it will be the same after a reload */
@@ -869,8 +871,6 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 	save_config(true, "vrrp", dump_data_vrrp);
 #endif
 
-	UNSET_RELOAD;
-
 	/* Post initializations */
 #ifdef _MEM_CHECK_
 	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
@@ -909,12 +909,13 @@ static void
 vrrp_respawn_thread(thread_ref_t thread)
 {
 	unsigned restart_delay;
+	int ret;
 
 	/* We catch a SIGCHLD, handle it */
 	vrrp_child = 0;
 
-	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
-		thread_add_terminate_event(thread->master);
+	if ((ret = report_child_status(thread->u.c.status, thread->u.c.pid, NULL)))
+		thread_add_parent_terminate_event(thread->master, ret);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_child_died("VRRP", thread->u.c.pid);
 
@@ -934,9 +935,6 @@ vrrp_respawn_thread(thread_ref_t thread)
 static void
 register_vrrp_thread_addresses(void)
 {
-	/* Remove anything we might have inherited from parent */
-	deregister_thread_addresses();
-
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 	register_notify_addresses();
@@ -1016,6 +1014,10 @@ start_vrrp_child(void)
 
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Check our parent hasn't already changed since the fork */
+	if (main_pid != getppid())
+		kill(getpid(), SIGTERM);
+
 #ifdef _WITH_PERF_
 	if (perf_run == PERF_ALL)
 		run_perf("vrrp", global_data->network_namespace, global_data->instance_name);
@@ -1024,6 +1026,11 @@ start_vrrp_child(void)
 	prog_type = PROG_TYPE_VRRP;
 
 	initialise_debug_options();
+
+#ifdef THREAD_DUMP
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+#endif
 
 #ifdef _WITH_BFD_
 	/* Close the write end of the BFD vrrp event notification pipe */

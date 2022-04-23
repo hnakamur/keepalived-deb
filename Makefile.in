@@ -94,8 +94,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = .
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(top_srcdir)/configure \
@@ -105,7 +105,7 @@ am__CONFIG_DISTCLEAN_FILES = config.status config.cache config.log \
 mkinstalldirs = $(install_sh) -d
 CONFIG_HEADER = $(top_builddir)/lib/config.h \
 	$(top_builddir)/lib/config_warnings.h
-CONFIG_CLEAN_FILES = keepalived.spec
+CONFIG_CLEAN_FILES = keepalived.spec Dockerfile
 CONFIG_CLEAN_VPATH_FILES =
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -192,8 +192,9 @@ ETAGS = etags
 CTAGS = ctags
 CSCOPE = cscope
 DIST_SUBDIRS = $(SUBDIRS)
-am__DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/keepalived.spec.in \
-	$(top_srcdir)/build-aux/ar-lib $(top_srcdir)/build-aux/compile \
+am__DIST_COMMON = $(srcdir)/Dockerfile.in $(srcdir)/Makefile.in \
+	$(srcdir)/keepalived.spec.in $(top_srcdir)/build-aux/ar-lib \
+	$(top_srcdir)/build-aux/compile \
 	$(top_srcdir)/build-aux/install-sh \
 	$(top_srcdir)/build-aux/missing COPYING ChangeLog INSTALL \
 	README TODO build-aux/ar-lib build-aux/compile \
@@ -255,6 +256,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -265,6 +267,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -291,6 +294,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -303,7 +307,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -360,12 +365,13 @@ top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
 edit = echo "  EDIT     $@"; \
-	 sed -e "/^\[\!\[/d"
+	 @SED@ -e "/^\[\!\[/d"
 
 SUBDIRS = lib keepalived doc bin_install
 EXTRA_DIST = AUTHOR CONTRIBUTORS snap README.md build_setup autogen.sh tools/timed_reload
 doc_DATA = README
 MOSTLYCLEANFILES = README
+ACLOCAL_AMFLAGS = -I m4 ${ACLOCAL_FLAGS}
 AM_DISTCHECK_CONFIGURE_FLAGS = \
         --with-systemdsystemunitdir=$$dc_install_base/$(systemdsystemunitdir)
 
@@ -406,6 +412,8 @@ $(ACLOCAL_M4):  $(am__aclocal_m4_deps)
 	$(am__cd) $(srcdir) && $(ACLOCAL) $(ACLOCAL_AMFLAGS)
 $(am__aclocal_m4_deps):
 keepalived.spec: $(top_builddir)/config.status $(srcdir)/keepalived.spec.in
+	cd $(top_builddir) && $(SHELL) ./config.status $@
+Dockerfile: $(top_builddir)/config.status $(srcdir)/Dockerfile.in
 	cd $(top_builddir) && $(SHELL) ./config.status $@
 install-docDATA: $(doc_DATA)
 	@$(NORMAL_INSTALL)
@@ -769,6 +777,7 @@ maintainer-clean-generic:
 	@echo "This command is intended for maintainers to use"
 	@echo "it deletes files that may require special tools to rebuild."
 	-test -z "$(MAINTAINERCLEANFILES)" || rm -f $(MAINTAINERCLEANFILES)
+@WITH_DBUS_FALSE@install-data-hook:
 clean: clean-recursive
 
 clean-am: clean-generic clean-local mostlyclean-am
@@ -792,7 +801,8 @@ info: info-recursive
 info-am:
 
 install-data-am: install-docDATA
-
+	@$(NORMAL_INSTALL)
+	$(MAKE) $(AM_MAKEFLAGS) install-data-hook
 install-dvi: install-dvi-recursive
 
 install-dvi-am:
@@ -839,7 +849,8 @@ ps-am:
 
 uninstall-am: uninstall-docDATA
 
-.MAKE: $(am__recursive_targets) install-am install-strip
+.MAKE: $(am__recursive_targets) install-am install-data-am \
+	install-strip
 
 .PHONY: $(am__recursive_targets) CTAGS GTAGS TAGS all all-am \
 	am--refresh check check-am clean clean-cscope clean-generic \
@@ -849,14 +860,14 @@ uninstall-am: uninstall-docDATA
 	distclean-local distclean-tags distcleancheck distdir \
 	distuninstallcheck dvi dvi-am html html-am info info-am \
 	install install-am install-data install-data-am \
-	install-docDATA install-dvi install-dvi-am install-exec \
-	install-exec-am install-html install-html-am install-info \
-	install-info-am install-man install-pdf install-pdf-am \
-	install-ps install-ps-am install-strip installcheck \
-	installcheck-am installdirs installdirs-am maintainer-clean \
-	maintainer-clean-generic mostlyclean mostlyclean-generic pdf \
-	pdf-am ps ps-am tags tags-am uninstall uninstall-am \
-	uninstall-docDATA
+	install-data-hook install-docDATA install-dvi install-dvi-am \
+	install-exec install-exec-am install-html install-html-am \
+	install-info install-info-am install-man install-pdf \
+	install-pdf-am install-ps install-ps-am install-strip \
+	installcheck installcheck-am installdirs installdirs-am \
+	maintainer-clean maintainer-clean-generic mostlyclean \
+	mostlyclean-generic pdf pdf-am ps ps-am tags tags-am uninstall \
+	uninstall-am uninstall-docDATA
 
 .PRECIOUS: Makefile
 
@@ -867,6 +878,25 @@ export			DEBUG_LDFLAGS
 
 README:	$(srcdir)/README.md
 	@$(edit) '$(srcdir)/$@.md' >$@
+
+@WITH_DBUS_TRUE@install-data-hook:
+@WITH_DBUS_TRUE@	@if [ @sysconfdir@ != /etc ]; then \
+@WITH_DBUS_TRUE@		echo; \
+@WITH_DBUS_TRUE@		echo "NOTE:	To enable DBus to work you probably want to add:"; \
+@WITH_DBUS_TRUE@		echo "	  <includedir>@sysconfdir@/dbus1/system.d</includedir>"; \
+@WITH_DBUS_TRUE@		echo "	to /etc/dbus-1/system-local.conf and restart dbus or reboot."; \
+@WITH_DBUS_TRUE@		echo; \
+@WITH_DBUS_TRUE@		echo "	It should look something like:"; \
+@WITH_DBUS_TRUE@		echo; \
+@WITH_DBUS_TRUE@		echo "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\""; \
+@WITH_DBUS_TRUE@		echo " \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">"; \
+@WITH_DBUS_TRUE@		echo "<busconfig>"; \
+@WITH_DBUS_TRUE@		echo ""; \
+@WITH_DBUS_TRUE@		echo "  <includedir>@sysconfdir@/dbus-1/system.d</includedir>"; \
+@WITH_DBUS_TRUE@		echo ""; \
+@WITH_DBUS_TRUE@		echo "</busconfig>"; \
+@WITH_DBUS_TRUE@		echo; \
+@WITH_DBUS_TRUE@	fi
 
 distclean-local:
 	@rm -f aclocal.m4 keepalived-$(VERSION).tar.gz config.log config.status
@@ -890,14 +920,14 @@ dist-hook:
 	@rm -f $(distdir)/README
 
 .PHONY: docker
-docker:
-	docker build -t keepalived .
+docker:	dist
+	docker build -t keepalived --build-arg GIT_VER=`grep GIT_COMMIT lib/git-commit.h | sed -e 's/.*"v[^-]*\(.*\)"/\1/'` .
 
 # clean all files that are generated by automake/autoconf etc
 autoclean:
 	@$(MAKE) distclean
-	@rm -f configure `find . -name Makefile.in` lib/config.h.in lib/git-commit.h lib/stamp-h[12]
-	@rm -rf m4 build-aux
+	@rm -f configure `find . -name Makefile.in` lib/config.h.in lib/git-commit.h lib/stamp-h[12] m4/pkg.m4
+	@rm -rf build-aux
 
 git-clean:
 	@$(MAKE) autoclean

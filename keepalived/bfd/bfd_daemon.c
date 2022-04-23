@@ -152,12 +152,6 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	init_data(conf_file, bfd_init_keywords, false);
 
-#ifndef _ONE_PROCESS_DEBUG_
-	/* Notify parent config has been read if appropriate */
-	if (!__test_bit(CONFIG_TEST_BIT, &debug))
-		notify_config_read();
-#endif
-
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -179,6 +173,10 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 		stop_bfd(KEEPALIVED_EXIT_CONFIG);
 		return;
 	}
+
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
 #endif
 
 	if (__test_bit(DUMP_CONF_BIT, &debug))
@@ -269,7 +267,7 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 
 	/* Destroy master thread */
 	bfd_dispatcher_release(bfd_data);
-	thread_cleanup_master(master);
+	thread_cleanup_master(master, true);
 	thread_add_base_threads(master, false);
 
 	old_bfd_data = bfd_data;
@@ -313,12 +311,13 @@ static void
 bfd_respawn_thread(thread_ref_t thread)
 {
 	unsigned restart_delay;
+	int ret;
 
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
 
-	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
-		thread_add_terminate_event(thread->master);
+	if ((ret = report_child_status(thread->u.c.status, thread->u.c.pid, NULL)))
+		thread_add_parent_terminate_event(thread->master, ret);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_child_died("BFD", thread->u.c.pid);
 
@@ -337,9 +336,6 @@ bfd_respawn_thread(thread_ref_t thread)
 static void
 register_bfd_thread_addresses(void)
 {
-	/* Remove anything we might have inherited from parent */
-	deregister_thread_addresses();
-
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 
@@ -391,6 +387,10 @@ start_bfd_child(void)
 
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Check our parent hasn't already changed since the fork */
+	if (main_pid != getppid())
+		kill(getpid(), SIGTERM);
+
 	prog_type = PROG_TYPE_BFD;
 
 	/* Close the read end of the event notification pipes, and the track_process fd */
@@ -402,6 +402,11 @@ start_bfd_child(void)
 #endif
 #ifdef _WITH_LVS_
 	close(bfd_checker_event_pipe[0]);
+#endif
+
+#ifdef THREAD_DUMP
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
 #endif
 
 	initialise_debug_options();

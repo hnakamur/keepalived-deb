@@ -233,8 +233,12 @@ static void
 dump_nl_msg(const char *msg, struct nl_msg *nlmsg)
 {
 	FILE *fp;
+	const char *filename;
 
-	fp = fopen(KA_TMP_DIR "/nlmsg.dmp", "a");
+	filename = make_tmp_filename("nlmsg.dmp");
+	fp = fopen(filename, "a");
+	FREE_CONST(filename);
+
 	fprintf(fp, "\n%s\n\n", msg);
 	if (nlmsg)
 		nl_msg_dump(nlmsg, fp);
@@ -439,6 +443,8 @@ int ipvs_init(void)
 		return ipvs_getinfo();
 
 	try_nl = false;
+#else
+	log_message(LOG_INFO, "Note: IPVS with IPv6 will not be supported");
 #endif
 
 	sockfd = socket_netns_name(global_data->network_namespace_ipvs, AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW);

@@ -11,7 +11,7 @@ AM_LDFLAGS		= $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
 
 edit = echo "  EDIT     $@"; \
-	sed \
+	@SED@ \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
@@ -48,25 +48,30 @@ if WITH_BFD
 endif
 
 if INIT_SYSTEMD
-keepalived.service: $(srcdir)/Makefile.am
+keepalived.service keepalived-non-root.service: $(srcdir)/Makefile.am
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.service: $(srcdir)/keepalived.service.in
+
+keepalived-non-root.service: $(srcdir)/keepalived-non-root.service.in
 endif
 
 SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) $(TRACKER_SUBDIR) etc
 
-EXTRA_DIST		= keepalived.service.in
+EXTRA_DIST		= keepalived.service.in keepalived-non-root.service.in
 
 keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a $(TRACKER_LIB) ../lib/liblib.a $(KA_LIBS)
 
-MOSTLYCLEANFILES	= keepalived.service
+if INIT_SYSTEMD
+MOSTLYCLEANFILES	= keepalived.service keeplived-non-root.service
+endif
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
 
 if INIT_SYSTEMD
 systemdsystemunit_DATA	= keepalived.service
+noinst_DATA		= keepalived-non-root.service
 endif
 
 if INIT_OPENRC
@@ -79,6 +84,7 @@ if WITH_IPVS
 install-exec-hook:
 	$(MKDIR_P) $(DESTDIR)/$(bindir)
 	@( \
+	rm -f $(DESTDIR)/$(bindir)/genhash; \
 	realpath --relative-to=/ / >/dev/null 2>&1; \
 	if [ $$? -eq 0 ]; then \
 		$(LN_S) `realpath --relative-to="$(DESTDIR)/$(bindir)" "$(DESTDIR)/$(sbindir)/keepalived"` $(DESTDIR)/$(bindir)/genhash; \
@@ -87,22 +93,22 @@ install-exec-hook:
 			d= ; \
 			s= ; \
 		else \
-			d=`echo $(bindir) | sed -e "s:^/::"`; \
-			s=`echo $(sbindir) | sed -e "s:^/::"`; \
+			d=`echo $(bindir) | @SED@ -e "s:^/::"`; \
+			s=`echo $(sbindir) | @SED@ -e "s:^/::"`; \
 			\
 			while [ 1 ]; do \
-				d1=`echo $$d | sed -e "s:/.*::"`; \
-				s1=`echo $$s | sed -e "s:/.*::"`; \
+				d1=`echo $$d | @SED@ -e "s:/.*::"`; \
+				s1=`echo $$s | @SED@ -e "s:/.*::"`; \
 				if [ $$d1 != $$s1 ]; then \
 					break; \
 				fi; \
-				d=`echo $$d | sed -e "s:^[^/]*/::"`; \
-				s=`echo $$s | sed -e "s:^[^/]*/::"`; \
+				d=`echo $$d | @SED@ -e "s:^[^/]*/::"`; \
+				s=`echo $$s | @SED@ -e "s:^[^/]*/::"`; \
 				if [ -z $$d ]; then break; fi; \
 				if [ -z $$s ]; then break; fi; \
 			done; \
 			\
-			d=`echo /$$d/ | sed -e "s:/[^/.]*/:/../:g" -e "s:/[^/.]*/:/../:g" -e "s:^/::"`; \
+			d=`echo /$$d/ | @SED@ -e "s:/[^/.]*/:/../:g" -e "s:/[^/.]*/:/../:g" -e "s:^/::"`; \
 			s=$$s/ ; \
 		fi; \
 		\

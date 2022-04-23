@@ -781,20 +781,59 @@ get_priority(const vector_t *strvec, const char *process)
 static void
 vrrp_mcast_group4_handler(const vector_t *strvec)
 {
-	struct sockaddr_in *mcast = &global_data->vrrp_mcast_group4;
+	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
-		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group4 [%s]. Skipping"
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group4 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (mcast.ss_family != AF_INET) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group4 [%s] is not IPv4. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* Check the address is multicast */
+	if (!IN_MULTICAST(htonl(PTR_CAST(struct sockaddr_in, &mcast)->sin_addr.s_addr))) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group4 [%s] is not multicast. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	global_data->vrrp_mcast_group4 = *PTR_CAST(struct sockaddr_in, &mcast);
 }
 static void
 vrrp_mcast_group6_handler(const vector_t *strvec)
 {
-	struct sockaddr_in6 *mcast = &global_data->vrrp_mcast_group6;
+	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
-		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group6 [%s]. Skipping"
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group6 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (mcast.ss_family != AF_INET6) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group6 [%s] is not IPv6. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* Check the address is multicast */
+	if (!IN6_IS_ADDR_MULTICAST(&PTR_CAST(struct sockaddr_in6, &mcast)->sin6_addr)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group6 [%s] is not multicast. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* An IPv6 multicast address should be link local */
+	if (!IN6_IS_ADDR_MC_LINKLOCAL(&PTR_CAST(struct sockaddr_in6, &mcast)->sin6_addr))
+		report_config_error(CONFIG_WARNING, "vrrp_mcast_group6 [%s] should be link-local multicast."
+				   , strvec_slot(strvec, 1));
+
+	global_data->vrrp_mcast_group6 = *PTR_CAST(struct sockaddr_in6, &mcast);
 }
 static void
 vrrp_garp_delay_handler(const vector_t *strvec)
@@ -1313,15 +1352,9 @@ notify_fifo(const vector_t *strvec, const char *type, notify_fifo_t *fifo)
 			log_message(LOG_INFO, "Invalid user/group for %s fifo %s - ignoring", type, fifo->name);
 			return;
 		}
-	}
-	else {
-		if (set_default_script_user(NULL, NULL)) {
-			log_message(LOG_INFO, "Failed to set default user for %s fifo %s - ignoring", type, fifo->name);
-			return;
-		}
-
-		fifo->uid = default_script_uid;
-		fifo->gid = default_script_gid;
+	} else if (get_default_script_user(&fifo->uid, &fifo->gid)) {
+		log_message(LOG_INFO, "Failed to set default user for %s fifo %s - ignoring", type, fifo->name);
+		return;
 	}
 
 	fifo->name = STRDUP(strvec_slot(strvec, 1));
@@ -1383,6 +1416,11 @@ vrrp_notify_priority_changes(const vector_t *strvec)
 	}
 
 	global_data->vrrp_notify_priority_changes = res;
+}
+static void
+fifo_write_vrrp_states_on_reload(__attribute__((unused))const vector_t *strvec)
+{
+	global_data->fifo_write_vrrp_states_on_reload = true;
 }
 #endif
 #ifdef _WITH_LVS_
@@ -2343,6 +2381,7 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_notify_fifo", &vrrp_notify_fifo);
 	install_keyword("vrrp_notify_fifo_script", &vrrp_notify_fifo_script);
 	install_keyword("vrrp_notify_priority_changes", &vrrp_notify_priority_changes);
+	install_keyword("fifo_write_vrrp_states_on_reload", &fifo_write_vrrp_states_on_reload);
 #endif
 #ifdef _WITH_LVS_
 	install_keyword("lvs_notify_fifo", &lvs_notify_fifo);

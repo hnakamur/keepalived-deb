@@ -94,8 +94,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = keepalived/etc/keepalived
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -170,6 +170,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -180,6 +181,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -206,6 +208,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -218,7 +221,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -277,10 +281,10 @@ top_srcdir = @top_srcdir@
 cp = echo "  CP       $@"; \
       cp
 
-EXTRA_DIST = keepalived.conf.in
+EXTRA_DIST = keepalived.conf.sample.in
 configdir = @DEFAULT_CONFIG_DIR@
-config_DATA = @DEFAULT_CONFIG_FILENAME@
-MOSTLYCLEANFILES = @DEFAULT_CONFIG_FILENAME@
+config_DATA = @DEFAULT_CONFIG_FILENAME@.sample
+MOSTLYCLEANFILES = @DEFAULT_CONFIG_FILENAME@.sample
 all: all-am
 
 .SUFFIXES:
@@ -434,7 +438,8 @@ info: info-am
 info-am:
 
 install-data-am: install-configDATA
-
+	@$(NORMAL_INSTALL)
+	$(MAKE) $(AM_MAKEFLAGS) install-data-hook
 install-dvi: install-dvi-am
 
 install-dvi-am:
@@ -479,25 +484,56 @@ ps-am:
 
 uninstall-am: uninstall-configDATA
 
-.MAKE: install-am install-strip
+.MAKE: install-am install-data-am install-strip
 
 .PHONY: all all-am check check-am clean clean-generic cscopelist-am \
 	ctags-am distclean distclean-generic distdir dvi dvi-am html \
 	html-am info info-am install install-am install-configDATA \
-	install-data install-data-am install-dvi install-dvi-am \
-	install-exec install-exec-am install-html install-html-am \
-	install-info install-info-am install-man install-pdf \
-	install-pdf-am install-ps install-ps-am install-strip \
-	installcheck installcheck-am installdirs maintainer-clean \
-	maintainer-clean-generic mostlyclean mostlyclean-generic pdf \
-	pdf-am ps ps-am tags-am uninstall uninstall-am \
-	uninstall-configDATA
+	install-data install-data-am install-data-hook install-dvi \
+	install-dvi-am install-exec install-exec-am install-html \
+	install-html-am install-info install-info-am install-man \
+	install-pdf install-pdf-am install-ps install-ps-am \
+	install-strip installcheck installcheck-am installdirs \
+	maintainer-clean maintainer-clean-generic mostlyclean \
+	mostlyclean-generic pdf pdf-am ps ps-am tags-am uninstall \
+	uninstall-am uninstall-configDATA
 
 .PRECIOUS: Makefile
 
 
-@DEFAULT_CONFIG_FILENAME@: $(srcdir)/keepalived.conf.in
+@DEFAULT_CONFIG_FILENAME@.sample: $(srcdir)/keepalived.conf.sample.in
 	@$(cp)  '$<' $@
+
+# If $DESTDIR is not blank, the following changes are not done since it is assumed to be a staged
+# installation. This means it will not apply to distros building keepalived.
+# After keepalived v2.2.4 we stopped installing a default keepalived.conf and instead install
+# keepalived.conf.sample. We also fixed a bug in keepalived where it always used /etc/keepalived.conf
+# rather than $(configdir)/keepalived.conf as the default configuration file.
+# The following checks if $(configdir)/keepalived.conf exists and if it matches one of the sample
+# config files (any version since keepalived v0.6.6) (the series of sed commands edit older versions
+# to match the current version), and if it matches, simply removes the config file (since it can't
+# be used to run keepalived), then if $configdir is not /etc copies /etc/keepalived.conf to $configdir
+# and updates /etc/keepalived.conf with a comment at the beginning to state that the configuration
+# file has been moved to $configdir.
+# The code below incorporates $(DESTDIR) to facilitate testing if the test -z $(DESTDIR) is changed to
+# test -n $(DESTDIR).
+install-data-hook:
+	@if test -z "$(DESTDIR)" && test -f $(DESTDIR)$(configdir)/@DEFAULT_CONFIG_FILENAME@; then \
+		tr "\n" "~" <$(DESTDIR)$(configdir)/@DEFAULT_CONFIG_FILENAME@ | \
+			@SED@ -e "s/\(10.10.10.2 1358 {~    delay_loop 6~    lb_algo rr ~    lb_kind NAT~\)    nat_mask 255.255.255.0~/\1/" | \
+			@SED@ -e "s/lvs_id /router_id /" | \
+			@SED@ -e "s/~[^~]*nat_mask[^~]*~/~/g" | \
+			@SED@ -e "s/\(~   router_id LVS_DEVEL~\)}/\1   vrrp_skip_check_adv_addr~}/" | \
+			@SED@ -e "s/\(~   vrrp_skip_check_adv_addr~\)}/\1   vrrp_strict~}/" | \
+			@SED@ -e "s/\(~   vrrp_strict~\)}/\1   vrrp_garp_interval 0~   vrrp_gna_interval 0~}/" | \
+			@SED@ -e "s/ ~/~/g" | \
+			@SED@ -e "s/nb_get_retry/retry/g" | \
+			tr "~" "\n" | \
+			diff -q - $(DESTDIR)$(configdir)/@DEFAULT_CONFIG_FILENAME@.sample; \
+		if test $$? -eq 0; then \
+			rm $(DESTDIR)$(configdir)/@DEFAULT_CONFIG_FILENAME@; \
+		fi; \
+	fi;
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

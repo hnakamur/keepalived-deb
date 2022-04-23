@@ -321,12 +321,6 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 
 	init_data(conf_file, check_init_keywords, false);
 
-#ifndef _ONE_PROCESS_DEBUG_
-	/* Notify parent config has been read if appropriate */
-	if (!__test_bit(CONFIG_TEST_BIT, &debug))
-		notify_config_read();
-#endif
-
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -443,6 +437,12 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 	if (!init_services())
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
+#endif
+
 	/* Dump configuration */
 	if (__test_bit(DUMP_CONF_BIT, &debug))
 		dump_data_check(NULL);
@@ -502,7 +502,7 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 
 	/* Destroy master thread */
 	checker_dispatcher_release();
-	thread_cleanup_master(master);
+	thread_cleanup_master(master, true);
 	thread_add_base_threads(master, with_snmp);
 
 	/* Save previous checker data */
@@ -591,12 +591,13 @@ static void
 check_respawn_thread(thread_ref_t thread)
 {
 	unsigned restart_delay;
+	int ret;
 
 	/* We catch a SIGCHLD, handle it */
 	checkers_child = 0;
 
-	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
-		thread_add_terminate_event(thread->master);
+	if ((ret = report_child_status(thread->u.c.status, thread->u.c.pid, NULL)))
+		thread_add_parent_terminate_event(thread->master, ret);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_child_died("Healthcheck", thread->u.c.pid);
 
@@ -616,9 +617,6 @@ check_respawn_thread(thread_ref_t thread)
 static void
 register_check_thread_addresses(void)
 {
-	/* Remove anything we might have inherited from parent */
-	deregister_thread_addresses();
-
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 	register_notify_addresses();
@@ -692,9 +690,18 @@ start_check_child(void)
 
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Check our parent hasn't already changed since the fork */
+	if (main_pid != getppid())
+		kill(getpid(), SIGTERM);
+
 	prog_type = PROG_TYPE_CHECKER;
 
 	initialise_debug_options();
+
+#ifdef THREAD_DUMP
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+#endif
 
 #ifdef _WITH_BFD_
 	/* Close the write end of the BFD checker event notification pipe and the track_process fd */
