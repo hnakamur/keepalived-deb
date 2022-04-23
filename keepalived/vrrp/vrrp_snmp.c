@@ -220,6 +220,8 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_INSTANCE_SCRIPTMASTER_RX_LOWER_PRI,
 	VRRP_SNMP_INSTANCE_SCRIPTDELETED,
 	VRRP_SNMP_INSTANCE_NOTIFY_DELETED,
+	VRRP_SNMP_INSTANCE_MULTICAST_ADDRESSTYPE,
+	VRRP_SNMP_INSTANCE_MULTICAST_ADDRESS,
 	VRRP_SNMP_TRACKEDINTERFACE_NAME,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE,
@@ -572,11 +574,12 @@ vrrp_snmp_script(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = scr->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SCRIPT_WEIGHT_REVERSE:
-		long_ret.u = scr->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(scr->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SCRIPT_RESULT:
 		switch (scr->init_state) {
 		case SCRIPT_INIT_STATE_INIT:
+		case SCRIPT_INIT_STATE_INIT_RELOAD:
 			long_ret.u = 1; break;
 		case SCRIPT_INIT_STATE_FAILED:
 			long_ret.u = 5; break;
@@ -626,7 +629,7 @@ vrrp_snmp_file(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = file->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_FILE_WEIGHT_REVERSE:
-		long_ret.u = file->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(file->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	default:
 		break;
@@ -661,7 +664,7 @@ vrrp_snmp_bfd(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bfd->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_BFD_WEIGHT_REVERSE:
-		long_ret.u = bfd->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bfd->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	default:
 		break;
@@ -723,7 +726,7 @@ vrrp_snmp_process(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = proc->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_PROCESS_WEIGHT_REVERSE:
-		long_ret.u = proc->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(proc->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_PROCESS_QUORUM:
 		long_ret.u = proc->quorum;
@@ -738,13 +741,13 @@ vrrp_snmp_process(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = proc->terminate_delay;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_PROCESS_FULLCOMMAND:
-		long_ret.u = proc->full_command ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(proc->full_command);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_PROCESS_CURPROC:
 		long_ret.u = proc->num_cur_proc;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_PROCESS_RESULT:
-		long_ret.u = proc->have_quorum ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(proc->have_quorum);
 		return PTR_CAST(u_char, &long_ret);
 	default:
 		break;
@@ -949,7 +952,7 @@ vrrp_snmp_address(struct variable *vp, oid *name, size_t *length,
 
 	switch (vp->magic) {
 	case VRRP_SNMP_ADDRESS_ADDRESSTYPE:
-		long_ret.u = (addr->ifa.ifa_family == AF_INET6)?2:1;
+		long_ret.u = SNMP_InetAddressType(addr->ifa.ifa_family);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ADDRESS_VALUE:
 		if (addr->ifa.ifa_family == AF_INET6) {
@@ -983,10 +986,10 @@ vrrp_snmp_address(struct variable *vp, oid *name, size_t *length,
 		}
 		break;
 	case VRRP_SNMP_ADDRESS_ISSET:
-		long_ret.u = (addr->set)?1:2;
+		long_ret.u = SNMP_TruthValue(addr->set);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ADDRESS_ISADVERTISED:
-		long_ret.u = (adv)?1:2;
+		long_ret.u = SNMP_TruthValue(adv);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ADDRESS_PEER:
 		if (!addr->have_peer)
@@ -1133,7 +1136,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = route->table;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_ISSET:
-		long_ret.u = (route->set)?1:2;
+		long_ret.u = SNMP_TruthValue(route->set);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_FROM_ADDRESS:
 		if (!route->src)
@@ -1161,10 +1164,10 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = route->protocol + 1;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_ECN:
-		long_ret.s = 2 - !!(route->features & RTAX_FEATURE_ECN);
+		long_ret.u = SNMP_TruthValue(route->features & RTAX_FEATURE_ECN);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_QUICK_ACK:
-		long_ret.u = 2 - !!(route->mask & IPROUTE_BIT_QUICKACK);
+		long_ret.u = SNMP_TruthValue(route->mask & IPROUTE_BIT_QUICKACK);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_EXPIRES:
 #if !HAVE_DECL_RTA_EXPIRES
@@ -1183,7 +1186,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_MTU_LOCK:
 		if (!(route->mask & IPROUTE_BIT_MTU))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_MTU));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_MTU));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_HOP_LIMIT:
 		if (!(route->mask & IPROUTE_BIT_HOPLIMIT))
@@ -1198,7 +1201,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_ADVMSS_LOCK:
 		if (!(route->mask & IPROUTE_BIT_ADVMSS))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_ADVMSS));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_ADVMSS));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_RTT:
 		if (!(route->mask & IPROUTE_BIT_RTT))
@@ -1208,7 +1211,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_RTT_LOCK:
 		if (!(route->mask & IPROUTE_BIT_RTT))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_RTT));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_RTT));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_RTTVAR:
 		if (!(route->mask & IPROUTE_BIT_RTTVAR))
@@ -1218,7 +1221,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_RTTVAR_LOCK:
 		if (!(route->mask & IPROUTE_BIT_RTTVAR))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_RTTVAR));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_RTTVAR));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_REORDERING:
 		if (!(route->mask & IPROUTE_BIT_REORDERING))
@@ -1228,7 +1231,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_REORDERING_LOCK:
 		if (!(route->mask & IPROUTE_BIT_REORDERING))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_REORDERING));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_REORDERING));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_WINDOW:
 		if (!(route->mask & IPROUTE_BIT_WINDOW))
@@ -1243,7 +1246,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_CWND_LOCK:
 		if (!(route->mask & IPROUTE_BIT_CWND))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_CWND));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_CWND));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_SSTHRESH:
 		if (!(route->mask & IPROUTE_BIT_SSTHRESH))
@@ -1253,7 +1256,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_SSTHRESH_LOCK:
 		if (!(route->mask & IPROUTE_BIT_SSTHRESH))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_SSTHRESH));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_SSTHRESH));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_RTOMIN:
 		if (!(route->mask & IPROUTE_BIT_RTO_MIN))
@@ -1263,7 +1266,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_RTOMIN_LOCK:
 		if (!(route->mask & IPROUTE_BIT_RTO_MIN))
 			break;
-		long_ret.u = 2 - !!(route->lock & (1<<RTAX_RTO_MIN));
+		long_ret.u = SNMP_TruthValue(route->lock & (1<<RTAX_RTO_MIN));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_INIT_CWND:
 		if (!(route->mask & IPROUTE_BIT_INITCWND))
@@ -1302,7 +1305,7 @@ vrrp_snmp_route(struct variable *vp, oid *name, size_t *length,
 #else
 		if (!(route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE))
 			break;
-		long_ret.u = route->fastopen_no_cookie;
+		long_ret.u = SNMP_TruthValue(route->fastopen_no_cookie);
 		return PTR_CAST(u_char, &long_ret);
 #endif
 	case VRRP_SNMP_ROUTE_REALM_DST:
@@ -1454,7 +1457,7 @@ vrrp_snmp_next_hop(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_ROUTE_NEXT_HOP_ADDRESS_TYPE:
 		if (!nh->addr)
 			break;
-		long_ret.u = (nh->addr->ifa.ifa_family == AF_INET6) ? 2 : 1;
+		long_ret.u = SNMP_InetAddressType(nh->addr->ifa.ifa_family);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_NEXT_HOP_ADDRESS:
 		if (!nh->addr)
@@ -1481,7 +1484,7 @@ vrrp_snmp_next_hop(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = nh->weight + 1;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_NEXT_HOP_ONLINK:
-		long_ret.u = 2 - !!(nh->flags & RTNH_F_ONLINK);
+		long_ret.u = SNMP_TruthValue(nh->flags & RTNH_F_ONLINK);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_ROUTE_NEXT_HOP_REALM_DST:
 		if (!nh->realms)
@@ -1530,7 +1533,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		addr = rule->to_addr ? rule->to_addr : rule->from_addr;
 		if (!addr)
 			break;
-		long_ret.u = addr->ifa.ifa_family == AF_INET6 ? 2 : 1;
+		long_ret.u = SNMP_InetAddressType(addr->ifa.ifa_family);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_ADDRESS:	/* obsolete */
 		addr = rule->to_addr ? rule->to_addr : rule->from_addr;
@@ -1554,15 +1557,15 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rule->table;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_ISSET:
-		long_ret.u = (rule->set)?1:2;
+		long_ret.u = SNMP_TruthValue(rule->set);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_INVERT:
-		long_ret.s = 2 - rule->invert;
+		long_ret.u = SNMP_TruthValue(rule->invert);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_DESTINATIONADDRESSTYPE:
 		if (!rule->to_addr)
 			break;
-		long_ret.u = (rule->to_addr->ifa.ifa_family == AF_INET6) ? 2 : 1;
+		long_ret.u = SNMP_InetAddressType(rule->to_addr->ifa.ifa_family);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_DESTINATIONADDRESS:
 		if (!rule->to_addr)
@@ -1581,7 +1584,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 	case VRRP_SNMP_RULE_SOURCEADDRESSTYPE:
 		if (!rule->from_addr)
 			break;
-		long_ret.u = (rule->from_addr->ifa.ifa_family == AF_INET6) ? 2 : 1;
+		long_ret.u = SNMP_InetAddressType(rule->from_addr->ifa.ifa_family);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_RULE_SOURCEADDRESS:
 		if (!rule->from_addr)
@@ -1663,7 +1666,7 @@ vrrp_snmp_rule(struct variable *vp, oid *name, size_t *length,
 		if (rule->mask & IPRULE_BIT_SUP_GROUP) {
 RELAX_CAST_QUAL_START
 			str = PTR_CAST_CONST(char, get_rttables_group(rule->suppress_group));
-RELAX_END
+RELAX_CAST_QUAL_END
 			*var_len = strlen(str);
 		}
 		else
@@ -1788,13 +1791,13 @@ vrrp_snmp_syncgroup(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = vrrp_snmp_state(group->state);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SYNCGROUP_TRACKINGWEIGHT:
-		long_ret.u = group->sgroup_tracking_weight?1:2;
+		long_ret.u = SNMP_TruthValue(group->sgroup_tracking_weight);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SYNCGROUP_SMTPALERT:
-		long_ret.u = group->smtp_alert?1:2;
+		long_ret.u = SNMP_TruthValue(group->smtp_alert);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SYNCGROUP_NOTIFYEXEC:
-		long_ret.u = group->notify_exec?1:2;
+		long_ret.u = SNMP_TruthValue(group->notify_exec);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SYNCGROUP_SCRIPTMASTER:
 		if (group->script_master) {
@@ -2019,13 +2022,13 @@ vrrp_snmp_instance_preempt(int action,
 			log_message(LOG_INFO,
 				    "(%s) preemption enabled with SNMP",
 				    vrrp->iname);
-			vrrp->nopreempt = 0;
+			__clear_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags);
 			break;
 		case 2:
 			log_message(LOG_INFO,
 				    "(%s) preemption disabled with SNMP",
 				    vrrp->iname);
-			vrrp->nopreempt = 1;
+			__set_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags);
 			break;
 		}
 		break;
@@ -2072,7 +2075,7 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->effective_priority;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_VIPSENABLED:
-		long_ret.u = rt->vipset?1:2;
+		long_ret.u = SNMP_TruthValue(rt->vipset);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_PRIMARYINTERFACE:
 		if (!rt->ifp)
@@ -2080,7 +2083,7 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		*var_len = strlen(rt->ifp->ifname);
 		return PTR_CAST(u_char, &rt->ifp->ifname);
 	case VRRP_SNMP_INSTANCE_TRACKPRIMARYIF:
-		long_ret.u = (!list_empty(&rt->track_ifp)) ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(!list_empty(&rt->track_ifp));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_ADVERTISEMENTSINT:
 		long_ret.u = (rt->version == VRRP_VERSION_2) ?
@@ -2088,7 +2091,7 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 			    rt->adver_int / TIMER_CENTI_HZ;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_PREEMPT:
-		long_ret.u = rt->nopreempt?2:1;
+		long_ret.u = SNMP_TruthValue(!__test_bit(VRRP_FLAG_NOPREEMPT, &rt->flags));
 		*write_method = vrrp_snmp_instance_preempt;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_PREEMPTDELAY:
@@ -2104,7 +2107,7 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		return PTR_CAST(u_char, &long_ret);
 #ifdef _WITH_LVS_
 	case VRRP_SNMP_INSTANCE_USELVSSYNCDAEMON:
-		long_ret.u = (global_data->lvs_syncd.vrrp == rt)?1:2;
+		long_ret.u = SNMP_TruthValue(global_data->lvs_syncd.vrrp == rt);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_LVSSYNCINTERFACE:
 		if (global_data->lvs_syncd.vrrp == rt) {
@@ -2125,10 +2128,10 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->garp_delay / TIMER_HZ;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_SMTPALERT:
-		long_ret.u = rt->smtp_alert?1:2;
+		long_ret.u = SNMP_TruthValue(rt->smtp_alert);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_NOTIFYEXEC:
-		long_ret.u = rt->notify_exec?1:2;
+		long_ret.u = SNMP_TruthValue(rt->notify_exec);
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_SCRIPTMASTER:
 		if (rt->script_master) {
@@ -2183,23 +2186,39 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = 0;
 #ifdef _WITH_FIREWALL_
 		if (rt->version == VRRP_VERSION_3) {
-			long_ret.u = rt->accept ? 1:2;
+			long_ret.u = SNMP_TruthValue(rt->accept);
 			*write_method = vrrp_snmp_instance_accept;
 		}
 #endif
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_PROMOTE_SECONDARIES:
-		long_ret.u = rt->promote_secondaries ? 1:2;
+		long_ret.u = SNMP_TruthValue(__test_bit(VRRP_FLAG_PROMOTE_SECONDARIES, &rt->flags));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_USE_LINKBEAT:
-		long_ret.u = rt->linkbeat_use_polling ? 1:2;
+		long_ret.u = SNMP_TruthValue(__test_bit(VRRP_FLAG_LINKBEAT_USE_POLLING, &rt->flags));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_VRRP_VERSION:
 		long_ret.u = rt->version;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_INSTANCE_NOTIFY_DELETED:
-		long_ret.u = rt->notify_deleted ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(rt->notify_deleted);
 		return PTR_CAST(u_char, &long_ret);
+	case VRRP_SNMP_INSTANCE_MULTICAST_ADDRESSTYPE:
+		if (__test_bit(VRRP_FLAG_UNICAST, &rt->flags))
+			break;
+		long_ret.u = SNMP_InetAddressType(rt->mcast_daddr.ss_family);
+		return PTR_CAST(u_char, &long_ret);
+	case VRRP_SNMP_INSTANCE_MULTICAST_ADDRESS:
+		if (__test_bit(VRRP_FLAG_UNICAST, &rt->flags))
+			break;
+		if (rt->mcast_daddr.ss_family == AF_INET6) {
+			*var_len = sizeof PTR_CAST(struct sockaddr_in6, &rt->mcast_daddr)->sin6_addr;
+			return PTR_CAST(u_char, &PTR_CAST(struct sockaddr_in6, &rt->mcast_daddr)->sin6_addr);
+		} else {
+			*var_len = sizeof PTR_CAST(struct sockaddr_in, &rt->mcast_daddr)->sin_addr;
+			return PTR_CAST(u_char, &PTR_CAST(struct sockaddr_in, &rt->mcast_daddr)->sin_addr);
+		}
+		break;
 	default:
 		return NULL;
 	}
@@ -2237,7 +2256,7 @@ vrrp_snmp_trackedinterface(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bifp->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE:
-		long_ret.s = bifp->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bifp->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 	return NULL;
@@ -2269,7 +2288,7 @@ vrrp_snmp_trackedscript(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bscr->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_TRACKEDSCRIPT_WEIGHT_REVERSE:
-		long_ret.s = bscr->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bscr->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 	return NULL;
@@ -2301,7 +2320,7 @@ vrrp_snmp_trackedfile(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bfile->file->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_TRACKEDFILE_WEIGHT_REVERSE:
-		long_ret.s = bfile->file->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bfile->file->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2335,7 +2354,7 @@ vrrp_snmp_trackedbfd(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bbfd->bfd->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_TRACKEDBFD_WEIGHT_REVERSE:
-		long_ret.s = bbfd->bfd->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bbfd->bfd->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2370,7 +2389,7 @@ vrrp_snmp_trackedprocess(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bproc->process->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_TRACKEDPROCESS_WEIGHT_REVERSE:
-		long_ret.s = bproc->process->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bproc->process->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2404,7 +2423,7 @@ vrrp_snmp_group_trackedinterface(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bifp->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SGROUPTRACKEDINTERFACE_WEIGHT_REVERSE:
-		long_ret.s = bifp->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bifp->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 	return NULL;
@@ -2436,7 +2455,7 @@ vrrp_snmp_group_trackedscript(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bscr->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SGROUPTRACKEDSCRIPT_WEIGHT_REVERSE:
-		long_ret.s = bscr->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bscr->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 	return NULL;
@@ -2468,7 +2487,7 @@ vrrp_snmp_group_trackedfile(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bfile->file->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SGROUPTRACKEDFILE_WEIGHT_REVERSE:
-		long_ret.s = bfile->file->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bfile->file->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2502,7 +2521,7 @@ vrrp_snmp_group_trackedbfd(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bbfd->bfd->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SGROUPTRACKEDBFD_WEIGHT_REVERSE:
-		long_ret.s = bbfd->bfd->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bbfd->bfd->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2537,7 +2556,7 @@ vrrp_snmp_group_trackedprocess(struct variable *vp, oid *name, size_t *length,
 		long_ret.s = bproc->process->weight;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_SNMP_SGROUPTRACKEDPROCESS_WEIGHT_REVERSE:
-		long_ret.s = bproc->process->weight_reverse ? 1 : 2;
+		long_ret.u = SNMP_TruthValue(bproc->process->weight_reverse);
 		return PTR_CAST(u_char, &long_ret);
 	}
 
@@ -2638,6 +2657,10 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_instance, 3, {3, 1, 32}},
 	{VRRP_SNMP_INSTANCE_NOTIFY_DELETED, ASN_INTEGER, RONLY,
 	 vrrp_snmp_instance, 3, {3, 1, 33}},
+	{VRRP_SNMP_INSTANCE_MULTICAST_ADDRESSTYPE, ASN_INTEGER, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 34}},
+	{VRRP_SNMP_INSTANCE_MULTICAST_ADDRESS, ASN_OCTET_STR, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 35}},
 
 	/* vrrpTrackedInterfaceTable */
 	{VRRP_SNMP_TRACKEDINTERFACE_NAME, ASN_OCTET_STR, RONLY,
@@ -2792,7 +2815,7 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_encap, 3, {7, 1, 54}},
 #endif
 #if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
-	{VRRP_SNMP_ROUTE_FASTOPEN_NO_COOKIE, ASN_UNSIGNED, RONLY,
+	{VRRP_SNMP_ROUTE_FASTOPEN_NO_COOKIE, ASN_INTEGER, RONLY,
 	 vrrp_snmp_route, 3, {7, 1, 55}},
 #endif
 #endif
@@ -2861,7 +2884,7 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_rule, 3, {8, 1, 31}},
 #endif
 #if HAVE_DECL_FRA_L3MDEV
-	{VRRP_SNMP_RULE_L3MDEV, ASN_UNSIGNED, RONLY,
+	{VRRP_SNMP_RULE_L3MDEV, ASN_INTEGER, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 32}},
 #endif
 
@@ -3465,7 +3488,7 @@ vrrp_rfcv2_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->adver_int / TIMER_HZ;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_RFC_SNMP_OPER_PREEMPT:
-		long_ret.s =  1 + rt->nopreempt;
+		long_ret.u = SNMP_TruthValue(!__test_bit(VRRP_FLAG_NOPREEMPT, &rt->flags));
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_RFC_SNMP_OPER_VR_UPTIME:
 		if (rt->state == VRRP_STATE_BACK ||
@@ -3885,7 +3908,7 @@ vrrp_rfcv3_header_ar_table(struct variable *vp, oid *name, size_t *length,
 
 		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
 		current[1] = vrrp->vrid;
-		current[2] = vrrp->family == AF_INET ? 1 : 2;
+		current[2] = SNMP_InetAddressType(vrrp->family);
 
 		if ((result = snmp_oid_compare(current, 3, target, target_len)) < 0)
 			continue;
@@ -4029,7 +4052,7 @@ snmp_rfcv3_header_list_table(struct variable *vp, oid *name, size_t *length,
 
 		current[0] = vrrp->ifp ? IF_BASE_INDEX(vrrp->ifp) : 0;
 		current[1] = vrrp->vrid;
-		current[2] = vrrp->family == AF_INET ? 1 : 2;
+		current[2] = SNMP_InetAddressType(vrrp->family);
 		if ((result = snmp_oid_compare(current, 3, target, target_len)) < 0)
 			continue;
 		if (result == 0) {
@@ -4115,11 +4138,11 @@ vrrp_rfcv3_snmp_opertable(struct variable *vp, oid *name, size_t *length,
 		long_ret.u = rt->adver_int / TIMER_CENTI_HZ;
 		return PTR_CAST(u_char, &long_ret);
 	case VRRP_RFCv3_SNMP_OPER_PREEMPT:
-		long_ret.s =  1 + rt->nopreempt;
+		long_ret.u = SNMP_TruthValue(!__test_bit(VRRP_FLAG_NOPREEMPT, &rt->flags));
 		return PTR_CAST(u_char, &long_ret);
 #ifdef _WITH_FIREWALL_
 	case VRRP_RFCv3_SNMP_OPER_ACCEPT:
-		long_ret.u =  1 + rt->accept;
+		long_ret.u = SNMP_TruthValue(rt->accept);
 		return PTR_CAST(u_char, &long_ret);
 #endif
 	case VRRP_RFCv3_SNMP_OPER_VR_UPTIME:

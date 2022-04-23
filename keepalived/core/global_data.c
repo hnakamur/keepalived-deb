@@ -90,9 +90,9 @@ static void
 set_default_mcast_group(data_t * data)
 {
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR_VRRP_GROUP, 0, PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group4));
+	inet_stosockaddr(INADDR_VRRP_GROUP, 0, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group4));
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR6_VRRP_GROUP, 0, PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group6));
+	inet_stosockaddr(INADDR6_VRRP_GROUP, 0, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group6));
 }
 
 static void
@@ -261,7 +261,7 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 		else if (use_pid_dir)
 			data->reload_file = STRDUP(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE RELOAD_EXTENSION);
 		else
-			data->reload_file = STRDUP(RUN_DIR KEEPALIVED_PID_FILE RELOAD_EXTENSION);
+			data->reload_file = STRDUP(RUNSTATEDIR "/" KEEPALIVED_PID_FILE RELOAD_EXTENSION);
 	}
 #endif
 
@@ -421,38 +421,39 @@ FILE * __attribute__((malloc))
 open_dump_file(const char *file_name)
 {
 	FILE *fp;
-	char *file_name_tmp = NULL;
+	const char *full_file_name;
+	char *tmp_file_name;
 	const char *dot;
 	int len;
 
 	if (global_data->data_use_instance &&
 	    (global_data->instance_name || global_data->network_namespace)) {
-		len = strlen(file_name) + 1;
+		len = strlen(tmp_dir) + 1 + strlen(file_name) + 1;
 		if (global_data->instance_name)
 			len += strlen(global_data->instance_name) + 1;
 		if (global_data->network_namespace)
 			len += strlen(global_data->network_namespace) + 1;
 
-		file_name_tmp = MALLOC(len);
+		tmp_file_name = MALLOC(len);
 
 		dot = strrchr(file_name, '.');
-		sprintf(file_name_tmp, "%.*s.%s%s%s%s",
+		sprintf(tmp_file_name, "%s/%.*s.%s%s%s%s", tmp_dir,
 				(int)(dot - file_name), file_name,
 				global_data->network_namespace ? global_data->network_namespace : "",
 				global_data->instance_name && global_data->network_namespace ? "_" : "",
 				global_data->instance_name ? global_data->instance_name : "",
 				dot);
-		file_name = file_name_tmp;
-	}
+		full_file_name = tmp_file_name;
+	} else
+		full_file_name = make_tmp_filename(file_name);
 
-	fp = fopen_safe(file_name, "w");
+	fp = fopen_safe(full_file_name, "w");
 
 	if (!fp)
 		log_message(LOG_INFO, "Can't open dump file %s (%d: %s)",
 			file_name, errno, strerror(errno));
 
-	if (file_name_tmp)
-		FREE(file_name_tmp);
+	FREE_CONST(full_file_name);
 
 	return fp;
 }
@@ -469,6 +470,8 @@ dump_global_data(FILE *fp, data_t * data)
 	struct tm tm;
 #endif
 	unsigned val;
+	uid_t uid;
+	gid_t gid;
 
 	if (!data)
 		return;
@@ -635,14 +638,15 @@ dump_global_data(FILE *fp, data_t * data)
 	}
 #endif
 #ifdef _WITH_VRRP_
+	conf_write(fp, " FIFO write vrrp states on reload = %s", data->fifo_write_vrrp_states_on_reload ? "true" : "false");
 	conf_write(fp, " VRRP notify priority changes = %s", data->vrrp_notify_priority_changes ? "true" : "false");
 	if (data->vrrp_mcast_group4.sin_family) {
 		conf_write(fp, " VRRP IPv4 mcast group = %s"
-				    , inet_sockaddrtos(PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group4)));
+				    , inet_sockaddrtos(PTR_CAST(sockaddr_t, &data->vrrp_mcast_group4)));
 	}
 	if (data->vrrp_mcast_group6.sin6_family) {
 		conf_write(fp, " VRRP IPv6 mcast group = %s"
-				    , inet_sockaddrtos(PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group6)));
+				    , inet_sockaddrtos(PTR_CAST(sockaddr_t, &data->vrrp_mcast_group6)));
 	}
 	conf_write(fp, " Gratuitous ARP delay = %u",
 		       data->vrrp_garp_delay/TIMER_HZ);
@@ -762,7 +766,8 @@ dump_global_data(FILE *fp, data_t * data)
 	conf_write(fp, " DBus service name = %s", data->dbus_service_name ? data->dbus_service_name : "");
 #endif
 	conf_write(fp, " Script security %s", script_security ? "enabled" : "disabled");
-	conf_write(fp, " Default script uid:gid %u:%u", default_script_uid, default_script_gid);
+	if (!get_default_script_user(&uid, &gid))
+		conf_write(fp, " Default script uid:gid %u:%u", uid, gid);
 #ifdef _WITH_VRRP_
 	conf_write(fp, " vrrp_netlink_cmd_rcv_bufs = %u", global_data->vrrp_netlink_cmd_rcv_bufs);
 	conf_write(fp, " vrrp_netlink_cmd_rcv_bufs_force = %d", global_data->vrrp_netlink_cmd_rcv_bufs_force);

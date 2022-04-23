@@ -43,9 +43,11 @@
 #include "signals.h"
 #include "assert_debug.h"
 
+
 /* Locals */
 static int bfd_send_packet(int, bfdpkt_t *, bool);
 static void bfd_sender_schedule(bfd_t *);
+static int bfd_open_fd_out(bfd_t *);
 
 static void bfd_state_down(bfd_t *, uint8_t diag);
 
@@ -446,6 +448,26 @@ bfd_reset_discard(bfd_t *bfd)
 	bfd->sands_rst = TIMER_NEVER;
 }
 
+/* Cancels bfd_open_fd_out_thread run */
+static void
+bfd_open_fd_out_cancel(bfd_t *bfd)
+{
+	assert(bfd);
+	assert(bfd->thread_open_fd_out);
+
+	thread_cancel(bfd->thread_open_fd_out);
+	bfd->thread_open_fd_out = NULL;
+}
+
+/* Returns 1 if bfd_open_fd_out_thread is scheduled to run, 0 otherwise */
+static int __attribute__ ((pure))
+bfd_open_fd_out_scheduled(bfd_t *bfd)
+{
+	assert(bfd);
+
+	return bfd->thread_open_fd_out != NULL;
+}
+
 /*
  * State change handlers
  */
@@ -687,12 +709,21 @@ bfd_handle_packet(bfdpkt_t *pkt)
 
 	/* Discard all packets while in AdminDown state */
 	if (bfd->local_state == BFD_STATE_ADMINDOWN) {
-		if (__test_bit(LOG_DETAIL_BIT, &debug))
-			log_message(LOG_INFO, "Discarding packet from %s"
-				    " (session is in AdminDown state)",
-				    inet_sockaddrtopair(&pkt->src_addr));
+		/* See if we can open the out socket */
+		if (bfd_open_fd_out(bfd)) {
+			if (__test_bit(LOG_DETAIL_BIT, &debug))
+				log_message(LOG_INFO, "Discarding packet from %s"
+					    " (session is in AdminDown state)",
+					    inet_sockaddrtopair(&pkt->src_addr));
 
-		return;
+			return;
+		}
+
+		/* Open was successful, cancel the thread to open the socket */
+		if (bfd_open_fd_out_scheduled(bfd))
+			bfd_open_fd_out_cancel(bfd);
+
+		bfd_state_init(bfd);
 	}
 
 	/* Save old timers */
@@ -812,7 +843,8 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 	unsigned int ttl = 0;
 	struct msghdr msg;
 	struct cmsghdr *cmsg = NULL;
-	char cbuf[CMSG_SPACE(sizeof (struct in6_pktinfo)) + CMSG_SPACE(sizeof(ttl))] __attribute__((aligned(__alignof__(struct cmsghdr))));
+	char cbuf[CMSG_SPACE(max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)) + CMSG_SPACE(sizeof(ttl)))]
+	           __attribute__((aligned(__alignof__(struct cmsghdr))));
 	struct iovec iov[1];
 	const struct in6_pktinfo *pktinfo;
 
@@ -861,6 +893,10 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 				pkt->dst_addr.ss_family = AF_INET6;
 			}
 		}
+		else if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+			PTR_CAST(struct sockaddr_in, &pkt->dst_addr)->sin_addr = PTR_CAST(struct in_pktinfo, CMSG_DATA(cmsg))->ipi_addr;
+			pkt->dst_addr.ss_family = AF_INET;
+		}
 		else
 			log_message(LOG_WARNING, "recvmsg() received"
 				    " unexpected control message (level %d type %d)",
@@ -875,7 +911,7 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 	pkt->ttl = ttl;
 
 	/* Convert an IPv4-mapped IPv6 address to a real IPv4 address */
-	if (IN6_IS_ADDR_V4MAPPED(&PTR_CAST(struct sockaddr_in6, &pkt->src_addr)->sin6_addr)) {
+	if (pkt->src_addr.ss_family == AF_INET6 && IN6_IS_ADDR_V4MAPPED(&PTR_CAST(struct sockaddr_in6, &pkt->src_addr)->sin6_addr)) {
 		PTR_CAST(struct sockaddr_in, &pkt->src_addr)->sin_addr.s_addr = PTR_CAST(struct sockaddr_in6, &pkt->src_addr)->sin6_addr.s6_addr32[3];
 		pkt->src_addr.ss_family = AF_INET;
 	}
@@ -924,37 +960,63 @@ bfd_receiver_thread(thread_ref_t thread)
 static int
 bfd_open_fd_in(bfd_data_t *data)
 {
-	struct addrinfo hints;
+	struct addrinfo hints = { .ai_family = AF_INET6, .ai_flags = AI_NUMERICSERV | AI_PASSIVE, .ai_protocol = IPPROTO_UDP, .ai_socktype = SOCK_DGRAM };
 	struct addrinfo *ai_in;
 	int ret;
 	int yes = 1;
+	int sav_errno;
 
 	assert(data);
 	assert(data->fd_in == -1);
 
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_INET6;
-	hints.ai_flags = AI_NUMERICSERV | AI_PASSIVE;
-	hints.ai_protocol = IPPROTO_UDP;
-	hints.ai_socktype = SOCK_DGRAM;
-
-	if ((ret = getaddrinfo(NULL, BFD_CONTROL_PORT, &hints, &ai_in)))
+	if ((ret = getaddrinfo(NULL, BFD_CONTROL_PORT, &hints, &ai_in))) {
 		log_message(LOG_ERR, "getaddrinfo() error %d (%s)", ret, gai_strerror(ret));
-	else if ((data->fd_in = socket(AF_INET6, ai_in->ai_socktype, ai_in->ai_protocol)) == -1)
-		log_message(LOG_ERR, "socket() error %d (%m)", errno);
-	else if ((ret = setsockopt(data->fd_in, IPPROTO_IP, IP_RECVTTL, &yes, sizeof (yes))) == -1)
+		return ret;
+	}
+
+	if ((data->fd_in = socket(AF_INET6, ai_in->ai_socktype, ai_in->ai_protocol)) == -1) {
+		sav_errno = errno;
+
+		freeaddrinfo(ai_in);
+
+		if (sav_errno != EAFNOSUPPORT) {
+			log_message(LOG_ERR, "socket() error %d (%m)", errno);
+			return 1;
+		}
+
+		/* IPv6 is disabled on the system, so we need to try using IPv4 */
+		hints.ai_family = AF_INET;
+
+		if ((ret = getaddrinfo(NULL, BFD_CONTROL_PORT, &hints, &ai_in))) {
+			log_message(LOG_ERR, "getaddrinfo(AF_INET) error %d (%s)", ret, gai_strerror(ret));
+			return ret;
+		}
+
+		if ((data->fd_in = socket(AF_INET, ai_in->ai_socktype, ai_in->ai_protocol)) == -1) {
+			log_message(LOG_ERR, "socket(AF_INET) error %d (%m)", errno);
+			freeaddrinfo(ai_in);
+			return 1;
+		}
+	}
+
+	if ((ret = setsockopt(data->fd_in, IPPROTO_IP, IP_RECVTTL, &yes, sizeof (yes))) == -1)
 		log_message(LOG_ERR, "setsockopt(IP_RECVTTL) error %d (%m)", errno);
-	else if ((ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &yes, sizeof (yes))) == -1)
+	else if (ai_in->ai_family == AF_INET6 && (ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &yes, sizeof (yes))) == -1)
 		log_message(LOG_ERR, "setsockopt(IPV6_RECVHOPLIMIT) error %d (%m)", errno);
-	else if ((ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof (yes))) == -1)
+	else if (ai_in->ai_family == AF_INET6 && (ret = setsockopt(data->fd_in, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof (yes))) == -1)
 		log_message(LOG_ERR, "setsockopt(IPV6_RECVPKTINFO) error %d (%m)", errno);
+	else if (ai_in->ai_family == AF_INET && (ret = setsockopt(data->fd_in, IPPROTO_IP, IP_PKTINFO, &yes, sizeof (yes))) == -1)
+		log_message(LOG_ERR, "setsockopt(IP_PKTINFO) error %d (%m)", errno);
 	else if ((ret = bind(data->fd_in, ai_in->ai_addr, ai_in->ai_addrlen)) == -1)
 		log_message(LOG_ERR, "bind() error %d (%m)", errno);
 
-	if (ret)
-		ret = 1;
-
 	freeaddrinfo(ai_in);
+
+	if (ret) {
+		close(data->fd_in);
+		data->fd_in = -1;
+	}
+
 	return ret;
 }
 
@@ -1055,9 +1117,9 @@ bfd_open_fd_out(bfd_t *bfd)
 		} while (true);
 
 		if (ret == -1) {
-			log_message(LOG_ERR,
-				    "(%s) bind() error (%m)",
-				    bfd->iname);
+			log_message(LOG_ERR, "(%s) bind() error (%m)", bfd->iname);
+			close(bfd->fd_out);
+			bfd->fd_out = -1;
 			return 1;
 		}
 	} else {
@@ -1074,8 +1136,9 @@ bfd_open_fd_out(bfd_t *bfd)
 		ret = setsockopt(bfd->fd_out, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl, sizeof (ttl));
 
 	if (ret == -1) {
-		log_message(LOG_ERR, "(%s) setsockopt() "
-			    " error (%m)", bfd->iname);
+		log_message(LOG_ERR, "(%s) setsockopt() error (%m)", bfd->iname);
+		close(bfd->fd_out);
+		bfd->fd_out = -1;
 		return 1;
 	}
 
@@ -1110,6 +1173,26 @@ bfd_open_fds(bfd_data_t *data)
 	}
 
 	return 0;
+}
+
+static void
+bfd_open_fd_out_thread(thread_ref_t thread)
+{
+	bfd_t *bfd = THREAD_ARG(thread);
+
+	if (bfd->fd_out != -1)
+		return;
+
+	if (bfd_open_fd_out(bfd)) {
+		bfd->thread_open_fd_out = thread_add_timer(master, bfd_open_fd_out_thread, bfd, 60 * TIMER_HZ);
+		return;
+	}
+
+	bfd->local_state = BFD_STATE_DOWN;
+	bfd->sands_out = TIMER_NEVER;
+
+	if (!bfd->passive)
+		bfd_sender_schedule(bfd);
 }
 
 /* Registers sender and receiver threads */
@@ -1154,8 +1237,11 @@ bfd_register_workers(bfd_data_t *data)
 		/* Send our status to VRRP process */
 		bfd_event_send(bfd);
 
+		if (BFD_ISADMINDOWN(bfd) && bfd->fd_out == -1)
+			bfd->thread_open_fd_out = thread_add_timer(master, bfd_open_fd_out_thread, bfd, 60 * TIMER_HZ);
+
 		/* If we are starting up, send a packet */
-		if (!reload && !bfd->passive)
+		if (!reload && !bfd->passive && !BFD_ISADMINDOWN(bfd))
 			thread_add_event(master, bfd_sender_thread, bfd, 0);
 	}
 }
@@ -1196,10 +1282,13 @@ bfd_dispatcher_release(bfd_data_t *data)
 		if (bfd_reset_scheduled(bfd))
 			bfd_reset_suspend(bfd);
 
-		assert(bfd->fd_out != -1);
+		if (bfd_open_fd_out_scheduled(bfd))
+			bfd_open_fd_out_cancel(bfd);
 
-		close(bfd->fd_out);
-		bfd->fd_out = -1;
+		if (bfd->fd_out != -1) {
+			close(bfd->fd_out);
+			bfd->fd_out = -1;
+		}
 	}
 
 	cancel_signal_read_thread();
@@ -1229,5 +1318,6 @@ register_bfd_scheduler_addresses(void)
 	register_thread_address("bfd_expire_thread", bfd_expire_thread);
 	register_thread_address("bfd_reset_thread", bfd_reset_thread);
 	register_thread_address("bfd_receiver_thread", bfd_receiver_thread);
+	register_thread_address("bfd_open_fd_out_thread", bfd_open_fd_out_thread);
 }
 #endif

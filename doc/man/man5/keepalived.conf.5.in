@@ -441,8 +441,8 @@ possibly following any cleanup actions needed.
 
     # keepalived uses a firewall (either nftables or iptables) for two purposes:
     #  i)  To implement no_accept mode
-    #  ii) To stop IGMP/MLD packets being sent on VMAC interfaces, and to move
-    #      them onto the underlying interface.
+    #  ii) To stop IGMP/MLD/Router-Solicit packets being sent on VMAC interfaces,
+    #      and to move IGMP/MLD messages onto the underlying interface.
     # If both vrrp_iptables and vrrp_nftables are specified, keepalived will use
     # nftables and not iptables. Similarly, if the iptables command is generating
     # nftables configuration, or there is no iptables command installed,
@@ -681,7 +681,7 @@ possibly following any cleanup actions needed.
 
     # Specify the default username/groupname to run scripts under.
     # If this option is not specified, the user defaults to keepalived_script
-    # if that user exists, otherwise root.
+    # if that user exists, otherwise the uid/gid under which keepalived is running.
     # If groupname is not specified, it defaults to the user's group.
     \fBscript_user \fRusername [groupname]
 
@@ -725,6 +725,11 @@ possibly following any cleanup actions needed.
     # script to be run by keepalived to process healthchecher notify events
     # The FIFO name will be passed to the script as the last parameter
     \fBlvs_notify_fifo_script \fRSTRING|QUOTED_STRING [username [groupname]]
+
+    # By default, when keepalived reloads the vrrp instance and sync group states
+    # are not written to the relevant FIFOs. Setting this option will cause the
+    # states to be sent to the FIFO(s) when keepalived reloads.
+    \fBfifo_write_vrrp_states_on_reload\fR
 
     # Allow configuration to include interfaces that don't exist at startup.
     # This allows keepalived to work with interfaces that may be deleted and restored
@@ -958,12 +963,13 @@ The syntax for a track group is:
 .fi
 .SH Static routes/addresses/rules
 .PP
-Keepalived can configure static addresses, routes, and rules. These addresses are
+Keepalived can configure static addresses, routes, and rules. These addresses, routes
+and rules are
 \fBNOT\fR
 moved by vrrpd, they stay on the machine.
 If you already have IPs and routes on your machines and
 your machines can ping each other, you don't need this section.
-The syntax for rules and routes is that same as for ip rule add/ip route add
+The syntax for rules and routes is the same as for ip rule add/ip route add
 (except shortened option names are not supported due to ambiguities).
 The track_group specification refers to a named track_group which lists
 the vrrp instances which will track the address, i.e. if the address is
@@ -981,6 +987,16 @@ bits of the address.
 .PP
 If a route or rule could apply to either IPv4 or IPv6 it will default to IPv4.
 To force a route/rule to be IPv6, add the keyword "inet6".
+.PP
+By default keepalived prepends routes (the kernel's default) which adds the route
+before any matching routes (this is the same behaviour as the (undocumented)
+'ip route prepend' command). If 'add' is specified, the behaviour will be the same
+as the 'ip route add' command, which only adds the route if there is no matching route.
+If 'append' is specified, the behaviour is the same as the 'ip route append' command,
+i.e. the route is added after any matching route.
+Note: the rules for whether a route matches differ between IPv4 and IPv6; for example
+specifying a different proto means a matching route can be prepended/appended for IPv4
+but not for IPv6. If in doubt, test it using the 'ip route add/prepend/append' commands.
 .PP
 .nf
     \fBstatic_ipaddress \fR{
@@ -1006,13 +1022,13 @@ To force a route/rule to be IPv6, add the keyword "inet6".
                          advmss 101 rtt 102 rttvar 103 reordering 104
                          window 105 cwnd 106 ssthresh lock 107 realms
                          PQA/0x14 rto_min 108 initcwnd 109 initrwnd 110
-                         features ecn
+                         vrf blue features ecn add
 
         2001:470:69e9:1:2::4 dev p33p1.2 table 6909 tos 0x04 protocol
                              bird scope link priority 12 mtu 1000
                              hoplimit 100 advmss 101 rtt 102 rttvar 103
                              reordering 104 window 105 cwnd 106 ssthresh
-                             lock 107 rto_min 108 initcwnd 109
+                             lock 107 rto_min 108 initcwnd 109 append
                              initrwnd 110 features ecn fastopen_no_cookie 1
         ...
     }
@@ -1390,7 +1406,7 @@ The syntax for vrrp_sync_group is :
     # reverse causes the direction of the adjustment of the priority to be reversed.
     \fBtrack_script \fR{
         <SCRIPT_NAME>
-        <SCRIPT_NAME> weight <-253..253> [reverse|no_reverse]
+        <SCRIPT_NAME> weight <-253..253> [reverse|noreverse]
     }
 
     # Files whose state we monitor, value is added to effective priority.
@@ -1556,6 +1572,10 @@ The syntax for vrrp_instance is :
     #   added to the default interface.
     \fBinterface \fReth0
 
+    # If using unicasting without specifying an interface, the VRF to operate
+    # in can be specified.
+    \fBvrf \fR VRF_IF
+
     # Use VRRP Virtual MAC (macvlan).
     # The macvlan will be created on the configured interface for
     # the VRRP instance, and the VIPs, and eVIPs of the matching address
@@ -1572,7 +1592,9 @@ The syntax for vrrp_instance is :
     # The original settings are restored on termination.
     # \fBNOTE 2\fR: If using use_vmac with unicast peers,
     # vmac_xmit_base must be set.
-    \fBuse_vmac \fR[<VMAC_INTERFACE>]
+    # The MAC address can be specified with only 5 octets, in which case
+    # the virtual_router_id will be used as the last octet.
+    \fBuse_vmac \fR[<VMAC_INTERFACE_NAME>] [MAC_ADDRESS]
 
     # use_vmac_addr is used to create VMAC (macvlan) interfaces for
     # each interface that is used by a VIP or eVIP where the interface
@@ -1690,6 +1712,17 @@ The syntax for vrrp_instance is :
     \fBmcast_src_ip \fR<IPADDR>
     \fBunicast_src_ip \fR<IPADDR>
 
+    # specify an alternative multicast address to use as the destination
+    # of VRRP adverts and for listening for adverts. Note, if you are using
+    # multiple VRRP instances with VMACs and different multicast addresses
+    # and the same VRID, you will have to specify alternative MAC addresses
+    # for at least all but one of the VMACs.
+    # IPv6 multicast addresses must be link-local, i.e. start ffX2:
+    # Using different multicast addresses with IPv6 on the same interface without
+    # using VMACs is only supported if the kernel supports IPV6_MULTICAST_ALL
+    # (from Linux v4.20).
+    \fBmcast_dst_ip \fR<MULTICAST_IPADDR>
+
     # if the configured src_ip doesn't exist or is removed put the
     # instance into fault state
     \fBtrack_src_ip\fR
@@ -1717,6 +1750,13 @@ The syntax for vrrp_instance is :
         <IPADDR> [min_ttl {0..255}] [max_ttl {0..255}]
         ...
     }
+
+    # It is not possible to operate in unicast mode without any peers.
+    # Until v2.2.4 keepalived would silently operate in multicast mode
+    # if no peers were specified but a unicast keyword had been specified.
+    # Using this keywork stops defaulting to multicast if no peers are
+    # specified and puts the VRRP instance into fault state.
+    \fBunicast_fault_no_peer\fR
 
     # Specify the unicast TTL/HLIM for sending unicast adverts
     \fBunicast_ttl\fR {0..255}
@@ -1764,18 +1804,42 @@ The syntax for vrrp_instance is :
     # arbitrary unique number from 1 to 255
     # used to differentiate multiple instances of vrrpd
     # running on the same network interface and address
-    # family (and hence same socket).
+    # family and multicast/unicast (and hence same socket).
     # Note: using the same virtual_router_id with the same
     # address family on different interfaces has been known
     # to cause problems with some network switches; if you
     # are experiencing problems with using the same
     # virtual_router_id on different interfaces, but the problems
-    # are resolved by not duplicating virtual_router_ids, the
-    # your network switches are probably not functioning correctly.
+    # are resolved by not duplicating virtual_router_ids, your
+    # network switches are probably not functioning correctly.
+    #
+    # Whilst in general it is important not to duplicate a
+    # virtual_router_id on the same network interface, there is a
+    # special case when using unicasting if the unicast peers for
+    # the vrrp instances with duplicated virtual_router_ids on the
+    # network interface do not overlap, in which case virtual_router_ids
+    # can be duplicated.
+    # It is also possible to duplicate virtual_router_ids on an
+    # interface with multicasting if different multicast addresses
+    # are used (see mcast_dst_ip).
     \fBvirtual_router_id \fR51
 
     # for electing MASTER, highest priority wins.
-    # to be MASTER, make this 50 more than on other machines.
+    # The valid range of values for priority is [1-255], with priority
+    # 255 meaning "address owner".
+    # To be MASTER, it is recommended to make this 50 more than on
+    # other machines. All systems should have different priorities
+    # in order to make behaviour deterministic. If you want to stop
+    # a higher priority instance taking over as master when it starts,
+    # configure no_preempt rather than using equal priorities.
+    # If no_accept is configured (or vrrp_strict # which also sets
+    # no_accept mode), then unless the vrrp_instance has priority 255,
+    # the system will not receive packets addressed to the # VIPs/eVIPs,
+    # and the VIPs/eVIPs can only be used for routeing purposes.
+    # Further, if an instance has priority 255 configured, the priority cannot
+    # be reduced by track_scripts, track_process etc, and likewise
+    # track_scripts etc cannot increase the priority to 255 if the configured
+    # priority is not 255.
     \fBpriority \fR100
 
     # VRRP Advert interval in seconds (e.g. 0.92) (use default)
@@ -2103,7 +2167,7 @@ The syntax for virtual_server is :
 \fBvirtual_server fwmark \fR<INTEGER> |
 \fBvirtual_server group \fR<STRING> {
     # LVS scheduler
-    \fBlvs_sched \fRrr|wrr|lc|wlc|lblc|sh|mh|dh|fo|ovf|lblcr|sed|nq
+    \fBlvs_sched \fRrr|wrr|lc|wlc|lblc|sh|mh|dh|fo|ovf|lblcr|sed|nq|twos
 
     # Enable flag-1 for scheduler (-b flag-1 in ipvsadm)
     \fBflag-1\fR

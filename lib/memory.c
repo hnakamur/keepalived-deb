@@ -47,7 +47,7 @@
 #ifdef _MEM_CHECK_
 #include "align.h"
 #include "timer.h"
-#include "rbtree.h"
+#include "rbtree_ka.h"
 #include "list_head.h"
 
 /* Global var */
@@ -183,9 +183,15 @@ static unsigned seq_num;
 static FILE *log_op = NULL;
 
 static inline int
-memcheck_ptr_cmp(const MEMCHECK *m1, const MEMCHECK *m2)
+memcheck_ptr_cmp(const void *key, const struct rb_node *a)
 {
-	return (char *)m1->ptr - (char *)m2->ptr;
+	return (const char *)key - (char *)rb_entry_const(a, MEMCHECK, t)->ptr;
+}
+
+static inline bool
+memcheck_ptr_less(struct rb_node *a, const struct rb_node *b)
+{
+	return rb_entry(a, MEMCHECK, t)->ptr < rb_entry_const(b, MEMCHECK, t)->ptr;
 }
 
 static const char *
@@ -257,7 +263,7 @@ keepalived_malloc_common(size_t size, const char *file, const char *function, in
 	entry->line = line;
 	entry->type = ALLOCATED;
 
-	rb_insert_sort(&alloc_list, entry, t, memcheck_ptr_cmp);
+	rb_add(&entry->t, &alloc_list, memcheck_ptr_less);
 	if (++number_alloc_list > max_alloc_list)
 		max_alloc_list = number_alloc_list;
 
@@ -321,7 +327,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 {
 	unsigned long check;
 	MEMCHECK *entry, *entry2, *le;
-	MEMCHECK search = {.ptr = buffer};
+	rb_node_t *entry_rb;
 #ifdef _NO_UNALIGNED_ACCESS_
 	unsigned long check_val = CHECK_VAL;
 #endif
@@ -355,10 +361,10 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 		return !size ? NULL : keepalived_malloc(size, file, function, line);
 	}
 
-	entry = rb_search(&alloc_list, &search, t, memcheck_ptr_cmp);
+	entry_rb = rb_find(buffer, &alloc_list, memcheck_ptr_cmp);
 
 	/* Not found */
-	if (!entry) {
+	if (!entry_rb) {
 		entry = get_free_alloc_entry();
 
 		entry->ptr = buffer;
@@ -400,7 +406,8 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 		/* coverity[leaked_storage] */
 		return NULL;
-	}
+	} else
+		entry = rb_entry(entry_rb, MEMCHECK, t);
 
 	check = entry->size + CHECK_VAL;
 #ifndef _NO_UNALIGNED_ACCESS_
@@ -512,7 +519,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 	if (entry->ptr != buffer) {
 		rb_erase(&entry->t, &alloc_list);
 		entry->ptr = buffer;
-		rb_insert_sort(&alloc_list, entry, t, memcheck_ptr_cmp);
+		rb_add(&entry->t, &alloc_list, memcheck_ptr_less);
 	} else
 		entry->ptr = buffer;
 	entry->size = size;
@@ -691,7 +698,7 @@ mem_log_init(const char* prog_name, const char *banner)
 	if (log_op)
 		fclose(log_op);
 
-	log_name_len = strlen(KA_TMP_DIR) + 1 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* KA_TMP_DIR + "/" + prog_name + "_mem." + PID + ".log" + '\0" */
+	log_name_len = strlen(tmp_dir) + 1 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* tmp_dir + "/" + prog_name + "_mem." + PID + ".log" + '\0" */
 	log_name = malloc(log_name_len);
 	if (!log_name) {
 		log_message(LOG_INFO, "Unable to malloc log file name");
@@ -699,7 +706,7 @@ mem_log_init(const char* prog_name, const char *banner)
 		return;
 	}
 
-	snprintf(log_name, log_name_len, KA_TMP_DIR "/%s_mem.%d.log", prog_name, getpid());
+	snprintf(log_name, log_name_len, "%s/%s_mem.%d.log", tmp_dir, prog_name, getpid());
 	log_op = fopen_safe(log_name, "w");
 	if (log_op == NULL) {
 		log_message(LOG_INFO, "Unable to open %s for appending", log_name);

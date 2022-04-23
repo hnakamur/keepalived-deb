@@ -37,6 +37,11 @@
 
 #include "vector.h"
 #include "warnings.h"
+#include "sockaddr.h"
+#include "timer.h"
+#if defined _EINTR_DEBUG_
+#include "logger.h"
+#endif
 
 #define STR(x)  #x
 
@@ -48,14 +53,6 @@
 /* Evaluates to -1, 0 or 1 as appropriate.
  * Avoids a - b <= 0 producing "warning: assuming signed overflow does not occur when simplifying ‘X - Y <= 0’ to ‘X <= Y’ [-Wstrict-overflow]" */
 #define less_equal_greater_than(a,b)	({ typeof(a) _a = (a); typeof(b) _b = (b); (_a) < (_b) ? -1 : (_a) == (_b) ? 0 : 1; })
-
-#if defined RUN_DIR_ROOT
-#define RUN_DIR			RUN_DIR_ROOT "/run/"
-#elif defined GNU_STD_PATHS
-#define RUN_DIR			LOCAL_STATE_DIR "/run/"
-#else
-#define RUN_DIR			_PATH_VARRUN
-#endif
 
 #ifdef _WITH_PERF_
 typedef enum {
@@ -86,7 +83,7 @@ extern bool do_eintr_debug;
  * If check_EINTR is defined as false, gcc will optimise out the
  * test, and remove any surrounding while loop such as:
  * while (recvmsg(...) == -1 && check_EINTR(errno)); */
-#if defined DEBUG_EINTR
+#if defined _EINTR_DEBUG_
 static inline bool
 check_EINTR(int xx)
 {
@@ -139,8 +136,9 @@ static inline int __ip6_addr_equal(const struct in6_addr *a1,
 		 (a1->s6_addr32[3] ^ a2->s6_addr32[3])) == 0);
 }
 
-static inline bool sockstorage_equal(const struct sockaddr_storage *s1,
-				    const struct sockaddr_storage *s2)
+/* sockstorage_equal is similar to inet_sockaddcmp except the former also compares the port */
+static inline bool __attribute__((pure))
+sockstorage_equal(const sockaddr_t *s1, const sockaddr_t *s2)
 {
 	if (s1->ss_family != s2->ss_family)
 		return false;
@@ -149,7 +147,6 @@ static inline bool sockstorage_equal(const struct sockaddr_storage *s1,
 		const struct sockaddr_in6 *a1 = (const struct sockaddr_in6 *) s1;
 		const struct sockaddr_in6 *a2 = (const struct sockaddr_in6 *) s2;
 
-//		if (IN6_ARE_ADDR_EQUAL(a1, a2) && (a1->sin6_port == a2->sin6_port))
 		if (__ip6_addr_equal(&a1->sin6_addr, &a2->sin6_addr) &&
 		    (a1->sin6_port == a2->sin6_port))
 			return true;
@@ -248,6 +245,7 @@ extern mode_t umask_val;
 #ifdef _WITH_PERF_
 extern perf_t perf_run;
 #endif
+extern const char *tmp_dir;
 
 /* Prototypes defs */
 extern void dump_buffer(const char *, size_t, FILE *, int);
@@ -265,25 +263,26 @@ extern void run_perf(const char *, const char *, const char *);
 extern uint16_t in_csum(const uint16_t *, size_t, uint32_t, uint32_t *);
 extern const char *inet_ntop2(uint32_t);
 extern bool inet_stor(const char *, uint32_t *);
-extern int domain_stosockaddr(const char *, const char *, struct sockaddr_storage *);
-extern bool inet_stosockaddr(const char *, const char *, struct sockaddr_storage *);
-extern void inet_ip4tosockaddr(const struct in_addr *, struct sockaddr_storage *);
-extern void inet_ip6tosockaddr(const struct in6_addr *, struct sockaddr_storage *);
+extern int domain_stosockaddr(const char *, const char *, sockaddr_t *);
+extern bool inet_stosockaddr(const char *, const char *, sockaddr_t *);
+extern void inet_ip4tosockaddr(const struct in_addr *, sockaddr_t *);
+extern void inet_ip6tosockaddr(const struct in6_addr *, sockaddr_t *);
 extern bool check_valid_ipaddress(const char *, bool);
-extern const char *inet_sockaddrtos(const struct sockaddr_storage *);
-extern const char *inet_sockaddrtopair(const struct sockaddr_storage *);
-extern const char *inet_sockaddrtotrio(const struct sockaddr_storage *, uint16_t);
-extern char *inet_sockaddrtotrio_r(const struct sockaddr_storage *, uint16_t, char *);
-extern uint16_t inet_sockaddrport(const struct sockaddr_storage *) __attribute__ ((pure));
-extern void inet_set_sockaddrport(struct sockaddr_storage *, uint16_t);
-extern uint32_t inet_sockaddrip4(const struct sockaddr_storage *) __attribute__ ((pure));
-extern int inet_sockaddrip6(const struct sockaddr_storage *, struct in6_addr *);
+extern const char *inet_sockaddrtos(const sockaddr_t *);
+extern const char *inet_sockaddrtopair(const sockaddr_t *);
+extern const char *inet_sockaddrtotrio(const sockaddr_t *, uint16_t);
+extern char *inet_sockaddrtotrio_r(const sockaddr_t *, uint16_t, char *);
+extern uint16_t inet_sockaddrport(const sockaddr_t *) __attribute__ ((pure));
+extern void inet_set_sockaddrport(sockaddr_t *, uint16_t);
+extern uint32_t inet_sockaddrip4(const sockaddr_t *) __attribute__ ((pure));
+extern int inet_sockaddrip6(const sockaddr_t *, struct in6_addr *);
 extern int inet_inaddrcmp(int, const void *, const void *); __attribute__ ((pure))
-extern int inet_sockaddrcmp(const struct sockaddr_storage *, const struct sockaddr_storage *) __attribute__ ((pure));
+extern int inet_sockaddrcmp(const sockaddr_t *, const sockaddr_t *) __attribute__ ((pure));
 extern void format_mac_buf(char *, size_t, const unsigned char *, size_t);
 extern const char *get_local_name(void) __attribute__((malloc));
 extern bool string_equal(const char *, const char *) __attribute__ ((pure));
 extern int integer_to_string(const int, char *, size_t);
+extern char *ctime_us_r(const timeval_t *, char *);
 extern FILE *fopen_safe(const char *, const char *) __attribute__((malloc));
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
@@ -295,6 +294,8 @@ extern int memcmp_constant_time(const void *, const void *, size_t) __attribute_
 #if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 extern bool keepalived_modprobe(const char *);
 #endif
+extern void set_tmp_dir(void);
+extern const char *make_tmp_filename(const char *);
 extern void log_stopping(void);
 
 #endif

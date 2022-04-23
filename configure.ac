@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.2.4], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.2.7], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
@@ -119,6 +119,7 @@ AH_BOTTOM(
 #endif])
 
 AC_CONFIG_FILES([Makefile keepalived/Makefile lib/Makefile keepalived/core/Makefile keepalived.spec \
+		 Dockerfile \
 		 keepalived/check/Makefile keepalived/vrrp/Makefile \
 		 keepalived/bfd/Makefile doc/Makefile bin_install/Makefile keepalived/dbus/Makefile \
 		 keepalived/etc/Makefile keepalived/etc/init/Makefile keepalived/etc/init.d/Makefile \
@@ -150,6 +151,8 @@ AC_ARG_ENABLE(bfd,
 AC_ARG_WITH(kernel-dir,
   [AS_HELP_STRING([--with-kernel-dir=DIR], [path to linux kernel source directory])],
   [AS_HELP_STRING([kernel_src_path="$withval"],], [[kernel_src_path=""])])
+AC_ARG_WITH(samples-dir,
+  [AS_HELP_STRING([--with-samples-dir=DIR], [specify location to install sample config files [SYSCONFDIR/samples]])])
 AC_ARG_ENABLE(fwmark,
   [AS_HELP_STRING([--disable-fwmark], [compile without SO_MARK support])])
 AC_ARG_ENABLE(snmp,
@@ -195,6 +198,8 @@ AC_ARG_ENABLE(routes,
   [AS_HELP_STRING([--disable-routes], [compile without ip rules/routes])])
 AC_ARG_ENABLE(linkbeat,
   [AS_HELP_STRING([--disable-linkbeat], [build without linkbeat support])])
+AC_ARG_ENABLE(sockaddr_storage,
+  [AS_HELP_STRING([--enable-sockaddr-storage], [build using sockaddr_storage rather than smaller sockaddr for IPv4/6 only])])
 AC_ARG_ENABLE(gnu-std-paths,
   [AS_HELP_STRING([--enable-gnu-std-paths], [use GNU standard paths for pid files etc])])
 AC_ARG_ENABLE(dynamic-linking,
@@ -220,8 +225,7 @@ AC_ARG_ENABLE(track-process,
 AC_ARG_ENABLE(systemd,
   [AS_HELP_STRING([--disable-systemd], [build without systemd integration])])
 AC_ARG_WITH(run-dir,
-  [AS_HELP_STRING([--with-run-dir=PATH_TO_RUN], [specify directory where /run is located])],
-  [RUN_DIR_SPECIFIED=Y], [RUN_DIR_SPECIFIED=N])
+  [AS_HELP_STRING([--with-run-dir=PATH_TO_RUN], [DEPRECATED - use --runstatedir=PATH_TO_RUN])])
 AC_ARG_WITH(tmp-dir,
   [AS_HELP_STRING([--with-tmp-dir=PATH_TO_TMP], [specify directory where run-time temporary files are to be located])],
   [TMP_DIR_SPECIFIED=Y], [TMP_DIR_SPECIFIED=N])
@@ -314,9 +318,10 @@ AC_ARG_ENABLE(force-conversion-checks,
   [AS_HELP_STRING([--enable-force-conversion-checks], [compile with conversion warnings])])
 AC_ARG_ENABLE(Werror,
   [AS_HELP_STRING([--enable-Werror], [compile with warnings being errors])])
-
 AC_ARG_WITH([systemdsystemunitdir],
-	AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files])])
+  [AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files])])
+AC_ARG_WITH([dbus-data-dir],
+  [AS_HELP_STRING([--with-dbus-data-dir=DIR], [Directory for Dbus interface files])])
 
 # Set the kernel headers path
 if test -n "$kernel_src_path"; then
@@ -336,6 +341,14 @@ elif test ! -d /usr/include/linux -a \
 else
   kernelinc=
 fi
+
+AS_IF([test -n "$with_samples_dir"],
+  [
+    AS_IF([test $with_samples_dir = yes -o $with_samples_dir = no],
+	  [AC_MSG_ERROR([--with-samples-dir requires a directory])])
+    SAMPLES_DIR=$with_samples_dir
+  ],[SAMPLES_DIR="\$(sysconfdir)/$PACKAGE/samples"])
+AC_SUBST([SAMPLES_DIR])
 
 CPPFLAGS="$kernelinc $CPPFLAGS"
 
@@ -507,9 +520,38 @@ AS_IF([test .$enable_debug = .yes],
       ])
   ])
 
+dnl --with-run-dir duplicates standard --runstatedir
+AS_IF([test .$with_run_dir != .], [AC_MSG_ERROR([--with-run-dir is deprecated, use --runstatedir=${with_run_dir}/run instead])])
+
 dnl -- Do we want -Wcast-align=strict?
 AS_IF([test .$enable_strict_cast_align = .yes],
       [WARNINGS_STD=$(echo $WARNINGS_STD | sed -e "s/cast-align /cast-align=strict /")])
+
+#### find the actual value for $datadir that we'll end up with
+##   (I know this is broken and should be done in the Makefile, but
+##    that's a major pain and almost nobody actually seems to care)
+##   In fact the "Built Sources Example" section of the automake
+##    manual suggests using configure as an option.
+AS_AC_EXPAND(EXPANDED_DATADIR, "$datadir")
+
+AS_IF([test .$with_dbus_data_dir != .],
+  [DBUS_DATADIR=$with_dbus_data_dir], [DBUS_DATADIR=$EXPANDED_DATADIR])
+AC_SUBST(DBUS_DATADIR)
+AC_DEFINE_UNQUOTED(DBUS_DATADIR,"$DBUS_DATADIR", [Directory for installing DBUS data files])
+
+dnl We want /run to be the default runstatedir, not ${localstatedir}/run which defaults to /usr/local/var/run
+dnl We want to know if --runstatedir or equivalent was specified
+echo "$ac_configure_args" | grep -q "'--r"
+RUNSTATEDIR_SPECIFIED=$?
+AS_IF([test $RUNSTATEDIR_SPECIFIED -eq 1],
+  [
+    echo "$ac_configure_args" | grep -q "'-runstatedir"
+    RUNSTATEDIR_SPECIFIED=$?
+  ])
+AS_IF([test $RUNSTATEDIR_SPECIFIED -eq 0],
+  [AS_AC_EXPAND(RUNSTATEDIR, "$runstatedir")],
+  [RUNSTATEDIR=/run])
+AC_DEFINE_UNQUOTED(RUNSTATEDIR, "$RUNSTATEDIR", [Directory for runtime state files])
 
 GCC_LTO=no
 AS_IF([test $CC = gcc],
@@ -669,11 +711,6 @@ fi
 
 CONFIG_WARNINGS=lib/config_warnings.h.in
 
-# Save (or restore) lib/config_warnings.h.in
-AS_IF([test ! -f ${CONFIG_WARNINGS}.sav],
-      [cp -p ${CONFIG_WARNINGS} ${CONFIG_WARNINGS}.sav],
-      [cp -p ${CONFIG_WARNINGS}.sav ${CONFIG_WARNINGS}])
-
 SAV_CFLAGS="$CFLAGS"
 for WARN in $WARNINGS_ENABLED
 do
@@ -746,6 +783,35 @@ AS_IF([test .$HAVE_WARNING_STRICT_OVERFLOW = .yes],
       ]
      )
 CFLAGS="$SAV_CFLAGS"
+
+dnl ---- [ Is function __attribute__((error(msg)) supported? ] ----
+AC_MSG_CHECKING([for function __attribute__((error(msg))) support])
+AC_COMPILE_IFELSE(
+  [
+    AC_LANG_PROGRAM(
+      [[
+        #include <stdio.h>
+
+        static int func(int i) __attribute__((error("deliberate error")))
+	{
+	  return i * 2;
+	}
+      ]],
+      [[
+	int i = func(2);
+	printf("%d", i);
+      ]]
+    )
+  ],
+  [
+    dnl -- The logic is inverted here. If the attribute is supported,
+    dnl -- the compilation will fail!
+    AC_MSG_RESULT([no])
+  ],
+  [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([_HAVE_FUNCTION_ATTRIBUTE_ERROR_], [ 1 ], [Define to 1 if function __attribute__((error(msg))) supported])
+  ])
 
 dnl ---- [ Do we want stricter configuration checking? ] ----
 STRICT_CONFIG=No
@@ -1066,6 +1132,19 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
   [LINE_type="unsigned int"], [LINE_type="int"])
 AC_DEFINE_UNQUOTED([LINE_type], [ $LINE_type ], [The type of parameter __line passed to __assert_fail()])
 
+# If sizeof(time_t) is only 4 bytes, then adding two times after Sat 10 Jan 13:37:04 GMT 2004
+#   results in overflow.
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM(
+    [[#include <time.h>]],
+    [[
+      /* This is a bit of a trick. If sizeof(time_t) <= 4, then
+         the size of the array is negative, giving a compile error */
+      char arr[(int)sizeof(time_t) - 5];
+    ]])],
+  [],
+  [AC_DEFINE([TIME_T_ADD_OVERFLOWS], [ 1 ], [Define to 1 if sizeof(time_t) is 4 bytes])])
+
 dnl Check if libc supports __always_inline
 dnl See glibc sys/cdefs.h definition of __always_inline and comment
 SAV_CFLAGS="$CFLAGS"
@@ -1125,6 +1204,35 @@ AC_CHECK_DECLS([ETHERTYPE_IPV6], [],
     AC_DEFINE([ETHERTYPE_IPV6], [0x86dd], [Defined here if not found in <net/ethernet.h>.])
   ],
   [[#include <net/ethernet.h>]])
+
+# IPV6_MULTICAST_ALL - added Linux v4.20
+AC_CHECK_DECLS([IPV6_MULTICAST_ALL],
+  [
+    add_system_opt([IPV6_MULTICAST_ALL])
+
+    # We can't include <linux/in6.h> before <netinet/in.h> otherwise there a a lot of
+    #   duplicate definitions. If we include them the other way around and <netinet/in.h>
+    #   doesn't define IPV6_MULTICAST_ALL, then we don't get the definition from
+    #   <linux/in6.h> due to the UAPI guards to stop compile errors.
+    # IPV6_MULTICAST_ALL is defined in <linux/in6.h>, and if it isn't defined in
+    #   <netinet/in.h> we must create our own definition.
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE(
+      [
+	#include <netinet/in.h>
+	int main(void)
+	{
+	  int val = IPV6_MULTICAST_ALL;
+	}
+      ])], [],
+      [
+        # Find the defined value of IPV6_MULTICAST_ALL
+	INCLUDE_FILES=`echo -e "#include <linux/in6.h>\n int main(void) { int var = IPV6_MULTICAST_ALL; }" | $CC -H -E - -o/dev/null 2>&1 | sed -e "s/^[.]*//" | grep "^ "`
+	IPV6_MCA=`grep "#define.*IPV6_MULTICAST_ALL" $INCLUDE_FILES | sed -e "s/.*IPV6_MULTICAST_ALL[[ \t]]*//"`
+	AC_DEFINE_UNQUOTED([IPV6_MULTICAST_ALL], [$IPV6_MCA], [Defined in linux/in6.h but not in netinet/in.h])
+      ])
+  ],
+  [],
+  [[#include <linux/in6.h>]])
 
 dnl ----[ Checks for openssl ]----
 # check for openssl headers
@@ -1254,6 +1362,15 @@ AS_IF([test .$ac_cv_func_OPENSSL_init_crypto = .yes],
       ])
 unset LIBS
 
+dnl ----[ Check if libkmod available ]----
+$PKG_CONFIG --exists libkmod
+AS_IF([ test $? -eq 0 ],
+  [
+    AC_DEFINE([_HAVE_LIBKMOD_], [ 1 ], [Define to 1 if have libkmod])
+    add_pkg_config([libkmod])
+    add_system_opt([LIBKMOD])
+  ])
+
 dnl ----[ Check for IPv4 devconf netlink support ]----
 IPV4_DEVCONF=No
 if test .$enable_vrrp != .no; then
@@ -1354,11 +1471,14 @@ AM_CONDITIONAL([LIBNL3], [test $NETLINK_VER -eq 3])
 AM_CONDITIONAL([LIBNL_DYNAMIC], [test .$enable_lvs != .no -a .$enable_libnl_dynamic = .yes -a $NETLINK_VER -ne 0])
 unset LIBS
 
+MAGIC=0
 AC_CHECK_LIB(magic, magic_open,
   [
     AC_DEFINE([_HAVE_LIBMAGIC_], [ 1 ], [Define to 1 if have magic library])
     add_to_var([KA_LIBS], [-lmagic])
+    MAGIC=1
   ])
+AM_CONDITIONAL([MAGIC], [test $MAGIC -eq 1])
 unset LIBS
 
 dnl -- Check for the following variables introduced at various times into Linux
@@ -1611,7 +1731,7 @@ if test .${enable_nftables} != .no; then
       # nft prior to version 0.8.3 does not support type ifname in sets. We can't check the version of
       #  nft, but we can check the version of libnftnl. nft v0.8.3 required libnftnl v1.0.9, but so did
       #  nft v0.8.2. So play safe, and require the next version.
-      LIBNFTNL_VERSION=`printf "0x%2.2x%2.2x%2.2xU" \`pkg-config --modversion libnftnl | sed -e "s/\./ /g"\``
+      LIBNFTNL_VERSION=`printf "0x%2.2x%2.2x%2.2xU" \`$PKG_CONFIG --modversion libnftnl | sed -e "s/\./ /g"\``
       AC_DEFINE_UNQUOTED([LIBNFTNL_VERSION], [ $LIBNFTNL_VERSION ], [libnftnl version in hex])
 
       add_pkg_config([libnftnl])
@@ -1636,6 +1756,10 @@ if test .${enable_nftables} != .no; then
 	])
       # nft dup from Linux 4.3
       AC_CHECK_DECLS([NFTA_DUP_MAX], [], [],
+        [#include <linux/netfilter/nf_tables.h>])
+
+      # nft meta oifkind from Linux 5.1
+      AC_CHECK_DECLS([NFT_META_OIFKIND], [], [],
         [#include <linux/netfilter/nf_tables.h>])
 
       # NFT_USERDATA_MAXLEN since Linux 3.15. Check nftnl_udata_buf_alloc for libnftnl support of userdata
@@ -1670,7 +1794,7 @@ if test .${enable_nftables} != .no; then
       AS_IF([test $NFT_RANGE_CONCATS_OK -eq 1],
 	    [AC_DEFINE([NFT_RANGE_CONCATS], [ 1 ], [Define to 1 if can use concats with ranges in nftables])])
 
-      # NFTA_SET_EXPR since Linux 5.7, libnftnl 1.1.7, nft 0.9.5 - counters on set elements
+      # NFTNL_SET_EXPR since Linux 5.7, libnftnl 1.1.7, nft 0.9.5 - counters on set elements
       AC_CHECK_DECLS([NFTNL_SET_EXPR], [], [], [[#include <libnftnl/set.h>]])
     fi
   fi
@@ -2025,6 +2149,13 @@ AS_IF([test .$enable_linkbeat = .no],
     AC_DEFINE([_WITH_LINKBEAT_], [ 1 ], [Define to 1 if have linkbeat support])
   ])
 
+dnl ----[ Check if using sockaddr_storage wanted ]----
+AS_IF([test .$enable_sockaddr_storage = .yes],
+  [
+    AC_DEFINE([USE_SOCKADDR_STORAGE], [ 1 ], [Define to 1 if use sockaddr_storage])
+    add_config_opt([SOCKADDR_STORAGE])
+  ])
+
 dnl ----[ Checks for kernel IFLA_INET6_ADDR_GEN_MODE support ]----
 SAV_CPPFLAGS="$CPPFLAGS"
 CPPFLAGS="$CPPFLAGS $kernelinc"
@@ -2110,6 +2241,15 @@ if test "$enable_snmp" = yes -o \
 
   # net-snmp-config can add -I/usr/include, so remove it
   NETSNMP_CFLAGS=`echo $NETSNMP_CFLAGS " " | sed -e "s:-I */usr/include ::"`
+
+  # net-snmp-config --base-cflags can specify include directories that don't
+  # exist on the build system
+  NEW_FLAGS=
+  for f in `echo $NETSNMP_CFLAGS | tr " " "\n" | grep "^-I"`; do
+	  DIR=`echo $f | sed -e "s/^-I *//"`
+	  AS_IF([ test -d $DIR ], [ NEW_FLAGS+=" -I$DIR" ])
+  done
+  NETSNMP_CFLAGS=$NEW_FLAGS
 
   # net-snmp-config can specify LTO flags; remove them so they are only
   # included if --enable-lto is specified
@@ -2341,18 +2481,7 @@ dnl -- Do we want GNU standard paths (moves .pid files)
 GNU_STD_PATHS=No
 if test "${enable_gnu_std_paths}" = "yes"; then
   AC_DEFINE([GNU_STD_PATHS], [ 1 ], [set to enforce GNU standard paths, for .pid files etc])
-  RUN_DIR=$localstatedir
-elif test $RUN_DIR_SPECIFIED = Y -a .${with_run_dir} != .no; then
-  AS_IF([test `expr substr ${with_run_dir} 1 1` != /], [AC_MSG_ERROR([run-dir must be absolute path])])
-  # Remove any trailing /run and / - someone will include then sometime
-  RUN_DIR=`echo ${with_run_dir} | sed -e "s:/run/*$::" -e "s:/*$::"`
-elif test -d /run; then
-  RUN_DIR=
-else
-  RUN_DIR=/var
 fi
-AC_DEFINE_UNQUOTED([RUN_DIR_ROOT], [ "${RUN_DIR}" ], [Parent directory of /run])
-AC_SUBST([RUN_DIR_ROOT], [${RUN_DIR}])
 
 if test $TMP_DIR_SPECIFIED = Y; then
   AS_IF([test `expr substr ${with_tmp_dir} 1 1` != /], [AC_MSG_ERROR([tmp-dir must be absolute path])])
@@ -2361,9 +2490,7 @@ if test $TMP_DIR_SPECIFIED = Y; then
 else
   KA_TMP_DIR=/tmp
 fi
-KA_TMP_DIR_LEN=`expr length $KA_TMP_DIR`
 AC_DEFINE_UNQUOTED([KA_TMP_DIR], [ "${KA_TMP_DIR}" ], [Location for temporary files])
-AC_DEFINE_UNQUOTED([KA_TMP_DIR_LEN], [ ${KA_TMP_DIR_LEN} ], [Length of KA_TMP_DIR])
 AC_SUBST([KA_TMP_DIR], [${KA_TMP_DIR}])
 
 dnl - Check type of rlim_t for printf() - this check needs to be late on
@@ -2386,6 +2513,21 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
   [AC_DEFINE([PRI_rlim_t], ["llu"], [Define printf format specifier for rlim_t])],
   )
 CFLAGS="$SAV_CFLAGS"
+
+dnl ---[ Do we need __FAVOR_BSD for tcp.h and udp.h header files to be usable? ]---
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+  #include <netinet/tcp.h>
+  int
+  main(int argc, char **argv)
+  {
+    struct tcphdr hdr;
+
+    hdr.th_dport = argc;
+  }
+  ]])],
+  [],
+  [AC_DEFINE([NEED_FAVOR_BSD], [ 1 ], [Define if using VERY old (i.e. pre 2.19 - 2014) glibc])],
+  )
 
 dnl ---[ check for sphinx-build executable ]----
 if test -z "$SPHINXBUILD"; then
@@ -2761,12 +2903,16 @@ dnl ----[Default runtime options (in /etc/sysconfig/keepalived)]----
 AC_SUBST([KEEPALIVED_RUNTIME_OPTIONS], ["$default_runtime_options"])
 
 dnl ----[Default keepalived configuration file]----
-AS_IF([test $default_config_file],
+AS_IF([test -n "$default_config_file"],
   [
     AS_IF([test $default_config_file = yes -o $default_config_file = no],
 	  [AC_MSG_ERROR([A filename must be specified for default-config-file])])
-    CONFIG_FILE=$default_config_file
-    add_config_opt([DEFAULT_CONFIG_FILE=${default_config_file}])
+    FIRST_CHAR=`echo $default_config_file | $SED -e "s/\(.\).*/\1/"`
+    AS_IF([test $FIRST_CHAR = / -o $FIRST_CHAR = '$' ],
+      [CONFIG_FILE=$default_config_file],
+      [CONFIG_FILE="\$(sysconfdir)/$PACKAGE/$default_config_file"])
+    add_config_opt([DEFAULT_CONFIG_FILE=$CONFIG_FILE])
+    default_config_file=$CONFIG_FILE
   ],
   [default_config_file="\$(sysconfdir)/$PACKAGE/$PACKAGE.conf"])
 dir=`echo $default_config_file | $SED -e "s|/[[^/]]*$||"`
@@ -2775,11 +2921,24 @@ AC_SUBST([DEFAULT_CONFIG_FILE], [$default_config_file])
 AC_SUBST([DEFAULT_CONFIG_DIR], [${dir}])
 AC_SUBST([DEFAULT_CONFIG_FILENAME], [${name}])
 # Change any make $(...) variable to the matching shell variable and substitute
-default_config_file=`echo $default_config_file | $SED -e "s|\\\$(\(.*\))|\\\${\1}|"`
-eval dcf=`echo $default_config_file`
-# Remove a leading ${prefix} since that is not part of the real file name
-dcf=`echo $dcf | $SED -e "s|^\\\${prefix}||"`
+default_config_file=`echo $default_config_file | $SED -e "s|\\\$(\([[^)]]*\))|\\\${\1}|g"`
+dcf=$default_config_file
+dcf_prev=x$dcf
+while [[ $dcf != $dcf_prev ]]; do
+  dcf_prev=$dcf
+  dcf=`echo $dcf | $SED -e "s|^\\\${prefix}|${ac_default_prefix}|"`
+  dcf=`eval echo $dcf`
+done
 AC_DEFINE_UNQUOTED([DEFAULT_CONFIG_FILE], ["$dcf"], [The default configuration file])
+
+# Remove a leading ${prefix} since that is not part of the old file name
+eval dcf_old=`echo $default_config_file`
+dcf_old=`echo $dcf_old | $SED -e "s|^\\\${prefix}||"`
+AS_IF([test .$dcf != .$dcf_old],
+  [
+    AC_DEFINE_UNQUOTED([OLD_DEFAULT_CONFIG_FILE], ["$dcf_old"], [The old default configuration file])
+    AC_SUBST([OLD_DEFAULT_CONFIG_FILE], [$dcf_old])
+  ])
 
 if test -z "$INIT_TYPE"; then
   INIT_TYPE=undetected
@@ -2816,9 +2975,6 @@ KA_LDFLAGS=`echo $KA_LDFLAGS | sed -e "s/  */ /g" -e "s/^ //" -e "s/ $//"`
 KA_LIBS=`echo $KA_LIBS | sed -e "s/  */ /g" -e "s/^ //" -e "s/ $//"`
 
 AC_OUTPUT
-
-# Restore lib/config_warnings.h.in
-mv ${CONFIG_WARNINGS}.sav ${CONFIG_WARNINGS}
 
 dnl ----[ Display current configuration ]----
 cat <<EOF;

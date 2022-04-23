@@ -1193,4 +1193,5 @@ AC_SUBST([am__tar])
 AC_SUBST([am__untar])
 ]) # _AM_PROG_TAR
 
+m4_include([m4/as-ac-expand.m4])
 m4_include([m4/pkg.m4])

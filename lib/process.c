@@ -56,9 +56,13 @@ static bool process_locked_in_memory;
 static struct rlimit orig_fd_limit;
 
 /* rlimit values to set for child processes */
-bool rlimit_nofile_set;
+static bool rlimit_nofile_set;
 static struct rlimit core;
-bool rlimit_core_set;
+static bool rlimit_core_set;
+
+/* main_pid is used by child processes to ensure the main process
+ * hasn't died during a window when PDEATHSIG is not set */
+pid_t main_pid;
 
 static void
 set_process_dont_swap(size_t stack_reserve)
@@ -161,7 +165,7 @@ set_process_priorities(int realtime_priority, int max_realtime_priority, long mi
 	if (no_swap_stack_size)
 		set_process_dont_swap(no_swap_stack_size);
 }
-RELAX_END
+RELAX_STACK_PROTECTOR_END
 
 void
 reset_process_priorities(void)

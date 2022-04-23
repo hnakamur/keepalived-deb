@@ -33,6 +33,8 @@
 #include <sys/stat.h>
 #include <stdint.h>
 #include <errno.h>
+#include <time.h>
+#include <stdbool.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
@@ -51,6 +53,9 @@
 #include <execinfo.h>
 #include <memory.h>
 #endif
+#ifdef _HAVE_LIBKMOD_
+#include <libkmod.h>
+#endif
 
 /* Local includes */
 #include "utils.h"
@@ -61,10 +66,12 @@
 #include "parser.h"
 #include "logger.h"
 #include "process.h"
+#include "timer.h"
 
 /* global vars */
 unsigned long debug = 0;
 mode_t umask_val = S_IXUSR | S_IRWXG | S_IRWXO;
+const char *tmp_dir;
 
 #ifdef _EINTR_DEBUG_
 bool do_eintr_debug;
@@ -149,7 +156,8 @@ write_stacktrace(const char *file_name, const char *str)
 	unsigned int nptrs;
 	unsigned int i;
 	char **strs;
-	char cmd[40];
+	char *cmd;
+	const char *tmp_filename = NULL;
 
 	nptrs = backtrace(buffer, 100);
 	if (file_name) {
@@ -178,8 +186,17 @@ write_stacktrace(const char *file_name, const char *str)
 	}
 
 	/* gstack() gives a more detailed stacktrace, using gdb and the bt command */
-	sprintf(cmd, "gstack %d >>%s", getpid(), file_name ? file_name : KA_TMP_DIR "/keepalived.stack");
-	system(cmd);
+	if (!file_name)
+		tmp_filename = make_tmp_filename("keepalived.stack");
+	else if (file_name[0] != '/')
+		tmp_filename = make_tmp_filename(file_name);
+	cmd = MALLOC(6 + 1 + PID_MAX_DIGITS + 1 + 2 + ( tmp_filename ? strlen(tmp_filename) : strlen(file_name)) + 1);
+	sprintf(cmd, "gstack %d >>%s", getpid(), tmp_filename ? tmp_filename : file_name);
+
+	i = system(cmd);	/* We don't care about return value but gcc thinks we should */
+
+	FREE(cmd);
+	FREE_CONST_PTR(tmp_filename);
 }
 #endif
 
@@ -194,7 +211,11 @@ make_file_name(const char *name, const char *prog, const char *namespace, const 
 	if (!name)
 		return NULL;
 
-	len = strlen(name);
+	if (name[0] != '/')
+		len = strlen(tmp_dir) + 1;
+	else
+		len = 0;
+	len += strlen(name);
 	if (prog)
 		len += strlen(prog) + 1;
 	if (namespace)
@@ -205,7 +226,14 @@ make_file_name(const char *name, const char *prog, const char *namespace, const 
 	file_name = MALLOC(len + 1);
 	dir_end = strrchr(name, '/');
 	extn_start = strrchr(dir_end ? dir_end : name, '.');
-	strncpy(file_name, name, extn_start ? (size_t)(extn_start - name) : len);
+
+	if (name[0] != '/') {
+		strcpy(file_name, tmp_dir);
+		strcat(file_name, "/");
+	} else
+		file_name[0] = '\0';
+
+	strncat(file_name, name, extn_start ? (size_t)(extn_start - name) : len);
 
 	if (prog) {
 		strcat(file_name, "_");
@@ -464,9 +492,9 @@ inet_stor(const char *addr, uint32_t *range_end)
 #endif
 }
 
-/* Domain to sockaddr_storage */
+/* Domain to sockaddr_ka */
 int
-domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage *addr)
+domain_stosockaddr(const char *domain, const char *port, sockaddr_t *addr)
 {
 	struct addrinfo *res = NULL;
 	unsigned port_num;
@@ -488,7 +516,7 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 	/* Tempting as it is to do something like:
 	 *	*(struct sockaddr_in6 *)addr = *(struct sockaddr_in6 *)res->ai_addr;
 	 *  the alignment of struct sockaddr (short int) is less than the alignment of
-	 *  struct sockaddr_storage (long).
+	 *  sockaddr_t (long).
 	 */
 	memcpy(addr, res->ai_addr, res->ai_addrlen);
 
@@ -504,10 +532,10 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 	return 0;
 }
 
-/* IP string to sockaddr_storage
+/* IP string to sockaddr_ka
  *   return value is "error". */
 bool
-inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr)
+inet_stosockaddr(const char *ip, const char *port, sockaddr_t *addr)
 {
 	void *addr_ip;
 	const char *cp;
@@ -554,18 +582,18 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	return false;
 }
 
-/* IPv4 to sockaddr_storage */
+/* IPv4 to sockaddr_ka */
 void
-inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr)
+inet_ip4tosockaddr(const struct in_addr *sin_addr, sockaddr_t *addr)
 {
 	struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 	addr4->sin_family = AF_INET;
 	addr4->sin_addr = *sin_addr;
 }
 
-/* IPv6 to sockaddr_storage */
+/* IPv6 to sockaddr_ka */
 void
-inet_ip6tosockaddr(const struct in6_addr *sin_addr, struct sockaddr_storage *addr)
+inet_ip6tosockaddr(const struct in6_addr *sin_addr, sockaddr_t *addr)
 {
 	struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 	addr6->sin6_family = AF_INET6;
@@ -616,7 +644,7 @@ check_valid_ipaddress(const char *str, bool allow_subnet_mask)
 
 /* IP network to string representation */
 static char *
-inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
+inet_sockaddrtos2(const sockaddr_t *addr, char *addr_str)
 {
 	const void *addr_ip;
 
@@ -635,7 +663,7 @@ inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
 }
 
 const char *
-inet_sockaddrtos(const struct sockaddr_storage *addr)
+inet_sockaddrtos(const sockaddr_t *addr)
 {
 	static char addr_str[INET6_ADDRSTRLEN];
 	inet_sockaddrtos2(addr, addr_str);
@@ -643,7 +671,7 @@ inet_sockaddrtos(const struct sockaddr_storage *addr)
 }
 
 uint16_t __attribute__ ((pure))
-inet_sockaddrport(const struct sockaddr_storage *addr)
+inet_sockaddrport(const sockaddr_t *addr)
 {
 	if (addr->ss_family == AF_INET6) {
 		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
@@ -657,7 +685,7 @@ inet_sockaddrport(const struct sockaddr_storage *addr)
 }
 
 void
-inet_set_sockaddrport(struct sockaddr_storage *addr, uint16_t port)
+inet_set_sockaddrport(sockaddr_t *addr, uint16_t port)
 {
 	if (addr->ss_family == AF_INET6) {
 		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
@@ -669,7 +697,7 @@ inet_set_sockaddrport(struct sockaddr_storage *addr, uint16_t port)
 }
 
 const char *
-inet_sockaddrtopair(const struct sockaddr_storage *addr)
+inet_sockaddrtopair(const sockaddr_t *addr)
 {
 	char addr_str[INET6_ADDRSTRLEN];
 	static char ret[sizeof(addr_str) + 8];	/* '[' + addr_str + ']' + ':' + 'nnnnn' */
@@ -682,7 +710,7 @@ inet_sockaddrtopair(const struct sockaddr_storage *addr)
 }
 
 char *
-inet_sockaddrtotrio_r(const struct sockaddr_storage *addr, uint16_t proto, char *buf)
+inet_sockaddrtotrio_r(const sockaddr_t *addr, uint16_t proto, char *buf)
 {
 	char addr_str[INET6_ADDRSTRLEN];
 	const char *proto_str =
@@ -698,7 +726,7 @@ inet_sockaddrtotrio_r(const struct sockaddr_storage *addr, uint16_t proto, char 
 }
 
 const char *
-inet_sockaddrtotrio(const struct sockaddr_storage *addr, uint16_t proto)
+inet_sockaddrtotrio(const sockaddr_t *addr, uint16_t proto)
 {
 	static char ret[SOCKADDRTRIO_STR_LEN];
 
@@ -708,7 +736,7 @@ inet_sockaddrtotrio(const struct sockaddr_storage *addr, uint16_t proto)
 }
 
 uint32_t __attribute__ ((pure))
-inet_sockaddrip4(const struct sockaddr_storage *addr)
+inet_sockaddrip4(const sockaddr_t *addr)
 {
 	if (addr->ss_family != AF_INET)
 		return 0xffffffff;
@@ -717,7 +745,7 @@ inet_sockaddrip4(const struct sockaddr_storage *addr)
 }
 
 int
-inet_sockaddrip6(const struct sockaddr_storage *addr, struct in6_addr *ip6)
+inet_sockaddrip6(const sockaddr_t *addr, struct in6_addr *ip6)
 {
 	if (addr->ss_family != AF_INET6)
 		return -1;
@@ -757,8 +785,9 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 	return -2;
 }
 
+/* inet_sockaddcmp is similar to sockstorage_equal except the latter also compares the port */
 int  __attribute__ ((pure))
-inet_sockaddrcmp(const struct sockaddr_storage *a, const struct sockaddr_storage *b)
+inet_sockaddrcmp(const sockaddr_t *a, const sockaddr_t *b)
 {
 	if (a->ss_family != b->ss_family)
 		return -2;
@@ -915,6 +944,21 @@ integer_to_string(const int value, char *str, size_t size)
 		str[len - (i + 1)] = t % 10 + '0';
 
 	return len;
+}
+
+/* Like ctime_r() but to microseconds and no terminating '\n'.
+   Buf must be at least 32 bytes */
+char *
+ctime_us_r(const timeval_t *timep, char *buf)
+{
+	struct tm tm;
+
+	localtime_r(&timep->tv_sec, &tm);
+	asctime_r(&tm, buf);
+	snprintf(buf + 19, 8, ".%6.6ld", timep->tv_usec);
+	strftime(buf + 26, 6, " %Y", &tm);
+
+	return buf;
 }
 
 /* We need to use O_NOFOLLOW if opening a file for write, so that a non privileged user can't
@@ -1099,6 +1143,57 @@ memcmp_constant_time(const void *s1, const void *s2, size_t n)
  */
 
 #if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
+
+#ifdef _HAVE_LIBKMOD_
+bool
+keepalived_modprobe(const char *mod_name)
+{
+	struct kmod_ctx *ctx;
+	struct kmod_list *list = NULL, *l;
+	int err;
+	int flags;
+	const char *null_config = NULL;
+
+	if (!(ctx = kmod_new(NULL, &null_config))) {
+		log_message(LOG_INFO, "kmod_new failed, err %d - %m", errno);
+
+		return false;
+	}
+
+	kmod_load_resources(ctx);
+
+	err = kmod_module_new_from_lookup(ctx, mod_name, &list);
+	if (list == NULL || err < 0) {
+		log_message(LOG_INFO, "kmod_module_new_from_lookup failed - err %d", -err);
+		kmod_unref(ctx);
+		return false;
+	}
+
+	flags = KMOD_PROBE_APPLY_BLACKLIST_ALIAS_ONLY; // | KMOD_PROBE_FAIL_ON_LOADED;
+	kmod_list_foreach(l, list) {
+		struct kmod_module *mod = kmod_module_get_module(l);
+		err = kmod_module_probe_insert_module(mod, flags, NULL, NULL, NULL, NULL);
+		if (err < 0) {
+			errno = -err;
+			log_message(LOG_INFO, "kmod_module_probe_insert_module %s failed - err %d - %m", kmod_module_get_name(mod), -err);
+			kmod_module_unref(mod);
+			kmod_module_unref_list(list);
+			kmod_unref(ctx);
+			return false;
+		}
+
+		kmod_module_unref(mod);
+	}
+
+	kmod_module_unref_list(list);
+
+	kmod_unref(ctx);
+
+	return true;
+}
+
+#else
+
 static char*
 get_modprobe(void)
 {
@@ -1158,39 +1253,68 @@ keepalived_modprobe(const char *mod_name)
 	sigemptyset(&act.sa_mask);
 	act.sa_flags = 0;
 
-	sigaction ( SIGCHLD, &act, &old_act);
+	sigaction(SIGCHLD, &act, &old_act);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		flush_log_file();
 #endif
 
-	if (!(child = fork())) {
-		args.args = argv;
-		/* coverity[tainted_string] */
-		execv(argv[0], args.execve_args);
-		exit(1);
-	}
+	do {
+		if (!(child = fork())) {
+			args.args = argv;
+			/* coverity[tainted_string] */
+			execv(argv[0], args.execve_args);
+			exit(1);
+		}
 
-	rc = waitpid(child, &status, 0);
+		rc = waitpid(child, &status, 0);
+		if (rc < 0)
+			log_message(LOG_INFO, "modprobe: waitpid error (%s)"
+					    , strerror(errno));
 
-	sigaction ( SIGCHLD, &old_act, NULL);
+		/* It has been reported (see issue #2040) that some modprobes
+		 * do not support the -s option, so try without if we get a
+		 * failure. */
+		if (!WIFEXITED(status) || !WEXITSTATUS(status))
+			break;
 
-	if (rc < 0) {
-		log_message(LOG_INFO, "IPVS: waitpid error (%s)"
-				    , strerror(errno));
-	}
+		if (!argv[2])
+			break;
+
+		argv[1] = mod_name;
+		argv[2] = NULL;
+	 } while (true);
+
+	sigaction(SIGCHLD, &old_act, NULL);
 
 	if (modprobe)
 		FREE(modprobe);
 
-	if (!WIFEXITED(status) || WEXITSTATUS(status)) {
-		return true;
-	}
-
-	return false;
+	return WIFEXITED(status) && !WEXITSTATUS(status);
 }
 #endif
+#endif
+
+void
+set_tmp_dir(void)
+{
+	if (!(tmp_dir = getenv("TMPDIR")) || tmp_dir[0] != '/')
+		tmp_dir = KA_TMP_DIR;
+}
+
+const char *
+make_tmp_filename(const char *file_name)
+{
+	size_t tmp_dir_len = strlen(tmp_dir);
+	char *path = MALLOC(tmp_dir_len + 1 + strlen(file_name) + 1);
+
+	strcpy(path, tmp_dir);
+	path[tmp_dir_len] = '/';
+	strcpy(path + tmp_dir_len + 1, file_name);
+
+	return path;
+}
 
 void
 log_stopping(void)

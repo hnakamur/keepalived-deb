@@ -94,8 +94,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = keepalived/etc/sysconfig
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -170,6 +170,7 @@ CFLAGS = -g -O2
 CPP = gcc -E
 CPPFLAGS =   -D_GNU_SOURCE
 CYGPATH_W = echo
+DBUS_DATADIR = /usr/local/share
 DEFAULT_CONFIG_DIR = $(sysconfdir)/keepalived
 DEFAULT_CONFIG_FILE = $(sysconfdir)/keepalived/keepalived.conf
 DEFAULT_CONFIG_FILENAME = keepalived.conf
@@ -180,6 +181,7 @@ ECHO_N = -n
 ECHO_T = 
 EGREP = /bin/grep -E
 EXEEXT = 
+EXPANDED_DATADIR = /usr/local/share
 GREP = /bin/grep
 HAVE_RPM = No
 HAVE_RPMBUILD = 
@@ -206,19 +208,21 @@ MAKEINFO = ${SHELL} /home/acassen/src/keepalived/build-aux/missing makeinfo
 MKDIR_P = /bin/mkdir -p
 NETSNMP_CONFIG = 
 OBJEXT = o
+OLD_DEFAULT_CONFIG_FILE = /etc/keepalived/keepalived.conf
 PACKAGE = keepalived
 PACKAGE_BUGREPORT = keepalived-users@groups.io
 PACKAGE_NAME = Keepalived
-PACKAGE_STRING = Keepalived 2.2.4
+PACKAGE_STRING = Keepalived 2.2.7
 PACKAGE_TARNAME = keepalived
 PACKAGE_URL = http://www.keepalived.org/
-PACKAGE_VERSION = 2.2.4
+PACKAGE_VERSION = 2.2.7
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
 PKG_CONFIG_PATH = 
 RANLIB = ranlib
-RUN_DIR_ROOT = 
+RUNSTATEDIR = /run
+SAMPLES_DIR = $(sysconfdir)/keepalived/samples
 SED = /bin/sed
 SET_MAKE = 
 SHELL = /bin/bash
@@ -228,7 +232,7 @@ STRIP = strip
 SYSTEMD_EXEC_START_OPTIONS = 
 SYSTEMD_SERVICE_TYPE = forking
 USE_LLD = 
-VERSION = 2.2.4
+VERSION = 2.2.7
 abs_builddir = /home/acassen/src/keepalived/keepalived/etc/sysconfig
 abs_srcdir = /home/acassen/src/keepalived/keepalived/etc/sysconfig
 abs_top_builddir = /home/acassen/src/keepalived
@@ -275,7 +279,7 @@ top_build_prefix = ../../../
 top_builddir = ../../..
 top_srcdir = ../../..
 edit = echo "  EDIT     $@"; \
-	sed \
+	/bin/sed \
 	 -e 's|@KEEPALIVED_RUNTIME_OPTIONS[@]|$(KEEPALIVED_RUNTIME_OPTIONS)|g'
 
 EXTRA_DIST = keepalived.in
