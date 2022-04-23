@@ -105,7 +105,7 @@ dump_bfds_rs_list(FILE *fp, const list_head_t *l)
 }
 
 static bool
-bfd_check_compare(const checker_t *old_c, checker_t *new_c)
+compare_bfd_check(const checker_t *old_c, checker_t *new_c)
 {
 	const bfd_checker_t *old = old_c->data;
 	const bfd_checker_t *new = new_c->data;
@@ -129,6 +129,8 @@ find_checker_tracked_bfd_by_name(char *name)
 	return NULL;
 }
 
+static const checker_funcs_t bfd_checker_funcs = { CHECKER_BFD, free_bfd_check, dump_bfd_check, compare_bfd_check, NULL };
+
 static void
 bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
@@ -138,8 +140,7 @@ bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 	INIT_LIST_HEAD(&new_bfd_checker->e_list);
 
 	/* queue new checker */
-	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker,
-				    NULL, false);
+	new_checker = queue_checker(&bfd_checker_funcs, NULL, new_bfd_checker, NULL, false);
 }
 
 static void
@@ -327,7 +328,7 @@ bfd_check_thread(thread_ref_t thread)
 	bfd_event_t evt;
 
 	bfd_thread = thread_add_read(master, bfd_check_thread, NULL,
-				     thread->u.f.fd, TIMER_NEVER, false);
+				     thread->u.f.fd, TIMER_NEVER, 0);
 
 	if (thread->type != THREAD_READY_READ_FD)
 		return;
@@ -339,7 +340,7 @@ bfd_check_thread(thread_ref_t thread)
 void
 start_bfd_monitoring(thread_master_t *thread_master)
 {
-	thread_add_read(thread_master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER, false);
+	thread_add_read(thread_master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER, 0);
 }
 
 void

@@ -50,24 +50,6 @@ dump_file_check(FILE *fp, const checker_t *checker)
 	conf_write(fp, "     Reloaded = %s", tfp->reloaded ? "Yes" : "No");
 }
 
-static bool
-file_check_compare(const checker_t *old_c, checker_t *new_c)
-{
-	const tracked_file_t *old = old_c->data;
-	tracked_file_t *new = new_c->data;
-
-	if (strcmp(old->file_path, new->file_path))
-		return false;
-	if (old->weight != new->weight)
-		return false;
-	if (old->weight_reverse != new->weight_reverse)
-		return false;
-
-	new->reloaded = true;
-
-	return true;
-}
-
 static void
 track_file_handler(const vector_t *strvec)
 {
@@ -95,6 +77,7 @@ file_check_handler(__attribute__((unused)) const vector_t *strvec)
 	tracked_file_monitor_t *tfile;
 
 	PMALLOC(tfile);
+	tfile->weight = IPVS_WEIGHT_FAULT;
 	INIT_LIST_HEAD(&tfile->e_list);
 	list_add_tail(&tfile->e_list, &rs->track_files);
 }
@@ -115,9 +98,9 @@ track_file_weight_handler(const vector_t *strvec)
 		return;
 	}
 
-	if (!read_int_strvec(strvec, 1, &weight, -IPVS_WEIGHT_MAX, IPVS_WEIGHT_MAX, true)) {
+	if (!read_int_strvec(strvec, 1, &weight, -IPVS_WEIGHT_LIMIT, IPVS_WEIGHT_LIMIT, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "weight for track file must be in "
-				 "[-IPVS_WEIGHT_MAX..IPVS_WEIGHT_MAX] inclusive. Ignoring...");
+				 "[%d..%d] inclusive. Ignoring...", -IPVS_WEIGHT_LIMIT, IPVS_WEIGHT_LIMIT);
 		return;
 	}
 
@@ -152,7 +135,7 @@ file_end_handler(void)
 		return;
 	}
 
-	if (!tfile->weight) {
+	if (tfile->weight == IPVS_WEIGHT_FAULT) {
 		tfile->weight = tfile->file->weight;
 		tfile->weight_reverse = tfile->file->weight_reverse;
 	}
@@ -169,6 +152,8 @@ install_file_check_keyword(void)
 	install_sublevel_end();
 }
 
+static const checker_funcs_t file_checker_funcs = { CHECKER_FILE, free_file_check, dump_file_check, NULL, NULL };
+
 void
 add_rs_to_track_files(void)
 {
@@ -180,14 +165,18 @@ add_rs_to_track_files(void)
 	list_for_each_entry(vs, &check_data->vs, e_list) {
 		list_for_each_entry(rs, &vs->rs, e_list) {
 			list_for_each_entry(tfl, &rs->track_files, e_list) {
-				/* queue new checker */
-				new_checker = queue_checker(free_file_check, dump_file_check, NULL, file_check_compare, tfl->file, NULL, false);
+				/* queue new checker - we don't have a compare function since we don't
+				 * update file checkers that way on a reload. */
+				new_checker = queue_checker(&file_checker_funcs, NULL, tfl->file, NULL, false);
 				new_checker->vs = vs;
 				new_checker->rs = rs;
 
 				/* There is no concept of the checker running, but we will have
 				 * checked the file, so mark it as run. */
 				new_checker->has_run = true;
+
+				/* Clear Alpha mode - we know the state of the checker immediately */
+				new_checker->alpha = false;
 
 				add_obj_to_track_file(new_checker, tfl, FMT_RS(rs, vs), dump_tracking_rs);
 			}
@@ -207,19 +196,39 @@ set_track_file_checkers_down(void)
 			list_for_each_entry(top, &tfl->tracking_obj, e_list) {
 				checker_t *checker = top->obj.checker;
 
-				if (!top->weight) {
-					if (reload && !tfl->reloaded) {
+				if (!top->weight ||
+				    (int64_t)tfl->last_status * top->weight * top->weight_multiplier <= IPVS_WEIGHT_FAULT) {
+					if (reload) {
 						/* This is pretty horrible. At some stage this should
 						 * be tidied up so that it works without having to
 						 * fudge the values to make update_track_file_status()
 						 * work for us. */
 						status = tfl->last_status;
 						tfl->last_status = 0;
-						process_update_checker_track_file_status(tfl, !!status == (top->weight_multiplier == 1) ? INT_MIN : 0, top);
+						process_update_checker_track_file_status(tfl, !status != (top->weight_multiplier == 1) ? IPVS_WEIGHT_FAULT: 0, top);
 						tfl->last_status = status;
 					} else
 						checker->is_up = false;
-				}
+				} else if ((int64_t)tfl->last_status * top->weight * top->weight_multiplier <= IPVS_WEIGHT_FAULT && !reload)
+					checker->is_up = false;
+			}
+		}
+	}
+}
+
+void
+set_track_file_weights(void)
+{
+	tracked_file_t *tfl;
+	tracking_obj_t *top;
+
+	list_for_each_entry(tfl, &check_data->track_files, e_list) {
+		if (tfl->last_status) {
+			list_for_each_entry(top, &tfl->tracking_obj, e_list) {
+				checker_t *checker = top->obj.checker;
+
+				if (top->weight)
+					checker->cur_weight = (int64_t)tfl->last_status * top->weight * top->weight_multiplier;
 			}
 		}
 	}

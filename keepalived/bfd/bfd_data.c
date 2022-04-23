@@ -38,7 +38,7 @@ bfd_data_t *old_bfd_data;
 char *bfd_buffer;
 
 /* Local vars */
-static const char *dump_file = "/tmp/keepalived_bfd.data";
+static const char *dump_file = KA_TMP_DIR "/keepalived_bfd.data";
 
 /*
  *	bfd_t functions
@@ -71,9 +71,9 @@ alloc_bfd(const char *name)
 	strcpy(bfd->iname, name);
 
 	/* Set defaults */
-	bfd->local_min_rx_intv = BFD_MINRX_DEFAULT * 1000;
-	bfd->local_min_tx_intv = BFD_MINTX_DEFAULT * 1000;
-	bfd->local_idle_tx_intv = BFD_IDLETX_DEFAULT * 1000;
+	bfd->local_min_rx_intv = BFD_MINRX_DEFAULT * TIMER_HZ / 1000;
+	bfd->local_min_tx_intv = BFD_MINTX_DEFAULT * TIMER_HZ / 1000;
+	bfd->local_idle_tx_intv = BFD_IDLETX_DEFAULT * TIMER_HZ / 1000;
 	bfd->local_detect_mult = BFD_MULTIPLIER_DEFAULT;
 
 	bfd->ttl = 0;
@@ -140,14 +140,10 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 		conf_write(fp, "   Source IP = %s",
 			    inet_sockaddrtos(&bfd->src_addr));
 
-	conf_write(fp, "   Required min RX interval = %u ms",
-		    bfd->local_min_rx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired min TX interval = %u ms",
-		    bfd->local_min_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired idle TX interval = %u ms",
-		    bfd->local_idle_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Detection multiplier = %d",
-		    bfd->local_detect_mult);
+	conf_write(fp, "   Required min RX interval = %u us", bfd->local_min_rx_intv);
+	conf_write(fp, "   Desired min TX interval = %u us", bfd->local_min_tx_intv);
+	conf_write(fp, "   Desired idle TX interval = %u us", bfd->local_idle_tx_intv);
+	conf_write(fp, "   Detection multiplier = %d", bfd->local_detect_mult);
 	conf_write(fp, "   %s = %d",
 		    bfd->nbr_addr.ss_family == AF_INET ? "TTL" : "hoplimit",
 		    bfd->ttl);
@@ -178,16 +174,16 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 		conf_write(fp, "   remote discriminator = 0x%x", bfd->remote_discr);
 		conf_write(fp, "   local diag = %s", BFD_DIAG_STR(bfd->local_diag));
 		conf_write(fp, "   remote diag = %s", BFD_DIAG_STR(bfd->remote_diag));
-		conf_write(fp, "   remote min tx intv = %u ms", bfd->remote_min_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote min rx intv = %u ms", bfd->remote_min_rx_intv / (TIMER_HZ / 1000));
+		conf_write(fp, "   remote min tx intv = %u us", bfd->remote_min_tx_intv);
+		conf_write(fp, "   remote min rx intv = %u us", bfd->remote_min_rx_intv);
 		conf_write(fp, "   local demand = %u", bfd->local_demand);
 		conf_write(fp, "   remote demand = %u", bfd->remote_demand);
 		conf_write(fp, "   remote detect multiplier = %u", bfd->remote_detect_mult);
 		conf_write(fp, "   %spoll, %sfinal", bfd->poll ? "" : "!", bfd->final ? "" : "!");
-		conf_write(fp, "   local tx intv = %u ms", bfd->local_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote tx intv = %u ms", bfd->remote_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   local detection time = %" PRIu64 " ms", bfd->local_detect_time / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote detection time = %" PRIu64 " ms", bfd->remote_detect_time / (TIMER_HZ / 1000));
+		conf_write(fp, "   local tx intv = %u us", bfd->local_tx_intv);
+		conf_write(fp, "   remote tx intv = %u us", bfd->remote_tx_intv);
+		conf_write(fp, "   local detection time = %" PRIu64 " us", bfd->local_detect_time);
+		conf_write(fp, "   remote detection time = %" PRIu64 " us", bfd->remote_detect_time);
 		if (bfd->last_seen.tv_sec == 0)
 			conf_write(fp, "   last_seen = [never]");
 		else {
@@ -284,19 +280,27 @@ dump_bfd_data(FILE *fp, const bfd_data_t *data)
 	}
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
+void
+dump_bfd_data_global(FILE *fp)
+{
+	dump_bfd_data(fp, bfd_data);
+}
+#endif
+
 void
 bfd_print_data(void)
 {
-	FILE *file = fopen_safe(dump_file, "w");
+	FILE *fp;
 
-	if (!file) {
-		log_message(LOG_INFO, "Can't open %s (%d: %m)", dump_file, errno);
+	fp = open_dump_file(dump_file);
+
+	if (!fp)
 		return;
-	}
 
-	dump_bfd_data(file, bfd_data);
+	dump_bfd_data(fp, bfd_data);
 
-	fclose(file);
+	fclose(fp);
 }
 
 void
@@ -331,7 +335,7 @@ void
 alloc_bfd_buffer(void)
 {
 	if (!bfd_buffer)
-		bfd_buffer = (char *) MALLOC(BFD_BUFFER_SIZE);
+		bfd_buffer = (char *)MALLOC(BFD_BUFFER_SIZE);
 }
 
 void

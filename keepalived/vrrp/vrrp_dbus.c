@@ -227,9 +227,7 @@ static gchar * __attribute__ ((malloc))
 dbus_object_create_path_vrrp(void)
 {
 	return g_strconcat(DBUS_VRRP_OBJECT_ROOT,
-#if HAVE_DECL_CLONE_NEWNET
 			  global_data->network_namespace ? "/" : "", global_data->network_namespace ? global_data->network_namespace : "",
-#endif
 			  global_data->instance_name ? "/" : "", global_data->instance_name ? global_data->instance_name : "",
 
 			  "/Vrrp", NULL);
@@ -239,15 +237,13 @@ static gchar * __attribute__ ((malloc))
 dbus_object_create_path_instance(const gchar *interface, int vrid, sa_family_t family)
 {
 	gchar *object_path;
-	char standardized_name[sizeof ((vrrp_t*)NULL)->ifp->ifname];
+	char standardized_name[sizeof (PTR_CAST(vrrp_t, NULL))->ifp->ifname];
 	gchar *vrid_str = g_strdup_printf("%d", vrid);
 
 	set_valid_path(standardized_name, interface);
 
 	object_path = g_strconcat(DBUS_VRRP_OBJECT_ROOT,
-#if HAVE_DECL_CLONE_NEWNET
 				  global_data->network_namespace ? "/" : "", global_data->network_namespace ? global_data->network_namespace : "",
-#endif
 				  global_data->instance_name ? "/" : "", global_data->instance_name ? global_data->instance_name : "",
 
 				  "/Instance/",
@@ -306,10 +302,8 @@ get_interface_ids(const gchar *object_path, gchar *interface, uint8_t *vrid, uin
 	gchar **dirs;
 	char *endptr;
 
-#if HAVE_DECL_CLONE_NEWNET
 	if(global_data->network_namespace)
 		path_length++;
-#endif
 	if(global_data->instance_name)
 		path_length++;
 
@@ -338,7 +332,7 @@ handle_get_property(__attribute__((unused)) GDBusConnection *connection,
 {
 	GVariant *ret = NULL;
 	dbus_queue_ent_t ent;
-	char ifname_str[sizeof ((vrrp_t*)NULL)->ifp->ifname];
+	char ifname_str[sizeof (PTR_CAST(vrrp_t, NULL))->ifp->ifname];
 	int action;
 
 	if (g_strcmp0(interface_name, DBUS_VRRP_INSTANCE_INTERFACE)) {
@@ -390,7 +384,7 @@ handle_method_call(__attribute__((unused)) GDBusConnection *connection,
 	unsigned family;
 #endif
 	dbus_queue_ent_t ent;
-	char ifname_str[sizeof ((vrrp_t*)NULL)->ifp->ifname];
+	char ifname_str[sizeof (PTR_CAST(vrrp_t, NULL))->ifp->ifname];
 
 	if (!g_strcmp0(interface_name, DBUS_VRRP_INTERFACE)) {
 		if (!g_strcmp0(method_name, "PrintData")) {
@@ -838,7 +832,7 @@ handle_dbus_msg(__attribute__((unused)) thread_ref_t thread)
 			log_message(LOG_INFO, "Write from main thread to DBus thread failed");
 	}
 
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, 0);
 }
 
 void
@@ -904,7 +898,7 @@ dbus_reload(const list_head_t *o, const list_head_t *n)
 	dbus_send_reload_signal();
 
 	/* We need to reinstate the read thread */
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, 0);
 }
 
 bool
@@ -941,7 +935,7 @@ dbus_start(void)
 	    fcntl(dbus_out_pipe[0], F_SETFL, flags & ~O_NONBLOCK) == -1)
 		log_message(LOG_INFO, "Unable to set dbus thread out_pipe blocking - (%d - %m)", errno);
 
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, 0);
 
 	/* Initialise the thread termination semaphore */
 	sem_init(&thread_end, 0, 0);

@@ -1,11 +1,11 @@
 /*
- * Soft:        Perform a GET query to a remote HTTP/HTTPS server.
- *              Set a timer to compute global remote server response
- *              time.
+ * Soft:        Keepalived is a failover program for the LVS project
+ *              <www.linuxvirtualserver.org>. It monitor & manipulate
+ *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        ssl.c include file.
+ * Part:        systemd interface include file.
  *
- * Authors:     Alexandre Cassen, <acassen@linux-vs.org>
+ * Author:      Alexandre Cassen, <acassen@linux-vs.org>
  *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,22 +17,21 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2020-2020 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _SSL_H
-#define _SSL_H
+#ifndef _VRRP_SYSTEM_H
+#define _VRRP_SYSTEM_H
+
+#include "config.h"
 
 /* global includes */
-#include <openssl/ssl.h>
 #include <stdbool.h>
 
-#include "scheduler.h"
-
-/* Prototypes */
-extern void init_ssl(void);
-extern bool ssl_connect(thread_ref_t);
-extern int ssl_send_request(SSL *, const char *, int);
-extern void ssl_read_thread(thread_ref_t);
+extern bool check_parent_systemd(void);
+extern void systemd_notify_running(void);
+extern void systemd_notify_reloading(void);
+extern void systemd_notify_stopping(void);
+extern void systemd_unset_notify(void);
 
 #endif

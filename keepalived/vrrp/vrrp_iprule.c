@@ -25,9 +25,6 @@
 
 /* global includes */
 #include <errno.h>
-#ifdef NETLINK_H_NEEDS_SYS_SOCKET_H
-#include <sys/socket.h>
-#endif
 #include <linux/fib_rules.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -67,8 +64,8 @@ rule_is_equal(const ip_rule_t *x, const ip_rule_t *y)
 {
 	if (x->mask != y->mask ||
 	    x->invert != y->invert ||
-	    !IP_ISEQ(x->from_addr, y->from_addr) ||
-	    !IP_ISEQ(x->to_addr, y->to_addr) ||
+	    compare_ipaddress(x->from_addr, y->from_addr) ||
+	    compare_ipaddress(x->to_addr, y->to_addr) ||
 	    x->priority != y->priority ||
 	    x->tos != y->tos ||
 	    x->fwmark != y->fwmark ||
@@ -91,9 +88,7 @@ rule_is_equal(const ip_rule_t *x, const ip_rule_t *y)
 	    x->l3mdev != y->l3mdev ||
 #endif
 	    x->iif != y->iif ||
-#if HAVE_DECL_FRA_OIFNAME
 	    x->oif != y->oif ||
-#endif
 #if HAVE_DECL_FRA_PROTOCOL
 	    x->protocol != y->protocol ||
 #endif
@@ -227,10 +222,8 @@ netlink_rule(ip_rule_t *iprule, int cmd)
 	if (iprule->iif)	// "dev/iif"
 		addattr_l(&req.n, sizeof(req), FRA_IFNAME, iprule->iif, strlen(iprule->iif->ifname)+1);
 
-#if HAVE_DECL_FRA_OIFNAME
 	if (iprule->oif)	// "oif"
 		addattr_l(&req.n, sizeof(req), FRA_OIFNAME, iprule->oif, strlen(iprule->oif->ifname)+1);
-#endif
 
 #if HAVE_DECL_FRA_TUN_ID
 	if (iprule->tunnel_id)
@@ -372,16 +365,10 @@ format_iprule(const ip_rule_t *rule, char *buf, size_t buf_len)
 	}
 
 	if (rule->iif)
-#if HAVE_DECL_FRA_OIFNAME
 		op += snprintf(op, (size_t)(buf_end - op), " iif %s", rule->iif->ifname);
-#else
-		op += snprintf(op, (size_t)(buf_end - op), " dev %s", rule->iif->ifname);
-#endif
 
-#if HAVE_DECL_FRA_OIFNAME
 	if (rule->oif)
 		op += snprintf(op, (size_t)(buf_end - op), " oif %s", rule->oif->ifname);
-#endif
 
 #if HAVE_DECL_FRA_SUPPRESS_PREFIXLEN
 	if (rule->suppress_prefix_len != -1)
@@ -481,7 +468,7 @@ alloc_rule(list_head_t *rule_list, const vector_t *strvec, __attribute__((unused
 	char *end;
 	bool table_option = false;
 
-	new = (ip_rule_t *)MALLOC(sizeof(ip_rule_t));
+	PMALLOC(new);
 	if (!new) {
 		log_message(LOG_INFO, "Unable to allocate new ip_rule");
 		return;
@@ -614,8 +601,7 @@ alloc_rule(list_head_t *rule_list, const vector_t *strvec, __attribute__((unused
 			new->fwmask = (uint32_t)val1;
 			new->mask |= IPRULE_BIT_FWMARK;
 
-			if (true) {
-			} else {
+			if (false) {
 fwmark_err:
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rule fwmark %s specified", str);
 				new->mask &= (uint32_t)~IPRULE_BIT_FWMASK;
@@ -668,7 +654,6 @@ fwmark_err:
 			}
 			new->iif = ifp;
 		}
-#if HAVE_DECL_FRA_OIFNAME
 		else if (!strcmp(str, "oif")) {
 			str = strvec_slot(strvec, ++i);
 			ifp = if_get_by_ifname(str, IF_CREATE_IF_DYNAMIC);
@@ -678,7 +663,6 @@ fwmark_err:
 			}
 			new->oif = ifp;
 		}
-#endif
 #if HAVE_DECL_FRA_TUN_ID
 		else if (!strcmp(str, "tunnel-id")) {
 			uint64_t val64;
@@ -767,7 +751,6 @@ fwmark_err:
 
 		else if (!strcmp(str, "no_track"))
 			new->dont_track = true;
-#if HAVE_DECL_FRA_OIFNAME
 		else if (allow_track_group && !strcmp(str, "track_group")) {
 			i++;
 			if (new->track_group) {
@@ -776,9 +759,7 @@ fwmark_err:
 			}
 			if (!(new->track_group = static_track_group_find(strvec_slot(strvec, i))))
 				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
-		}
-#endif
-		else {
+		} else {
 			uint8_t action = FR_ACT_UNSPEC;
 
 			if (!strcmp(str, "type"))

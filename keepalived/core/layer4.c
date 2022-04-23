@@ -27,13 +27,14 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <net/if.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
 #ifdef ERRQUEUE_NEEDS_SYS_TIME
 #include <sys/time.h>
 #endif
 #include <linux/errqueue.h>
-#include <netinet/in.h>
 
 #include "layer4.h"
 #include "logger.h"
@@ -43,6 +44,7 @@
 #endif
 #include "bitops.h"
 #include "utils.h"
+#include "align.h"
 
 // #define ICMP_DEBUG	1
 
@@ -87,7 +89,7 @@ socket_bind_connect(int fd, conn_opts_t *co)
 	const struct sockaddr_storage *bind_addr = &co->bindto;
 
 	optlen = sizeof(opt);
-	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, (void *) &opt, &optlen) < 0) {
+	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, (void *)&opt, &optlen) < 0) {
 		log_message(LOG_ERR, "Can't get socket type: %s", strerror(errno));
 		return connect_error;
 	}
@@ -96,7 +98,7 @@ socket_bind_connect(int fd, conn_opts_t *co)
 		 * allow time for a proper shutdown. */
 		li.l_onoff = 1;
 		li.l_linger = 5;
-		if (setsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &li, sizeof (struct linger)))
+		if (setsockopt(fd, SOL_SOCKET, SO_LINGER, PTR_CAST(char, &li), sizeof (struct linger)))
 			log_message(LOG_INFO, "Failed to set SO_LINGER for socket %d - errno %d (%m)", fd, errno);
 	}
 
@@ -117,9 +119,9 @@ socket_bind_connect(int fd, conn_opts_t *co)
 	}
 
 	/* Bind socket */
-	if (((const struct sockaddr *) bind_addr)->sa_family != AF_UNSPEC) {
+	if (PTR_CAST_CONST(struct sockaddr, bind_addr)->sa_family != AF_UNSPEC) {
 		addrlen = sizeof(*bind_addr);
-		if (bind(fd, (const struct sockaddr *) bind_addr, addrlen) != 0) {
+		if (bind(fd, PTR_CAST_CONST(struct sockaddr, bind_addr), addrlen) != 0) {
 			log_message(LOG_INFO, "Checker bind failed: %s", strerror(errno));
 			return connect_error;
 		}
@@ -127,7 +129,7 @@ socket_bind_connect(int fd, conn_opts_t *co)
 
 	/* Set remote IP and connect */
 	addrlen = sizeof(*addr);
-	ret = connect(fd, (const struct sockaddr *) addr, addrlen);
+	ret = connect(fd, PTR_CAST_CONST(struct sockaddr, addr), addrlen);
 
 	/* Immediate success */
 	if (ret == 0)
@@ -166,7 +168,7 @@ socket_connect(int fd, const struct sockaddr_storage *addr)
 }
 
 enum connect_result
-socket_state(thread_ref_t thread, thread_func_t func)
+socket_state(thread_ref_t thread, thread_func_t func, unsigned extra_flags)
 {
 	int status;
 	socklen_t addrlen;
@@ -197,7 +199,7 @@ socket_state(thread_ref_t thread, thread_func_t func)
 	if (status == EINPROGRESS) {
 		timer_min = timer_sub_now(thread->sands);
 		thread_add_write(thread->master, func, THREAD_ARG(thread),
-				 thread->u.f.fd, -timer_long(timer_min), true);
+				 thread->u.f.fd, -timer_long(timer_min), THREAD_DESTROY_CLOSE_FD | extra_flags);
 		return connect_in_progress;
 	}
 
@@ -214,25 +216,19 @@ socket_state(thread_ref_t thread, thread_func_t func)
 #ifdef _WITH_LVS_
 bool
 socket_connection_state(int fd, enum connect_result status, thread_ref_t thread,
-		     thread_func_t func, unsigned long timeout)
+			thread_func_t func, unsigned long timeout, unsigned extra_flags)
 {
-	void *checker;
-
-	checker = THREAD_ARG(thread);
-
 	if (status == connect_success ||
 	    status == connect_in_progress) {
-		thread_add_write(thread->master, func, checker, fd, timeout, true);
+		thread_add_write(thread->master, func, THREAD_ARG(thread), fd, timeout, THREAD_DESTROY_CLOSE_FD | extra_flags);
 		return false;
 	}
 
 	return true;
 }
-#endif
 
-#ifdef _WITH_LVS_
 enum connect_result
-udp_bind_connect(int fd, conn_opts_t *co)
+udp_bind_connect(int fd, conn_opts_t *co, uint8_t *payload, uint16_t payload_len)
 {
 	socklen_t addrlen;
 	ssize_t ret;
@@ -243,13 +239,17 @@ udp_bind_connect(int fd, conn_opts_t *co)
 	int err;
 
 	/* Ensure we don't leak our stack */
-	set_buf(buf, sizeof(buf));
+	if (!payload) {
+		set_buf(buf, sizeof(buf));
+		payload = PTR_CAST(uint8_t, buf);
+		payload_len = sizeof(buf);
+	}
 
 	/* We want to be able to receive ICMP error responses */
 	if (co->dst.ss_family == AF_INET)
-		err = setsockopt(fd, SOL_IP, IP_RECVERR, (char *)&on, sizeof(on));
+		err = setsockopt(fd, SOL_IP, IP_RECVERR, PTR_CAST(char, &on), sizeof(on));
 	else
-		err = setsockopt(fd, SOL_IPV6, IPV6_RECVERR, (char *)&on, sizeof(on));
+		err = setsockopt(fd, SOL_IPV6, IPV6_RECVERR, PTR_CAST(char, &on), sizeof(on));
 	if (err)
 		log_message(LOG_INFO, "Error %d setting IP%s_RECVERR for socket %d - %m", errno, co->dst.ss_family == AF_INET ? "" : "V6", fd);
 
@@ -263,9 +263,9 @@ udp_bind_connect(int fd, conn_opts_t *co)
 #endif
 
 	/* Bind socket */
-	if (((const struct sockaddr *) bind_addr)->sa_family != AF_UNSPEC) {
+	if (PTR_CAST_CONST(struct sockaddr, bind_addr)->sa_family != AF_UNSPEC) {
 		addrlen = sizeof(*bind_addr);
-		if (bind(fd, (const struct sockaddr *) bind_addr, addrlen) != 0) {
+		if (bind(fd, PTR_CAST_CONST(struct sockaddr, bind_addr), addrlen) != 0) {
 			log_message(LOG_INFO, "bind failed. errno: %d, error: %s", errno, strerror(errno));
 			return connect_error;
 		}
@@ -273,7 +273,7 @@ udp_bind_connect(int fd, conn_opts_t *co)
 
 	/* Set remote IP and connect */
 	addrlen = sizeof(*addr);
-	ret = connect(fd, (const struct sockaddr *) addr, addrlen);
+	ret = connect(fd, PTR_CAST_CONST(struct sockaddr, addr), addrlen);
 
 	if (ret < 0) {
 		/* We want to know about the error, but not repeatedly */
@@ -287,9 +287,9 @@ udp_bind_connect(int fd, conn_opts_t *co)
 	}
 
 	/* Send udp packet */
-	ret = send(fd, buf, sizeof(buf), 0);
+	ret = send(fd, payload, payload_len, 0);
 
-	if (ret == (ssize_t)sizeof(buf))
+	if (ret == payload_len)
 		return connect_success;
 
 	if (ret == -1) {
@@ -312,7 +312,7 @@ udp_socket_error(int fd)
 	struct msghdr msg;
 	char name_buf[128];
 	struct iovec iov;
-	char control[2560];
+	char control[2560] __attribute__((aligned(__alignof__(struct cmsghdr))));
 	struct icmphdr icmph;
 	struct cmsghdr *cmsg;                   /* Control related data */
 	struct sock_extended_err *sock_err;
@@ -336,7 +336,7 @@ udp_socket_error(int fd)
 	}
 
 	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-		sock_err = (struct sock_extended_err *)CMSG_DATA(cmsg);
+		sock_err = PTR_CAST(struct sock_extended_err, CMSG_DATA(cmsg));
 		if (cmsg->cmsg_level == SOL_IP && cmsg->cmsg_type == IP_RECVERR) {
 			if (sock_err) {
 				/* We are interested in ICMP errors */
@@ -417,19 +417,24 @@ udp_socket_error(int fd)
 }
 
 enum connect_result
-udp_socket_state(int fd, thread_ref_t thread, bool require_reply)
+udp_socket_state(int fd, thread_ref_t thread, uint8_t *recv_buf, size_t *len)
 {
 	int ret;
-	char recv_buf[UDP_BUFSIZE];
+	char local_recv_buf;
 
 	/* Handle Read timeout, we consider it success unless require_reply is set */
 	if (thread->type == THREAD_READ_TIMEOUT)
-		return require_reply ? connect_error : connect_success;
+		return recv_buf ? connect_error : connect_success;
 
 	if (thread->type == THREAD_READ_ERROR)
 		return udp_socket_error(fd);
 
-	ret = recv(fd, recv_buf, sizeof(recv_buf), 0);
+	if (recv_buf) {
+		ret = recv(fd, recv_buf, *len, 0);
+		*len = ret;
+	} else {
+		ret = recv(fd, &local_recv_buf, sizeof(local_recv_buf), 0);
+	}
 
 	/* Ret less than 0 means the port is unreachable.
 	 * Otherwise, we consider it success.
@@ -450,7 +455,7 @@ udp_icmp_check_state(int fd, enum connect_result status, thread_ref_t thread,
 	checker = THREAD_ARG(thread);
 
 	if (status == connect_success) {
-		thread_add_read(thread->master, func, checker, fd, timeout, true);
+		thread_add_read(thread->master, func, checker, fd, timeout, THREAD_DESTROY_CLOSE_FD);
 		return false;
 	}
 

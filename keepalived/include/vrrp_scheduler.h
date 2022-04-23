@@ -39,6 +39,7 @@
 extern timeval_t garp_next_time;
 extern thread_ref_t garp_thread;
 extern bool vrrp_initialised;
+extern timeval_t vrrp_delayed_start_time;
 
 /* VRRP TSM Macro */
 #define VRRP_TSM_HANDLE(S,V)			\
@@ -50,6 +51,10 @@ do {						\
 
 #ifdef _TSM_DEBUG_
 extern bool do_tsm_debug;
+#endif
+#ifdef _RECVMSG_DEBUG_
+extern bool do_recvmsg_debug;
+extern bool do_recvmsg_debug_dump;
 #endif
 
 /* extern prototypes */

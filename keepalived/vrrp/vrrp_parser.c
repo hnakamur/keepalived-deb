@@ -60,7 +60,7 @@
 #include "bfd_parser.h"
 #endif
 #include "track_file.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 
@@ -134,7 +134,6 @@ static_addresses_handler(const vector_t *strvec)
 	alloc_value_block(alloc_saddress, strvec);
 }
 
-#ifdef _HAVE_FIB_ROUTING_
 /* Static routes handler */
 static void
 static_routes_handler(const vector_t *strvec)
@@ -158,7 +157,6 @@ static_rules_handler(const vector_t *strvec)
 
 	alloc_value_block(alloc_srule, strvec);
 }
-#endif
 
 #ifdef _WITH_LINKBEAT_
 static void
@@ -272,7 +270,7 @@ vrrp_group_track_file_handler(const vector_t *strvec)
 	alloc_value_block(alloc_vrrp_group_track_file, strvec);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_group_track_process_handler(const vector_t *strvec)
 {
@@ -380,6 +378,22 @@ vrrp_sg_tracking_weight_handler(__attribute__((unused)) const vector_t *strvec)
 	vgroup->sgroup_tracking_weight = true;
 }
 static void
+vrrp_sg_notify_priority_changes_handler(const vector_t *strvec)
+{
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) Invalid value '%s' for sync group notify_priority_changes specified", vgroup->gname, strvec_slot(strvec, 1));
+			return;
+		}
+	}
+
+	vgroup->notify_priority_changes = res;
+}
+static void
 vrrp_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp;
@@ -412,13 +426,18 @@ vrrp_handler(const vector_t *strvec)
 static void
 vrrp_end_handler(void)
 {
-#ifdef _HAVE_VRRP_VMAC_
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
+#ifdef _HAVE_VRRP_VMAC_
 	if (!list_empty(&vrrp->unicast_peer) && vrrp->vmac_flags) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers - clearing use_vmac", vrrp->iname);
-		vrrp->vmac_flags = 0;
-		vrrp->vmac_ifname[0] = '\0';
+		if (!vrrp->ifp) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers and no interface - clearing use_vmac", vrrp->iname);
+			vrrp->vmac_flags = 0;
+			vrrp->vmac_ifname[0] = '\0';
+		} else if (!__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unicast with use_vmac requires vmac_xmit_base - setting", vrrp->iname);
+			__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags);
+		}
 	}
 #endif
 
@@ -457,6 +476,7 @@ vrrp_vmac_handler(const vector_t *strvec)
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	interface_t *ifp;
 	const char *name;
+	vrrp_t *ovrrp;
 
 	__set_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags);
 
@@ -468,6 +488,14 @@ vrrp_vmac_handler(const vector_t *strvec)
 			return;
 		}
 
+		/* Check another vrrp instance isn't using this name */
+		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
+			if (!strcmp(name, ovrrp->vmac_ifname)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, name);
+				return;
+			}
+		}
+
 		strcpy(vrrp->vmac_ifname, name);
 
 		/* Check if the interface exists and is a macvlan we can use */
@@ -477,6 +505,14 @@ vrrp_vmac_handler(const vector_t *strvec)
 			vrrp->vmac_ifname[0] = '\0';
 		}
 	}
+}
+
+static void
+vrrp_vmac_addr_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_VMAC_ADDR_BIT, &vrrp->vmac_flags);
 }
 static void
 vrrp_vmac_xmit_base_handler(__attribute__((unused)) const vector_t *strvec)
@@ -491,10 +527,12 @@ static void
 vrrp_ipvlan_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	vrrp_t *ovrrp;
 	interface_t *ifp;
 	bool had_flags = false;
 	ip_address_t addr = {};
 	size_t i;
+	const char *ifname;
 
 	if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) use_ipvlan already specified", vrrp->iname);
@@ -568,9 +606,9 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 			if (vrrp->saddr.ss_family == AF_UNSPEC) {
 				vrrp->saddr.ss_family = vrrp->ipvlan_addr->ifa.ifa_family;
 				if (vrrp->saddr.ss_family == AF_INET)
-					((struct sockaddr_in *)&vrrp->saddr)->sin_addr = vrrp->ipvlan_addr->u.sin.sin_addr;
+					PTR_CAST(struct sockaddr_in, &vrrp->saddr)->sin_addr = vrrp->ipvlan_addr->u.sin.sin_addr;
 				else
-					((struct sockaddr_in6 *)&vrrp->saddr)->sin6_addr = vrrp->ipvlan_addr->u.sin6_addr;
+					PTR_CAST(struct sockaddr_in6, &vrrp->saddr)->sin6_addr = vrrp->ipvlan_addr->u.sin6_addr;
 				vrrp->saddr_from_config = true;
 			}
 
@@ -582,12 +620,21 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 			continue;
 		}
 
-		if (strlen(strvec_slot(strvec, i)) >= IFNAMSIZ) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s) IPVLAN interface name '%s' too long - ignoring", vrrp->iname, strvec_slot(strvec, i));
+		ifname = strvec_slot(strvec, i);
+		if (strlen(ifname) >= IFNAMSIZ) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) IPVLAN interface name '%s' too long - ignoring", vrrp->iname, ifname);
 			continue;
 		}
 
-		strcpy(vrrp->vmac_ifname, strvec_slot(strvec, i));
+		/* Check another vrrp instance isn't using this name */
+		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
+			if (!strcmp(ifname, ovrrp->vmac_ifname)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, ifname);
+				continue;
+			}
+		}
+
+		strcpy(vrrp->vmac_ifname, ifname);
 
 		/* Check if the interface exists and is ipvlan we can use */
 		if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
@@ -708,7 +755,7 @@ vrrp_track_file_handler(const vector_t *strvec)
 {
 	alloc_value_block(alloc_vrrp_track_file, strvec);
 }
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_track_process_handler(const vector_t *strvec)
 {
@@ -803,16 +850,16 @@ static void
 vrrp_adv_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	double adver_int;
+	unsigned adver_int;
 	bool res;
 
-	res = read_double_strvec(strvec, 1, &adver_int, 0.01F, 255.0F, true);
+	res = read_decimal_unsigned_strvec(strvec, 1, &adver_int, TIMER_HZ / 100, 255 * TIMER_HZ, TIMER_HZ_DIGITS, true);
 
 	/* Simple check - just positive */
 	if (!res || adver_int <= 0)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Advert interval (%s) not valid! Must be > 0 - ignoring", vrrp->iname, strvec_slot(strvec, 1));
 	else
-		vrrp->adver_int = (unsigned)(adver_int * TIMER_HZ);
+		vrrp->adver_int = adver_int;
 }
 static void
 vrrp_debug_handler(const vector_t *strvec)
@@ -875,14 +922,14 @@ static void
 vrrp_preempt_delay_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	double preempt_delay;
+	unsigned preempt_delay;
 
-	if (!read_double_strvec(strvec, 1, &preempt_delay, 0, TIMER_MAX_SEC, true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &preempt_delay, 0, TIMER_MAX_SEC * TIMER_HZ, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Preempt_delay not valid! must be between 0-%u", vrrp->iname, TIMER_MAX_SEC);
 		vrrp->preempt_delay = 0;
 	}
 	else
-		vrrp->preempt_delay = (unsigned long)(preempt_delay * TIMER_HZ);
+		vrrp->preempt_delay = preempt_delay;
 }
 static void
 vrrp_notify_backup_handler(const vector_t *strvec)
@@ -1110,6 +1157,51 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 	vrrp->garp_lower_prio_rep = garp_lower_prio_rep;
 }
 static void
+vrrp_down_timer_adverts_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	unsigned down_timer_adverts;
+
+	if (!read_unsigned_strvec(strvec, 1, &down_timer_adverts, 1, 100, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Invalid down_timer_adverts [1:100] '%s'", vrrp->iname, strvec_slot(strvec, 1));
+		return;
+	}
+
+	vrrp->down_timer_adverts = down_timer_adverts;
+}
+#ifdef _HAVE_VRRP_VMAC_
+static void
+vrrp_garp_extra_if_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	unsigned delay = UINT_MAX;
+	unsigned index;
+	const char *cmd_name = strvec_slot(strvec, 0);
+
+	if (!strcmp(cmd_name, "vmac_garp_intvl")) {
+		/* Deprecated after v2.2.2 */
+		report_config_error(CONFIG_DEPRECATED, "Keyword \"vmac_garp_intvl\" is deprecated - please use \"garp_extra_if\"");
+	}
+
+	for (index = 1; index < vector_size(strvec); index++) {
+		if (!strcmp(strvec_slot(strvec, index), "all"))
+			vrrp->vmac_garp_all_if = true;
+		else if (!read_unsigned_strvec(strvec, index, &delay, 0, 86400, true)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): %s '%s' invalid - ignoring", vrrp->iname, cmd_name, strvec_slot(strvec, index));
+			return;
+		}
+	}
+
+	if (delay == UINT_MAX) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): %s specified without time - ignoring", vrrp->iname, cmd_name);
+		return;
+	}
+
+	vrrp->vmac_garp_intvl.tv_sec = delay;
+	vrrp->vmac_garp_intvl.tv_usec = 0;
+}
+#endif
+static void
 vrrp_lower_prio_no_advert_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
@@ -1210,7 +1302,6 @@ vrrp_promote_secondaries_handler(__attribute__((unused)) const vector_t *strvec)
 
 	vrrp->promote_secondaries = true;
 }
-#ifdef _HAVE_FIB_ROUTING_
 static void
 vrrp_vroutes_handler(const vector_t *strvec)
 {
@@ -1221,7 +1312,6 @@ vrrp_vrules_handler(const vector_t *strvec)
 {
 	alloc_value_block(alloc_vrrp_vrule, strvec);
 }
-#endif
 static void
 vrrp_script_handler(const vector_t *strvec)
 {
@@ -1373,7 +1463,7 @@ vrrp_vscript_end_handler(void)
 	vscript->script.gid = default_script_gid;
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_tprocess_handler(const vector_t *strvec)
 {
@@ -1521,9 +1611,9 @@ static void
 vrrp_tprocess_delay_general(const vector_t *strvec, enum process_delay delay_type)
 {
 	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
-	double delay;
+	unsigned delay;
 
-	if (!read_double_strvec(strvec, 1, &delay, 0.000001F, 3600.F, true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &delay, 1, 3600U * TIMER_HZ, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%sdelay (%s) for vrrp_track_process %s must be between "
 							  "[0.000001..3600] inclusive. Ignoring..."
 							, delay_type == PROCESS_TERMINATE_DELAY ? "terminate_" :
@@ -1533,9 +1623,9 @@ vrrp_tprocess_delay_general(const vector_t *strvec, enum process_delay delay_typ
 	}
 
 	if (delay_type != PROCESS_FORK_DELAY)
-		tprocess->terminate_delay = (unsigned)(delay * TIMER_HZ);
+		tprocess->terminate_delay = delay;
 	if (delay_type != PROCESS_TERMINATE_DELAY)
-		tprocess->fork_delay = (unsigned)(delay * TIMER_HZ);
+		tprocess->fork_delay = delay;
 }
 static void
 vrrp_tprocess_terminate_delay_handler(const vector_t *strvec)
@@ -1643,15 +1733,15 @@ static void
 garp_group_garp_interval_handler(const vector_t *strvec)
 {
 	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
-	double val;
+	unsigned val;
 
-	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &val, 0, INT_MAX, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "garp_group garp_interval '%s' invalid", strvec_slot(strvec, 1));
 		return;
 	}
 
-	delay->garp_interval.tv_sec = (time_t)val;
-	delay->garp_interval.tv_usec = (suseconds_t)((val - delay->garp_interval.tv_sec) * 1000000);
+	delay->garp_interval.tv_sec = (time_t)val / TIMER_HZ;
+	delay->garp_interval.tv_usec = (suseconds_t)(val % TIMER_HZ);
 	delay->have_garp_interval = true;
 
 	if (delay->garp_interval.tv_sec >= 1)
@@ -1661,15 +1751,15 @@ static void
 garp_group_gna_interval_handler(const vector_t *strvec)
 {
 	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
-	double val;
+	unsigned val;
 
-	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &val, 0, INT_MAX, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "garp_group gna_interval '%s' invalid", strvec_slot(strvec, 1));
 		return;
 	}
 
-	delay->gna_interval.tv_sec = (time_t)val;
-	delay->gna_interval.tv_usec = (suseconds_t)((val - delay->gna_interval.tv_sec) * 1000000);
+	delay->gna_interval.tv_sec = (time_t)val / TIMER_HZ;
+	delay->gna_interval.tv_usec = (suseconds_t)(val % TIMER_HZ);
 	delay->have_gna_interval = true;
 
 	if (delay->gna_interval.tv_sec >= 1)
@@ -1767,6 +1857,59 @@ garp_group_end_handler(void)
 	}
 }
 
+static void
+alloc_if_up_down_delay(const vector_t *strvec)
+{
+	unsigned down_delay = 0;
+	unsigned up_delay = 0;
+	int res;
+	unsigned long delay;
+	interface_t *ifp;
+
+	if (!(ifp = if_get_by_ifname(strvec_slot(strvec, 0), global_data->dynamic_interfaces))) {
+		report_config_error(CONFIG_FATAL, "unknown interface %s specified for up/down delay", strvec_slot(strvec, 0));
+		return;
+	}
+
+	if (vector_size(strvec) < 2) {
+		log_message(LOG_INFO, "No timeouts specified for %s up/down delays", ifp->ifname);
+		return;
+	}
+	if (vector_size(strvec) > 3)
+		log_message(LOG_INFO, "Too many parameters for %s up/down delays", ifp->ifname);
+
+	res = read_timer(strvec, 1, &delay, 0, 255 * TIMER_HZ, true);
+	if (!res) {
+		log_message(LOG_INFO, "Invalid down delay %s for %s", strvec_slot(strvec, 1), ifp->ifname);
+		return;
+	}
+	down_delay = (unsigned)delay;
+
+	if (vector_size(strvec) == 2)
+		up_delay = 0;
+	else {
+		res = read_timer(strvec, 2, &delay, 0, 255 * TIMER_HZ, true);
+		if (!res) {
+			log_message(LOG_INFO, "Invalid up delay %s for %s", strvec_slot(strvec, 2), ifp->ifname);
+			return;
+		}
+		up_delay = (unsigned)delay;
+	}
+
+	ifp->down_debounce_timer = down_delay;
+	ifp->up_debounce_timer = up_delay;
+}
+
+/* interface state change delays handler */
+static void
+interface_up_down_delays_handler(const vector_t *strvec)
+{
+	if (!strvec)
+		return;
+
+	alloc_value_block(alloc_if_up_down_delay, strvec);
+}
+
 void
 init_vrrp_keywords(bool active)
 {
@@ -1776,10 +1919,8 @@ init_vrrp_keywords(bool active)
 
 	/* Static addresses/routes/rules declarations */
 	install_keyword_root("static_ipaddress", &static_addresses_handler, active);
-#ifdef _HAVE_FIB_ROUTING_
 	install_keyword_root("static_routes", &static_routes_handler, active);
 	install_keyword_root("static_rules", &static_rules_handler, active);
-#endif
 
 	/* Sync group declarations */
 	install_keyword_root("vrrp_sync_group", &vrrp_sync_group_handler, active);
@@ -1787,7 +1928,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("track_interface", &vrrp_group_track_if_handler);
 	install_keyword("track_script", &vrrp_group_track_scr_handler);
 	install_keyword("track_file", &vrrp_group_track_file_handler);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	install_keyword("track_process", &vrrp_group_track_process_handler);
 #endif
 #ifdef _WITH_BFD_
@@ -1801,6 +1942,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("smtp_alert", &vrrp_gsmtp_handler);
 	install_keyword("global_tracking", &vrrp_gglobal_tracking_handler);
 	install_keyword("sync_group_tracking_weight", &vrrp_sg_tracking_weight_handler);
+	install_keyword("notify_priority_changes", &vrrp_sg_notify_priority_changes_handler);
 
 	/* Garp declarations */
 	install_keyword_root("garp_group", &garp_group_handler, active);
@@ -1820,6 +1962,7 @@ init_vrrp_keywords(bool active)
 	install_root_end_handler(&vrrp_end_handler);
 #ifdef _HAVE_VRRP_VMAC_
 	install_keyword("use_vmac", &vrrp_vmac_handler);
+	install_keyword("use_vmac_addr", &vrrp_vmac_addr_handler);
 	install_keyword("vmac_xmit_base", &vrrp_vmac_xmit_base_handler);
 #endif
 #ifdef _HAVE_VRRP_IPVLAN_
@@ -1837,7 +1980,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("track_interface", &vrrp_track_if_handler);
 	install_keyword("track_script", &vrrp_track_scr_handler);
 	install_keyword("track_file", &vrrp_track_file_handler);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	install_keyword("track_process", &vrrp_track_process_handler);
 #endif
 #ifdef _WITH_BFD_
@@ -1857,10 +2000,8 @@ init_vrrp_keywords(bool active)
 #ifdef _WITH_LINKBEAT_
 	install_keyword("linkbeat_use_polling", &vrrp_linkbeat_handler);
 #endif
-#ifdef _HAVE_FIB_ROUTING_
 	install_keyword("virtual_routes", &vrrp_vroutes_handler);
 	install_keyword("virtual_rules", &vrrp_vrules_handler);
-#endif
 	install_keyword("accept", &vrrp_accept_handler);
 #ifdef _WITH_FIREWALL_
 	install_keyword("no_accept", &vrrp_no_accept_handler);
@@ -1889,6 +2030,11 @@ init_vrrp_keywords(bool active)
 	install_keyword("garp_master_refresh_repeat", &vrrp_garp_refresh_rep_handler);
 	install_keyword("garp_lower_prio_delay", &vrrp_garp_lower_prio_delay_handler);
 	install_keyword("garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
+	install_keyword("down_timer_adverts", &vrrp_down_timer_adverts_handler);
+#ifdef _HAVE_VRRP_VMAC_
+	install_keyword("garp_extra_if", &vrrp_garp_extra_if_handler);
+	install_keyword("vmac_garp_intvl", &vrrp_garp_extra_if_handler);	/* Deprecated after v2.2.2 - incorrect keyword in commit 3dcd13c */
+#endif
 	install_keyword("lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
 	install_keyword("kernel_rx_buf_size", &kernel_rx_buf_size_handler);
@@ -1911,7 +2057,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("init_fail", &vrrp_vscript_init_fail_handler);
 	install_sublevel_end_handler(&vrrp_vscript_end_handler);
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	/* Track process declarations */
 	install_keyword_root("vrrp_track_process", &vrrp_tprocess_handler, active);
 	install_keyword("process", &vrrp_tprocess_process_handler);
@@ -1925,6 +2071,9 @@ init_vrrp_keywords(bool active)
 	install_keyword("full_command", &vrrp_tprocess_full_handler);
 	install_sublevel_end_handler(&vrrp_tprocess_end_handler);
 #endif
+
+	/* Interface up down delays */
+	install_keyword_root("interface_up_down_delays", &interface_up_down_delays_handler, active);
 }
 
 const vector_t *

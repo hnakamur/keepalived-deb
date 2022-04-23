@@ -64,7 +64,7 @@ void
 free_checker(checker_t *checker)
 {
 	list_del_init(&checker->e_list);
-	(*checker->free_func) (checker);
+	(*checker->checker_funcs->free_func) (checker);
 }
 void
 free_checker_list(list_head_t *l)
@@ -83,16 +83,26 @@ dump_checker(FILE *fp, const checker_t *checker)
 	conf_write(fp, "   Enabled = %s", checker->enabled ? "yes" : "no");
 	conf_write(fp, "   Up = %s", checker->is_up ? "yes" : "no");
 	conf_write(fp, "   Has run = %s", checker->has_run ? "yes" : "no");
-	conf_write(fp, "   Alpha = %s", checker->has_run ? "yes" : "no");
-	conf_write(fp, "   Delay loop = %lu us", checker->delay_loop);
-	conf_write(fp, "   Warmup = %lu us", checker->warmup);
-	conf_write(fp, "   Retries = %u", checker->retry);
-	conf_write(fp, "   Delay before retry = %lu us", checker->delay_before_retry);
-	conf_write(fp, "   Retries iterations = %u", checker->retry_it);
-	conf_write(fp, "   Default delay before retry = %lu us", checker->default_delay_before_retry);
+	conf_write(fp, "   Current weight = %d", checker->cur_weight);
+	if (checker->checker_funcs->type != CHECKER_FILE) {
+		conf_write(fp, "   Alpha = %s", checker->alpha ? "yes" : "no");
+		conf_write(fp, "   Delay loop = %lu us", checker->delay_loop);
+		conf_write(fp, "   Warmup = %lu us", checker->warmup);
+		conf_write(fp, "   Retries = %u", checker->retry);
+		if (checker->retry) {
+			conf_write(fp, "   Delay before retry = %lu us", checker->delay_before_retry);
+			conf_write(fp, "   Retries iterations = %u", checker->retry_it);
+		}
+		conf_write(fp, "   Default delay before retry = %lu us", checker->default_delay_before_retry);
+	}
 	conf_write(fp, "   Log all failures = %s", checker->log_all_failures ? "yes" : "no");
 
-	(*checker->dump_func) (fp, checker);
+	if (checker->co) {
+		conf_write(fp, "   Connection");
+		dump_connection_opts(fp, checker->co);
+	}
+
+	(*checker->checker_funcs->dump_func) (fp, checker);
 }
 static void
 dump_checker_list(FILE *fp, const list_head_t *l)
@@ -122,38 +132,10 @@ dump_connection_opts(FILE *fp, const void *data)
 		conf_write(fp, "     Last errno = %d", conn->last_errno);
 }
 
-void
-dump_checker_opts(FILE *fp, const void *data)
-{
-	const checker_t *checker = data;
-	const conn_opts_t *conn = checker->co;
-
-	if (conn) {
-		conf_write(fp, "   Connection");
-		dump_connection_opts(fp, conn);
-	}
-
-	conf_write(fp, "   Alpha is %s", checker->alpha ? "ON" : "OFF");
-	conf_write(fp, "   Log all failures %s", checker->log_all_failures ? "ON" : "OFF");
-	conf_write(fp, "   Delay loop = %f" , (double)checker->delay_loop / TIMER_HZ);
-	if (checker->retry) {
-		conf_write(fp, "   Retry count = %u" , checker->retry);
-		conf_write(fp, "   Retry delay = %f" , (double)checker->delay_before_retry / TIMER_HZ);
-	}
-	conf_write(fp, "   Warmup = %f", (double)checker->warmup / TIMER_HZ);
-
-	conf_write(fp, "   Enabled = %d", checker->enabled);
-	conf_write(fp, "   Is up = %d", checker->is_up);
-	conf_write(fp, "   Has run = %d", checker->has_run);
-	conf_write(fp, "   Retries left before fail = %u", checker->retry_it);
-	conf_write(fp, "   Delay before retry = %f", (double)checker->default_delay_before_retry / TIMER_HZ);
-}
-
 /* Queue a checker into the checkers_queue */
 checker_t *
-queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const checker_t *)
+queue_checker(const checker_funcs_t *funcs
 	      , thread_func_t launch
-	      , bool (*compare) (const checker_t *, checker_t *)
 	      , void *data
 	      , conn_opts_t *co
 	      , bool fd_required)
@@ -170,10 +152,8 @@ queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const 
 
 	PMALLOC(checker);
 	INIT_LIST_HEAD(&checker->e_list);
-	checker->free_func = free_func;
-	checker->dump_func = dump_func;
+	checker->checker_funcs = funcs;
 	checker->launch = launch;
-	checker->compare = compare;
 	checker->vs = vs;
 	checker->rs = rs;
 	checker->data = data;
@@ -213,7 +193,7 @@ bool
 check_conn_opts(conn_opts_t *co)
 {
 	if (co->dst.ss_family == AF_INET6 &&
-	    IN6_IS_ADDR_LINKLOCAL(&((struct sockaddr_in6*)&co->dst)->sin6_addr) &&
+	    IN6_IS_ADDR_LINKLOCAL(&PTR_CAST(struct sockaddr_in6, &co->dst)->sin6_addr) &&
 	    !co->bind_if[0]) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Checker link local address %s requires a bind_if", inet_sockaddrtos(&co->dst));
 		return false;
@@ -252,13 +232,13 @@ checker_set_dst_port(struct sockaddr_storage *dst, uint16_t port)
 	/* NOTE: we are relying on the offset of sin_port and sin6_port being
 	 * the same if an IPv6 address is specified after the port */
 	if (dst->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) dst;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, dst);
 		addr6->sin6_port = port;
 	} else if (dst->ss_family == AF_UNSPEC &&
 		   offsetof(struct sockaddr_in6, sin6_port) != offsetof(struct sockaddr_in, sin_port)) {
 		log_message(LOG_INFO, "BUG: checker_set_dst_port() in/in6 port offsets differ");
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) dst;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, dst);
 		addr4->sin_port = port;
 	}
 }
@@ -535,13 +515,14 @@ register_checkers_thread(void)
 	unsigned long warmup;
 
 	list_for_each_entry(checker, &checkers_queue, e_list) {
-		if (checker->launch)
-		{
+		if (checker->launch) {
 			if (checker->vs->ha_suspend && !checker->vs->ha_suspend_addr_count)
 				checker->enabled = false;
 
 			log_message(LOG_INFO, "%sctivating healthchecker for service %s for VS %s"
-					    , checker->enabled ? "A" : "Dea", FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
+					    , checker->enabled ? "A" : "Dea"
+					    , FMT_RS(checker->rs, checker->vs)
+					    , FMT_VS(checker->vs));
 
 			/* wait for a random timeout to begin checker thread.
 			   It helps avoiding multiple simultaneous checks to
@@ -576,11 +557,14 @@ addr_matches(const virtual_server_t *vs, void *address)
 	unsigned addr_base;
 	const void *addr;
 
+	if (vs->vsg)
+		return false;
+
 	if (vs->addr.ss_family != AF_UNSPEC) {
 		if (vs->addr.ss_family == AF_INET6)
-			addr = (const void *) &((const struct sockaddr_in6 *)&vs->addr)->sin6_addr;
+			addr = (const void *)&PTR_CAST_CONST(struct sockaddr_in6, &vs->addr)->sin6_addr;
 		else
-			addr = (const void *) &((const struct sockaddr_in *)&vs->addr)->sin_addr;
+			addr = (const void *)&PTR_CAST_CONST(struct sockaddr_in, &vs->addr)->sin_addr;
 
 		return inaddr_equal(vs->addr.ss_family, addr, address);
 	}
@@ -589,24 +573,23 @@ addr_matches(const virtual_server_t *vs, void *address)
 		return false;
 
 	if (vs->af == AF_INET) {
-		mask_addr = *(struct in_addr*)address;
+		mask_addr = *PTR_CAST(struct in_addr, address);
 		addr_base = ntohl(mask_addr.s_addr) & 0xFF;
 		mask_addr.s_addr &= htonl(0xFFFFFF00);
 	} else {
-		mask_addr6 = *(struct in6_addr*)address;
+		mask_addr6 = *PTR_CAST(struct in6_addr, address);
 		addr_base = ntohs(mask_addr6.s6_addr16[7]);
 		mask_addr6.s6_addr16[7] = 0;
 	}
 
 	list_for_each_entry(vsg_entry, &vs->vsg->addr_range, e_list) {
-		struct sockaddr_storage range_addr = vsg_entry->addr;
-		uint32_t ra_base;
+		uint32_t ra_base, ra_end;
 
-		if (!vsg_entry->range) {
+		if (!inet_sockaddrcmp(&vsg_entry->addr, &vsg_entry->addr_end)) {
 			if (vsg_entry->addr.ss_family == AF_INET6)
-				addr = (void *) &((struct sockaddr_in6 *)&vsg_entry->addr)->sin6_addr;
+				addr = (void *)&PTR_CAST(struct sockaddr_in6, &vsg_entry->addr)->sin6_addr;
 			else
-				addr = (void *) &((struct sockaddr_in *)&vsg_entry->addr)->sin_addr;
+				addr = (void *)&PTR_CAST(struct sockaddr_in, &vsg_entry->addr)->sin_addr;
 
 			if (inaddr_equal(vsg_entry->addr.ss_family, addr, address))
 				return true;
@@ -614,25 +597,29 @@ addr_matches(const virtual_server_t *vs, void *address)
 			continue;
 		}
 
-		if (range_addr.ss_family == AF_INET) {
+		if (vsg_entry->addr.ss_family == AF_INET) {
 			struct in_addr ra;
 
-			ra = ((struct sockaddr_in *)&range_addr)->sin_addr;
-			ra_base = ntohl(ra.s_addr) & 0xFF;
+			ra_base = ntohl(PTR_CAST(struct sockaddr_in, &vsg_entry->addr)->sin_addr.s_addr) & 0xFF;
+			ra_end = ntohl(PTR_CAST(struct sockaddr_in, &vsg_entry->addr_end)->sin_addr.s_addr) & 0xFF;
 
-			if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
+			if (addr_base < ra_base || addr_base > ra_end)
 				continue;
 
+			ra = PTR_CAST(struct sockaddr_in, &vsg_entry->addr)->sin_addr;
 			ra.s_addr &= htonl(0xFFFFFF00);
 			if (ra.s_addr != mask_addr.s_addr)
 				continue;
 		} else {
-			struct in6_addr ra = ((struct sockaddr_in6 *)&range_addr)->sin6_addr;
-			ra_base = ntohs(ra.s6_addr16[7]);
+			struct in6_addr ra;
 
-			if (addr_base < ra_base || addr_base > ra_base + vsg_entry->range)
+			ra_base = ntohs(PTR_CAST(struct sockaddr_in6, &vsg_entry->addr)->sin6_addr.s6_addr16[7]);
+			ra_end = ntohs(PTR_CAST(struct sockaddr_in6, &vsg_entry->addr_end)->sin6_addr.s6_addr16[7]);
+
+			if (addr_base < ra_base || addr_base > ra_end)
 				continue;
 
+			ra = PTR_CAST(struct sockaddr_in6, &vsg_entry->addr)->sin6_addr;
 			ra.s6_addr16[7] = 0;
 			if (!inaddr_equal(AF_INET6, &ra, &mask_addr6))
 				continue;

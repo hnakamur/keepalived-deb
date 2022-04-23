@@ -20,8 +20,8 @@
  * Copyright (C) 2015-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _BFD_DATA_H_
-#define _BFD_DATA_H_
+#ifndef _BFD_DATA_H
+#define _BFD_DATA_H
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -45,6 +45,9 @@ extern bool alloc_bfd(const char *);
 extern void free_bfd(bfd_t *);
 extern bfd_data_t *alloc_bfd_data(void);
 extern void dump_bfd_data(FILE *, const bfd_data_t *);
+#ifndef _ONE_PROCESS_DEBUG_
+extern void dump_bfd_data_global(FILE *);
+#endif
 extern void bfd_print_data(void);
 extern void free_bfd_data(bfd_data_t *);
 extern void bfd_complete_init(void);
@@ -56,4 +59,4 @@ extern bfd_t *find_bfd_by_name(const char *) __attribute__ ((pure));
 extern uint32_t rand_intv(uint32_t, uint32_t);
 extern uint32_t bfd_get_random_discr(bfd_data_t *);
 
-#endif				/* _BFD_DATA_H_ */
+#endif				/* _BFD_DATA_H */

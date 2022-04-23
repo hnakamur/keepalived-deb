@@ -24,11 +24,9 @@ The following build packages are needed:
 	make
 	autoconf automake (to build from git source tree rather than tarball)
 The following libraries need to be installed:
-	openssl-devel libnl3-devel ipset-devel
+	openssl-devel libnl3-devel
 For iptables support:
-	libxtables-dev libip6tc-dev libip4tc-dev
-	  or on older installations:
-	iptables-devel
+	iptables-devel ipset-devel
 For magic file identification support:
 	file-devel
 For SNMP support:
@@ -39,6 +37,8 @@ For PCRE support
 	pcre2-devel
 For nftables support
 	libnftnl-devel libmnl-devel
+For systemd integration
+	systemd-devel
 
 For building the documentation, the following packages need to be installed:
 	Fedora: python-sphinx (will pull in: python2-sphinx_rtd_theme)
@@ -47,12 +47,17 @@ For building the documentation, the following packages need to be installed:
 	Fedora: latexmk python-sphinx-latex
 	CentOS-and-friends: latexmk texlive texlive-titlesec texlive-framed texlive-threeparttable texlive-wrapfig texlive-multirow
 
+To build using clang/llvm
+	clang compiler-rt lld
+
 Debian/Ubuntu
 -------------
 For building packages:
 	build-essential pkg-config, and to build from git repo automake autoconf
 The following libraries need to be installed:
 	iptables-dev libipset-dev libnl-3-dev libnl-genl-3-dev libssl-dev
+  or for more recent versions of the distros (e.g. Ubuntu Focal):
+	libxtables-dev libip4tc-dev libip6tc-dev libipset-dev libnl-3-dev libnl-genl-3-dev libssl-dev
 For magic file identification support:
 	libmagic-dev
 For SNMP support:
@@ -63,6 +68,8 @@ For PCRE support:
 	libpcre2-dev
 For nftables support
 	libnftnl-dev libmnl-dev
+For systemd integration
+	libsystemd-dev
 
 For building the documentation, the following packages need to be installed:
 	python-sphinx python-sphinx-rtd-theme
@@ -128,7 +135,7 @@ Installing from a git repo
 ==========================
 To install from a git repo, execute:
   1. Ensure you have autoconf and automake installed
-  2. git clone http://github.com/acassen/keepalived
+  2. git clone https://github.com/acassen/keepalived.git
   3. cd keepalived
   4. ./build_setup	# generate the autoconf and automake environment
   5. Follow the instructions below for Installation, omitting the first two steps.
@@ -143,9 +150,9 @@ Installation
   5. 'make install'. This will install keepalived on your system,
      binaries and configuration file :
      * keepalived : The keepalived daemon program.
-     * genhash : The MD5 url digest generator. You need it to
-                 configure HTTP GET check and SSL GET check in
-                 order to compute MD5SUM digest etalon.
+     * genhash    : The MD5 url digest generator. You need it to
+                    configure HTTP GET check and SSL GET check in
+                    order to compute MD5SUM digest etalon.
      * /etc/keepalived/keepalived.conf
   6. link keepalived.init into your runlevel directory. On Red Hat systems :
      ln -s /etc/rc.d/init.d/keepalived.init /etc/rc.d/rc3.d/S99keepalived
@@ -207,8 +214,8 @@ To update the keepalived source code, put a new tarball in the image
 directory (the Dockerfile may need updating with a new version).
 
 Useful docker commands are:
-docker logs keepalvied 2>&1 | lessa	# view system logs of container
-docker exec it keepalived bash		# execute shell in container
+docker logs keepalived 2>&1 | less	# view system logs of container
+docker exec -it keepalived bash		# execute shell in container
 docker rm -f keepalived			# Remove the container
 
 keepalived is unable to load the ip_tables, ip6_tables, xt_set and ip_vs
@@ -230,9 +237,9 @@ create a rule in the AWS security group. The rule should be "Custom Protocol"
 and value should be "112" (the VRRP protocol number). All ports should be opened.
 
 
-Running with SElinux
+Running with SELinux
 ====================
-If the system running keepalived has SElinux enabled in enforcing mode, keepalived
+If the system running keepalived has SELinux enabled in enforcing mode, keepalived
 may have difficulty running scripts, accessing configuration files, etc, especially
 if keepalived is being started by systemd.
 

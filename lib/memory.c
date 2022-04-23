@@ -45,6 +45,7 @@
 #include "process.h"
 
 #ifdef _MEM_CHECK_
+#include "align.h"
 #include "timer.h"
 #include "rbtree.h"
 #include "list_head.h"
@@ -76,9 +77,11 @@ xalloc(unsigned long size)
 	}
 
 #ifdef _MEM_CHECK_
-	mem_allocated += size - sizeof(long);
-	if (mem_allocated > max_mem_allocated)
-		max_mem_allocated = mem_allocated;
+	if (__test_bit(MEM_CHECK_BIT, &debug)) {
+		mem_allocated += size - sizeof(long);
+		if (mem_allocated > max_mem_allocated)
+			max_mem_allocated = mem_allocated;
+	}
 #endif
 
 	return mem;
@@ -185,12 +188,6 @@ memcheck_ptr_cmp(const MEMCHECK *m1, const MEMCHECK *m2)
 	return (char *)m1->ptr - (char *)m2->ptr;
 }
 
-static inline int
-memcheck_seq_cmp(const MEMCHECK *m1, const MEMCHECK *m2)
-{
-	return m1->seq_num - m2->seq_num;
-}
-
 static const char *
 format_time(void)
 {
@@ -204,6 +201,9 @@ format_time(void)
 void
 memcheck_log(const char *called_func, const char *param, const char *file, const char *function, int line)
 {
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return;
+
 	int len = strlen(called_func) + (param ? strlen(param) : 0);
 
 	if ((len = 36 - len) < 0)
@@ -241,7 +241,7 @@ keepalived_malloc_common(size_t size, const char *file, const char *function, in
 	buf = zalloc(size + sizeof (unsigned long));
 
 #ifndef _NO_UNALIGNED_ACCESS_
-	*(unsigned long *) ((char *) buf + size) = size + CHECK_VAL;
+	*(unsigned long *) PTR_CAST_ASSIGN((char *) buf + size) = size + CHECK_VAL;
 #else
 	unsigned long check_val = CHECK_VAL;
 
@@ -286,6 +286,9 @@ keepalived_malloc_common(size_t size, const char *file, const char *function, in
 void *
 keepalived_malloc(size_t size, const char *file, const char *function, int line)
 {
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return zalloc(size);
+
 	return keepalived_malloc_common(size, file, function, line, "zalloc");
 }
 
@@ -293,6 +296,9 @@ char *
 keepalived_strdup(const char *str, const char *file, const char *function, int line)
 {
 	char *str_p;
+
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return strdup(str);
 
 	str_p = keepalived_malloc_common(strlen(str) + 1, file, function, line, "strdup");
 	return strcpy(str_p, str);
@@ -302,6 +308,9 @@ char *
 keepalived_strndup(const char *str, size_t size, const char *file, const char *function, int line)
 {
 	char *str_p;
+
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return strndup(str, size);
 
 	str_p = keepalived_malloc_common(size + 1, file, function, line, "strndup");
 	return strncpy(str_p, str, size);
@@ -395,7 +404,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 	check = entry->size + CHECK_VAL;
 #ifndef _NO_UNALIGNED_ACCESS_
-	if (*(unsigned long *)((char *)buffer + entry->size) != check) {
+	if (*(unsigned long *) PTR_CAST_ASSIGN((char *)buffer + entry->size) != check) {
 #else
 	if (memcmp((unsigned char *)buffer + entry->size, (unsigned char *)&check_val, sizeof(check_val))) {
 #endif
@@ -469,6 +478,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 		number_alloc_list--;
 
+		/* coverity[leaked_storage] - entry2 is added to the bad_list */
 		return NULL;
 	}
 
@@ -494,7 +504,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 #endif
 
 #ifndef _NO_UNALIGNED_ACCESS_
-	*(unsigned long *) ((char *) buffer + size) = size + CHECK_VAL;
+	*(unsigned long *) PTR_CAST_ASSIGN((char *) buffer + size) = size + CHECK_VAL;
 #else
 	memcpy((unsigned char *)buffer + size, (unsigned char *)&check_val, sizeof(check_val));
 #endif
@@ -519,6 +529,11 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 void
 keepalived_free(void *buffer, const char *file, const char *function, int line)
 {
+	if (!__test_bit(MEM_CHECK_BIT, &debug)) {
+		free(buffer);
+		return;
+	}
+
 	keepalived_free_realloc_common(buffer, 0, file, function, line, false);
 }
 
@@ -526,6 +541,9 @@ void *
 keepalived_realloc(void *buffer, size_t size, const char *file,
 		   const char *function, int line)
 {
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return realloc(buffer, size);
+
 	return keepalived_free_realloc_common(buffer, size, file, function, line, true);
 }
 
@@ -535,6 +553,9 @@ keepalived_alloc_log(bool final)
 	unsigned int overrun = 0, badptr = 0, zero_size = 0;
 	size_t sum = 0;
 	MEMCHECK *entry;
+
+	if (!__test_bit(MEM_CHECK_BIT, &debug))
+		return;
 
 	if (final) {
 		/* If this is a forked child, we don't want the dump */
@@ -670,7 +691,7 @@ mem_log_init(const char* prog_name, const char *banner)
 	if (log_op)
 		fclose(log_op);
 
-	log_name_len = 5 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
+	log_name_len = strlen(KA_TMP_DIR) + 1 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* KA_TMP_DIR + "/" + prog_name + "_mem." + PID + ".log" + '\0" */
 	log_name = malloc(log_name_len);
 	if (!log_name) {
 		log_message(LOG_INFO, "Unable to malloc log file name");
@@ -678,7 +699,7 @@ mem_log_init(const char* prog_name, const char *banner)
 		return;
 	}
 
-	snprintf(log_name, log_name_len, "/tmp/%s_mem.%d.log", prog_name, getpid());
+	snprintf(log_name, log_name_len, KA_TMP_DIR "/%s_mem.%d.log", prog_name, getpid());
 	log_op = fopen_safe(log_name, "w");
 	if (log_op == NULL) {
 		log_message(LOG_INFO, "Unable to open %s for appending", log_name);

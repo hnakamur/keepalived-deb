@@ -13,13 +13,9 @@ edit = echo "  EDIT     $@"; \
 
 SUBDIRS			= lib keepalived doc
 
-if BUILD_GENHASH
-  SUBDIRS		+= genhash
-endif
-
 SUBDIRS			+= bin_install
 
-EXTRA_DIST		= AUTHOR CONTRIBUTORS snap README.md build_setup autogen.sh
+EXTRA_DIST		= AUTHOR CONTRIBUTORS snap README.md build_setup autogen.sh tools/timed_reload
 
 doc_DATA		= README
 
@@ -34,7 +30,21 @@ distclean-local:
 	@rm -f aclocal.m4 keepalived-$(VERSION).tar.gz config.log config.status
 	@rm -rf autom4te.cache
 
+# If we are in a git tree, set the last modified date of each unmodified source file
+# based on its git commit date. This will help repeatable builds.
 dist-hook:
+	@if [ -x `type -p git` ]; then \
+		git rev-parse --is-inside-work-tree >/dev/null 2>&1; \
+		if [ $$? -eq 0 ]; then \
+			echo "  DATESET git tree"; \
+			for f in `git ls-tree --full-tree -r --name-only HEAD`; \
+			do \
+				if [ -n "`git status --porcelain $$f`" ]; then continue; fi; \
+				if [ ! -f $(top_distdir)/$$f ]; then continue; fi; \
+				touch --date=@`git log -n 1 --format=%ct -- $$f` $(top_distdir)/$$f; \
+			done \
+		fi \
+	fi
 	@rm -f $(distdir)/README
 
 .PHONY: docker

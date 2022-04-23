@@ -5,6 +5,12 @@
 #define _CONFIG_H
   
 
+/* Define to 1 to cast via void * */
+#undef CAST_VIA_VOID
+
+/* Define to 1 to do runtime cast alignment checks */
+#undef CHECK_CAST_ALIGN
+
 /* Define if need to check for EINTR errno */
 #undef CHECK_EINTR
 
@@ -29,6 +35,15 @@
 /* Defined here if not found in <net/ethernet.h>. */
 #undef ETHERTYPE_IPV6
 
+/* Named changed in OpenSSL v1.1.0 */
+#undef EVP_MD_CTX_free
+
+/* Named changed in OpenSSL v1.1.0 */
+#undef EVP_MD_CTX_new
+
+/* Named changed in OpenSSL v1.1.0 */
+#undef EVP_MD_CTX_reset
+
 /* set to enforce GNU standard paths, for .pid files etc */
 #undef GNU_STD_PATHS
 
@@ -37,10 +52,6 @@
 
 /* Define to 1 if you have the <asm/types.h> header file. */
 #undef HAVE_ASM_TYPES_H
-
-/* Define to 1 if you have the declaration of `CLONE_NEWNET', and to 0 if you
-   don't. */
-#undef HAVE_DECL_CLONE_NEWNET
 
 /* Define to 1 if you have the declaration of `ETHERTYPE_IPV6', and to 0 if
    you don't. */
@@ -57,10 +68,6 @@
 /* Define to 1 if you have the declaration of `FRA_L3MDEV', and to 0 if you
    don't. */
 #undef HAVE_DECL_FRA_L3MDEV
-
-/* Define to 1 if you have the declaration of `FRA_OIFNAME', and to 0 if you
-   don't. */
-#undef HAVE_DECL_FRA_OIFNAME
 
 /* Define to 1 if you have the declaration of `FRA_PROTOCOL', and to 0 if you
    don't. */
@@ -86,6 +93,10 @@
    don't. */
 #undef HAVE_DECL_FRA_UID_RANGE
 
+/* Define to 1 if you have the declaration of `GLOB_ALTDIRFUNC', and to 0 if
+   you don't. */
+#undef HAVE_DECL_GLOB_ALTDIRFUNC
+
 /* Define to 1 if you have the declaration of `GLOB_BRACE', and to 0 if you
    don't. */
 #undef HAVE_DECL_GLOB_BRACE
@@ -98,13 +109,13 @@
    to 0 if you don't. */
 #undef HAVE_DECL_IFLA_INET6_ADDR_GEN_MODE
 
+/* Define to 1 if you have the declaration of `IFLA_IPVLAN_FLAGS', and to 0 if
+   you don't. */
+#undef HAVE_DECL_IFLA_IPVLAN_FLAGS
+
 /* Define to 1 if you have the declaration of `IFLA_IPVLAN_MODE', and to 0 if
    you don't. */
 #undef HAVE_DECL_IFLA_IPVLAN_MODE
-
-/* Define to 1 if you have the declaration of `IFLA_MACVLAN_MODE', and to 0 if
-   you don't. */
-#undef HAVE_DECL_IFLA_MACVLAN_MODE
 
 /* Define to 1 if you have the declaration of `IFLA_VRF_MAX', and to 0 if you
    don't. */
@@ -126,13 +137,9 @@
    0 if you don't. */
 #undef HAVE_DECL_IPV4_DEVCONF_RP_FILTER
 
-/* Define to 1 if you have the declaration of `IPV6_RECVHOPLIMIT', and to 0 if
+/* Define to 1 if you have the declaration of `IPVLAN_MODE_L3S', and to 0 if
    you don't. */
-#undef HAVE_DECL_IPV6_RECVHOPLIMIT
-
-/* Define to 1 if you have the declaration of `IPV6_RECVPKTINFO', and to 0 if
-   you don't. */
-#undef HAVE_DECL_IPV6_RECVPKTINFO
+#undef HAVE_DECL_IPVLAN_MODE_L3S
 
 /* Define to 1 if you have the declaration of `IPVS_DAEMON_ATTR_MCAST_GROUP',
    and to 0 if you don't. */
@@ -170,17 +177,9 @@
    0 if you don't. */
 #undef HAVE_DECL_IPVS_SVC_ATTR_STATS64
 
-/* Define to 1 if you have the declaration of `IP_MULTICAST_ALL', and to 0 if
-   you don't. */
-#undef HAVE_DECL_IP_MULTICAST_ALL
-
 /* Define to 1 if you have the declaration of `IP_VS_CONN_F_TUNNEL_TYPE_GRE',
    and to 0 if you don't. */
 #undef HAVE_DECL_IP_VS_CONN_F_TUNNEL_TYPE_GRE
-
-/* Define to 1 if you have the declaration of `IP_VS_SVC_F_ONEPACKET', and to
-   0 if you don't. */
-#undef HAVE_DECL_IP_VS_SVC_F_ONEPACKET
 
 /* Define to 1 if you have the declaration of
    `IP_VS_TUNNEL_ENCAP_FLAG_NOCSUM', and to 0 if you don't. */
@@ -194,13 +193,21 @@
    if you don't. */
 #undef HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 
-/* Define to 1 if you have the declaration of `MACVLAN_MODE_PRIVATE', and to 0
-   if you don't. */
-#undef HAVE_DECL_MACVLAN_MODE_PRIVATE
-
 /* Define to 1 if you have the declaration of `NFTA_DUP_MAX', and to 0 if you
    don't. */
 #undef HAVE_DECL_NFTA_DUP_MAX
+
+/* Define to 1 if you have the declaration of `NFTNL_SET_DESC_CONCAT', and to
+   0 if you don't. */
+#undef HAVE_DECL_NFTNL_SET_DESC_CONCAT
+
+/* Define to 1 if you have the declaration of `NFTNL_SET_ELEM_KEY_END', and to
+   0 if you don't. */
+#undef HAVE_DECL_NFTNL_SET_ELEM_KEY_END
+
+/* Define to 1 if you have the declaration of `NFTNL_SET_EXPR', and to 0 if
+   you don't. */
+#undef HAVE_DECL_NFTNL_SET_EXPR
 
 /* Define to 1 if you have the declaration of `nftnl_udata_buf_alloc', and to
    0 if you don't. */
@@ -210,33 +217,17 @@
    if you don't. */
 #undef HAVE_DECL_NFTNL_UDATA_PUT_U32
 
+/* Define to 1 if you have the declaration of `NFT_SET_CONCAT', and to 0 if
+   you don't. */
+#undef HAVE_DECL_NFT_SET_CONCAT
+
 /* Define to 1 if you have the declaration of `NFT_USERDATA_MAXLEN', and to 0
    if you don't. */
 #undef HAVE_DECL_NFT_USERDATA_MAXLEN
 
-/* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
-   */
-#undef HAVE_DECL_O_PATH
-
-/* Define to 1 if you have the declaration of `PROC_EVENT_COMM', and to 0 if
-   you don't. */
-#undef HAVE_DECL_PROC_EVENT_COMM
-
-/* Define to 1 if you have the declaration of `PROC_EVENT_COREDUMP', and to 0
-   if you don't. */
-#undef HAVE_DECL_PROC_EVENT_COREDUMP
-
-/* Define to 1 if you have the declaration of `PROC_EVENT_PTRACE', and to 0 if
-   you don't. */
-#undef HAVE_DECL_PROC_EVENT_PTRACE
-
-/* Define to 1 if you have the declaration of `PROC_EVENT_SID', and to 0 if
-   you don't. */
-#undef HAVE_DECL_PROC_EVENT_SID
-
-/* Define to 1 if you have the declaration of `RLIMIT_RTTIME', and to 0 if you
+/* Define to 1 if you have the declaration of `O_TMPFILE', and to 0 if you
    don't. */
-#undef HAVE_DECL_RLIMIT_RTTIME
+#undef HAVE_DECL_O_TMPFILE
 
 /* Define to 1 if you have the declaration of `RTAX_CC_ALGO', and to 0 if you
    don't. */
@@ -278,27 +269,19 @@
    to 0 if you don't. */
 #undef HAVE_DECL_RTEXT_FILTER_SKIP_STATS
 
-/* Define to 1 if you have the declaration of `SCHED_RESET_ON_FORK', and to 0
-   if you don't. */
-#undef HAVE_DECL_SCHED_RESET_ON_FORK
-
-/* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
-   don't. */
-#undef HAVE_DECL_SOCK_CLOEXEC
-
-/* Define to 1 if you have the declaration of `SOCK_NONBLOCK', and to 0 if you
-   don't. */
-#undef HAVE_DECL_SOCK_NONBLOCK
-
 /* Define to 1 if you have the declaration of `SO_MARK', and to 0 if you
    don't. */
 #undef HAVE_DECL_SO_MARK
 
+/* Define to 1 if you have the declaration of `__NR_memfd_create', and to 0 if
+   you don't. */
+#undef HAVE_DECL___NR_MEMFD_CREATE
+
 /* Define to 1 if you have the `dup2' function. */
 #undef HAVE_DUP2
 
-/* Define to 1 if you have the `epoll_create1' function. */
-#undef HAVE_EPOLL_CREATE1
+/* Define to 1 if you have the `dup3' function. */
+#undef HAVE_DUP3
 
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
@@ -315,14 +298,8 @@
 /* Define to 1 if IFLA_LINK_NETNSID supported */
 #undef HAVE_IFLA_LINK_NETNSID
 
-/* Define to 1 if you have the `inotify_init1' function. */
-#undef HAVE_INOTIFY_INIT1
-
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
-
-/* Define to 1 if ipset supports iface type */
-#undef HAVE_IPSET_ATTR_IFACE
 
 /* Define to 1 if you have the `crypto' library (-lcrypto). */
 #undef HAVE_LIBCRYPTO
@@ -381,15 +358,6 @@
 /* Define to 1 if you have the <linux/ip.h> header file. */
 #undef HAVE_LINUX_IP_H
 
-/* Define to 1 if you have the <linux/ip_vs.h> header file. */
-#undef HAVE_LINUX_IP_VS_H
-
-/* Define to 1 if you have the <linux/netfilter/xt_set.h> header file. */
-#undef HAVE_LINUX_NETFILTER_XT_SET_H
-
-/* Define to 1 if you have the <linux/netfilter/x_tables.h> header file. */
-#undef HAVE_LINUX_NETFILTER_X_TABLES_H
-
 /* Define to 1 if you have the <linux/rtnetlink.h> header file. */
 #undef HAVE_LINUX_RTNETLINK_H
 
@@ -401,6 +369,9 @@
 
 /* Define to 1 if you have the `malloc' function. */
 #undef HAVE_MALLOC
+
+/* Define to 1 if you have the `memfd_create' function. */
+#undef HAVE_MEMFD_CREATE
 
 /* Define to 1 if you have the `memmove' function. */
 #undef HAVE_MEMMOVE
@@ -448,6 +419,9 @@
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
 
+/* Define to 1 if you have the <openssl/evp.h> header file. */
+#undef HAVE_OPENSSL_EVP_H
+
 /* Define to 1 if you have the `OPENSSL_init_crypto' function. */
 #undef HAVE_OPENSSL_INIT_CRYPTO
 
@@ -457,14 +431,8 @@
 /* Define to 1 if you have the <openssl/md5.h> header file. */
 #undef HAVE_OPENSSL_MD5_H
 
-/* Define to 1 if you have the <openssl/sha.h> header file. */
-#undef HAVE_OPENSSL_SHA_H
-
 /* Define to 1 if you have the <openssl/ssl.h> header file. */
 #undef HAVE_OPENSSL_SSL_H
-
-/* Define to 1 if you have the `pipe2' function. */
-#undef HAVE_PIPE2
 
 /* Define to 1 if you have the `realloc' function. */
 #undef HAVE_REALLOC
@@ -474,12 +442,6 @@
 
 /* Define to 1 if you have the `setenv' function. */
 #undef HAVE_SETENV
-
-/* Define to 1 if you have the `setns' function. */
-#undef HAVE_SETNS
-
-/* Define to 1 if you have the `signalfd' function. */
-#undef HAVE_SIGNALFD
 
 /* Define to 1 if you have the `socket' function. */
 #undef HAVE_SOCKET
@@ -580,12 +542,6 @@
 /* Define to 1 if `vfork' works. */
 #undef HAVE_WORKING_VFORK
 
-/* Define to 1 if have struct xt_set_info_match_v1 */
-#undef HAVE_XT_SET_INFO_MATCH_V1
-
-/* Define to 1 if have struct xt_set_info_match_v3 */
-#undef HAVE_XT_SET_INFO_MATCH_V3
-
 /* Define to 1 if have struct xt_set_info_match_v4 */
 #undef HAVE_XT_SET_INFO_MATCH_V4
 
@@ -601,18 +557,14 @@
 /* Define the ipset library name */
 #undef IPSET_LIB_NAME
 
-/* Defined to value in <linux/in.h> if not in <netinet/in.h> */
-#undef IP_MULTICAST_ALL
+/* Location for temporary files */
+#undef KA_TMP_DIR
+
+/* Length of KA_TMP_DIR */
+#undef KA_TMP_DIR_LEN
 
 /* configure options specified */
 #undef KEEPALIVED_CONFIGURE_OPTIONS
-
-/* Define to add guard _IP_SET_H before including <libipset/linux_ip_set.h> */
-#undef LIBIPSET_H_ADD_IP_SET_H_GUARD
-
-/* Define to add guard _UAPI_IP_SET_H before including
-   <libipset/linux_ip_set.h> */
-#undef LIBIPSET_H_ADD_UAPI_IP_SET_H_GUARD
 
 /* Define to 1 if libipset library version prior to v7 */
 #undef LIBIPSET_PRE_V7_COMPAT
@@ -626,8 +578,11 @@
 /* The type of parameter __line passed to __assert_fail() */
 #undef LINE_type
 
-/* Define to 1 if <linux/netlink.h> needs <sys/socket.h> */
-#undef NETLINK_H_NEEDS_SYS_SOCKET_H
+/* Define to not inline if using GCC LTO */
+#undef LTO_NOINLINE
+
+/* Define to 1 if can use concats with ranges in nftables */
+#undef NFT_RANGE_CONCATS
 
 /* Define the nl-genl-3.0 library name */
 #undef NL3_GENL_LIB_NAME
@@ -665,14 +620,8 @@
 /* Define printf format specifier for rlim_t */
 #undef PRI_rlim_t
 
-/* Define to 1 if <linux/rtnetlink.h> needs <sys/socket.h> */
-#undef RTNETLINK_H_NEEDS_SYS_SOCKET_H
-
 /* Parent directory of /run */
 #undef RUN_DIR_ROOT
-
-/* Dummy definition if not defined in system headers */
-#undef SCHED_RESET_ON_FORK
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
@@ -683,15 +632,11 @@
 /* Define to 1 to build with thread dumping support */
 #undef THREAD_DUMP
 
-/* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
-   */
-#undef USE_LIBIPSET_LINUX_IP_SET_H
+/* Use syscall for memfd_create */
+#undef USE_MEMFD_CREATE_SYSCALL
 
 /* Version number of package */
 #undef VERSION
-
-/* Define if <linux/netfilter/x_tables.h> doesnt define it */
-#undef XT_EXTENSION_MAXNAMELEN
 
 /* Define to enable checker debugging */
 #undef _CHECKER_DEBUG_
@@ -718,14 +663,8 @@
 /* Consider ${with_fixed_if_type} interfaces to be unchangeable */
 #undef _FIXED_IF_TYPE_
 
-/* Define to enable genhash debugging */
-#undef _GENHASH_DEBUG_
-
 /* Define to 1 if can have _Pragma GCC diagnostic push/pop */
 #undef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
-
-/* Define to 1 if have FIB routing support */
-#undef _HAVE_FIB_ROUTING_
 
 /* Define to 1 if can have _Pragma GCC diagnostic in functions */
 #undef _HAVE_FUNCTION_DIAGNOSTIC_PRAGMAS_
@@ -771,9 +710,6 @@
 
 /* Define to 1 if have linux/if.h followed by net/if.h namespace collision */
 #undef _HAVE_NET_LINUX_IF_H_COLLISION_
-
-/* Define to 1 if have pe selection support */
-#undef _HAVE_PE_NAME_
 
 /* Define to 1 if _Pragma("GCC diagnostic warning \"-Wstrict-overflow=1\"")
    supported */
@@ -824,6 +760,9 @@
 /* Define to enable parser debugging */
 #undef _PARSER_DEBUG_
 
+/* Define to add VRRP recvmsg() debugging code */
+#undef _RECVMSG_DEBUG_
+
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
 
@@ -867,14 +806,14 @@
    #define below would cause a syntax error. */
 #undef _UINT8_T
 
+/* Define to 1 if want systemd notify support */
+#undef _USE_SYSTEMD_NOTIFY_
+
 /* Define to 1 to build with vrrp fd debugging support */
 #undef _VRRP_FD_DEBUG_
 
 /* Define to 1 if have BFD support */
 #undef _WITH_BFD_
-
-/* Define to 1 if have linux/cn_proc.h and track-process not disabled */
-#undef _WITH_CN_PROC_
 
 /* Define to 1 to have DBUS support */
 #undef _WITH_DBUS_
@@ -918,9 +857,6 @@
 /* Define to 1 to include regex timers */
 #undef _WITH_REGEX_TIMERS_
 
-/* Define to 1 to have SHA1 support */
-#undef _WITH_SHA1_
-
 /* Define to 1 to have SNMP support */
 #undef _WITH_SNMP_
 
@@ -947,6 +883,9 @@
 
 /* Define to 1 to build with stacktrace support */
 #undef _WITH_STACKTRACE_
+
+/* Define to 1 if track-process not disabled */
+#undef _WITH_TRACK_PROCESS_
 
 /* Define to 1 to enable v1.3.6 and earlier VRRPv3 unicast checksum
    compatibility */

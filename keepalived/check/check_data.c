@@ -52,7 +52,10 @@ check_data_t *old_check_data = NULL;
 ssl_data_t *
 alloc_ssl(void)
 {
-	return (ssl_data_t *) MALLOC(sizeof(ssl_data_t));
+	ssl_data_t *ssl_data;
+
+	PMALLOC(ssl_data);
+	return ssl_data;
 }
 void
 free_ssl(void)
@@ -106,24 +109,19 @@ free_vsg_entry_list(list_head_t *l)
 static void
 dump_vsg_entry(FILE *fp, const virtual_server_group_entry_t *vsg_entry)
 {
-	uint16_t start;
+	char start_addr[INET6_ADDRSTRLEN];
 
 	if (vsg_entry->is_fwmark) {
 		conf_write(fp, "   FWMARK = %u%s", vsg_entry->vfwmark, vsg_entry->fwm_family == AF_INET ? " IPv4" : vsg_entry->fwm_family == AF_INET6 ? " IPv6" : "");
-		conf_write(fp, "   Alive: %u IPv4, %u IPv6",
+		conf_write(fp, "     Alive: %u IPv4, %u IPv6",
 				vsg_entry->fwm4_alive, vsg_entry->fwm6_alive);
 	} else {
-		if (vsg_entry->range) {
-			start = vsg_entry->addr.ss_family == AF_INET ?
-				  ntohl(((const struct sockaddr_in*)&vsg_entry->addr)->sin_addr.s_addr) & 0xFF :
-				  ntohs(((const struct sockaddr_in6*)&vsg_entry->addr)->sin6_addr.s6_addr16[7]);
-			conf_write(fp,
-				    vsg_entry->addr.ss_family == AF_INET ?
-					"   VIP Range = %s-%u, VPORT = %d" :
-					"   VIP Range = %s-%x, VPORT = %d",
-				    inet_sockaddrtos(&vsg_entry->addr),
-				    start + vsg_entry->range,
-				    ntohs(inet_sockaddrport(&vsg_entry->addr)));
+		if (inet_sockaddrcmp(&vsg_entry->addr, &vsg_entry->addr_end)) {
+			strcpy(start_addr, inet_sockaddrtos(&vsg_entry->addr));
+			conf_write(fp, "   VIP Range = %s-%s, VPORT = %d",
+				   start_addr,
+				   inet_sockaddrtos(&vsg_entry->addr_end),
+				   ntohs(inet_sockaddrport(&vsg_entry->addr)));
 		} else
 			conf_write(fp, "   VIP = %s, VPORT = %d"
 					    , inet_sockaddrtos(&vsg_entry->addr)
@@ -163,6 +161,13 @@ dump_vsg(FILE *fp, const virtual_server_group_t *vsg)
 {
 	conf_write(fp, " ------< Virtual server group >------");
 	conf_write(fp, " Virtual Server Group = %s, IPv4 = %s, IPv6 = %s", vsg->gname, vsg->have_ipv4 ? "yes" : "no", vsg->have_ipv6 ? "yes" : "no");
+#ifdef _WITH_NFTABLES_
+	if (global_data->ipvs_nf_table_name &&
+	    (vsg->auto_fwmark[TCP_INDEX] ||
+	     vsg->auto_fwmark[UDP_INDEX] ||
+	     vsg->auto_fwmark[SCTP_INDEX]))
+		conf_write(fp, "  Fwmark TCP: %u UDP: %u SCTP: %u", vsg->auto_fwmark[TCP_INDEX], vsg->auto_fwmark[UDP_INDEX], vsg->auto_fwmark[SCTP_INDEX]);
+#endif
 	dump_vsg_entry_list(fp, &vsg->addr_range);
 	dump_vsg_entry_list(fp, &vsg->vfwmark);
 }
@@ -197,11 +202,20 @@ alloc_vsg_entry(const vector_t *strvec)
 	uint32_t range;
 	unsigned fwmark;
 	const char *family_str;
+	const char *addr_str = strvec_slot(strvec, 0);
+	char *endptr;
+	const char *mask_str;
+	unsigned mask;
+	uint32_t mask_bit, mask_bits;
+	bool bad;
+	unsigned i;
+	const char *end_str;
+	int diff;
 
 	PMALLOC(new);
 	INIT_LIST_HEAD(&new->e_list);
 
-	if (!strcmp(strvec_slot(strvec, 0), "fwmark")) {
+	if (!strcmp(addr_str, "fwmark")) {
 		if (!read_unsigned_strvec(strvec, 1, &fwmark, 0, UINT32_MAX, true)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "(%s): fwmark '%s' must be in [0, %u] - ignoring", vsg->gname, strvec_slot(strvec, 1), UINT32_MAX);
 			FREE(new);
@@ -229,12 +243,6 @@ alloc_vsg_entry(const vector_t *strvec)
 		new->is_fwmark = true;
 		list_add_tail(&new->e_list, &vsg->vfwmark);
 	} else {
-		if (!inet_stor(strvec_slot(strvec, 0), &range)) {
-			FREE(new);
-			return;
-		}
-		new->range = (uint32_t)range;
-
 		if (vector_size(strvec) >= 2) {
 			/* Don't pass a port number of 0. This was added v2.0.7 to support legacy
 			 * configuration since previously having no port wasn't allowed. */
@@ -245,7 +253,7 @@ alloc_vsg_entry(const vector_t *strvec)
 		else
 			port_str = NULL;
 
-		if (inet_stosockaddr(strvec_slot(strvec, 0), port_str, &new->addr)) {
+		if (inet_stosockaddr(addr_str, port_str, &new->addr)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Invalid virtual server group IP address %s %s%s%s - skipping", strvec_slot(strvec, 0),
 						port_str ? "/port" : "", port_str ? "/" : "", port_str ? port_str : "");
 			FREE(new);
@@ -253,27 +261,119 @@ alloc_vsg_entry(const vector_t *strvec)
 		}
 #ifndef LIBIPVS_USE_NL
 		if (new->addr.ss_family != AF_INET) {
-			report_config_error(CONFIG_GENERAL_ERROR, "IPVS does not support IPv6 in this build - skipping %s", strvec_slot(strvec, 0));
+			report_config_error(CONFIG_GENERAL_ERROR, "IPVS does not support IPv6 in this build - skipping %s", addr_str);
 			FREE(new);
 			return;
 		}
 #endif
 
-		/* If no range specified, new->range == UINT32_MAX */
-		if (new->range == UINT32_MAX)
-			new->range = 0;
-		else {
-			if (new->addr.ss_family == AF_INET)
-				start = ntohl(((struct sockaddr_in *)&new->addr)->sin_addr.s_addr) & 0xFF;
-			else
-				start = ntohs(((struct sockaddr_in6 *)&new->addr)->sin6_addr.s6_addr16[7]);
-
-			if (start >= new->range) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Address range end is not greater than address range start - %s - skipping", strvec_slot(strvec, 0));
+		if ((mask_str = strchr(addr_str, '/'))) {
+			mask = strtoul(mask_str + 1, &endptr, 10);
+			if (*endptr ||
+			    !mask ||
+			    (new->addr.ss_family == AF_INET && mask > 32) ||
+			    (new->addr.ss_family == AF_INET6 && mask > 128)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid netmask - %s - skipping", addr_str);
 				FREE(new);
 				return;
 			}
-			new->range -= start;
+
+			new->addr_end = new->addr;
+			bad = false;
+
+			if (new->addr.ss_family == AF_INET && mask < 32) {
+				for (i = mask, mask_bit = 1, mask_bits = 0; i < 32; i++, mask_bit <<= 1)
+					mask_bits |= mask_bit;
+
+				if (PTR_CAST(struct sockaddr_in, &new->addr)->sin_addr.s_addr & htonl(mask_bits))
+					bad = true;
+				else
+					PTR_CAST(struct sockaddr_in, &new->addr_end)->sin_addr.s_addr |= htonl(mask_bits);
+			} else if (mask < 128) {
+				for (i = mask % 16, mask_bit = 1, mask_bits = 0; i < 16; i++, mask_bit <<= 1)
+					mask_bits |= mask_bit;
+
+				i = mask / 16;
+				if (PTR_CAST(struct sockaddr_in6, &new->addr)->sin6_addr.s6_addr16[i] & htons(mask_bits))
+					bad = true;
+				else {
+					PTR_CAST(struct sockaddr_in6, &new->addr_end)->sin6_addr.s6_addr16[i] |= htons(mask_bits);
+					for (i++; i < 8; i++) {
+						if (PTR_CAST(struct sockaddr_in6, &new->addr)->sin6_addr.s6_addr16[i])
+							bad = true;
+						else
+							PTR_CAST(struct sockaddr_in6, &new->addr_end)->sin6_addr.s6_addr16[i] = 0xffff;
+					}
+				}
+			}
+			if (bad) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Address mask bits not empty - %s - skipping", addr_str);
+				FREE(new);
+				return;
+			}
+		} else {
+			if ((end_str = strchr(addr_str, '-')) &&
+			    ((new->addr.ss_family == AF_INET && strchr(end_str + 1, '.')) ||
+			     (new->addr.ss_family == AF_INET6 && strchr(end_str + 1, ':')))) {
+				if (inet_stosockaddr(++end_str, port_str, &new->addr_end)) {
+					report_config_error(CONFIG_GENERAL_ERROR, "Invalid range end %s - skipping", addr_str);
+					FREE(new);
+					return;
+				}
+				if (new->addr.ss_family != new->addr_end.ss_family) {
+					report_config_error(CONFIG_GENERAL_ERROR, "Range address families do not match %s - skipping", addr_str);
+					FREE(new);
+					return;
+				}
+
+				bad = false;
+				if (new->addr.ss_family == AF_INET) {
+					if (htonl(PTR_CAST(struct sockaddr_in, &new->addr)->sin_addr.s_addr) >
+					    htonl(PTR_CAST(struct sockaddr_in, &new->addr_end)->sin_addr.s_addr))
+						bad = true;
+				} else {
+					for (i = 0; i < 8; i++) {
+						diff = htons(PTR_CAST(struct sockaddr_in6, &new->addr_end)->sin6_addr.s6_addr16[i]) -
+							    htons(PTR_CAST(struct sockaddr_in6, &new->addr)->sin6_addr.s6_addr16[i]);
+						if (diff < 0) {
+							bad = true;
+							break;
+						}
+						if (diff > 0)
+							break;
+					}
+				}
+
+				if (bad) {
+					report_config_error(CONFIG_GENERAL_ERROR, "Address range end is less than address range start - %s - skipping", addr_str);
+					FREE(new);
+					return;
+				}
+			} else {
+				if (!inet_stor(addr_str, &range)) {
+					FREE(new);
+					return;
+				}
+
+				/* If no range specified, range == UINT32_MAX */
+				new->addr_end = new->addr;
+				if (range != UINT32_MAX) {
+					if (new->addr.ss_family == AF_INET) {
+						PTR_CAST(struct sockaddr_in, &new->addr_end)->sin_addr.s_addr &= htonl(~0xFF);
+						PTR_CAST(struct sockaddr_in, &new->addr_end)->sin_addr.s_addr |= htonl(range);
+						start = ntohl(PTR_CAST(struct sockaddr_in, &new->addr)->sin_addr.s_addr) & 0xFF;
+					} else {
+						PTR_CAST(struct sockaddr_in6, &new->addr_end)->sin6_addr.s6_addr16[7] = htons(range);
+						start = ntohs(PTR_CAST(struct sockaddr_in6, &new->addr)->sin6_addr.s6_addr16[7]);
+					}
+
+					if (start >= range) {
+						report_config_error(CONFIG_GENERAL_ERROR, "Address range end is not greater than address range start - %s - skipping", addr_str);
+						FREE(new);
+						return;
+					}
+				}
+			}
 		}
 
 		new->is_fwmark = false;
@@ -344,6 +444,9 @@ free_rs(real_server_t *rs)
 	free_checker_tracked_bfd_list(&rs->tracked_bfds);
 #endif
 	FREE_CONST_PTR(rs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	FREE_CONST_PTR(rs->snmp_name);
+#endif
 	free_rs_checkers(rs);
 	FREE(rs);
 }
@@ -359,10 +462,25 @@ free_rs_list(list_head_t *l)
 void
 dump_tracking_rs(FILE *fp, const void *data)
 {
-	const tracking_obj_t *top = (const tracking_obj_t *)data;
+	const tracking_obj_t *top = PTR_CAST_CONST(tracking_obj_t, data);
 	const checker_t *checker = top->obj.checker;
 
 	conf_write(fp, "     %s -> %s, weight %d%s", FMT_VS(checker->vs), FMT_RS(checker->rs, checker->vs), top->weight, top->weight_multiplier == -1 ? " reverse" : "");
+}
+
+static const char *
+format_decimal(unsigned long val, int dp)
+{
+	static char buf[22];	/* Sufficient for 2^64 as decimal plus decimal point */
+	unsigned dp_factor = 1;
+	int i;
+
+	for (i = 0; i < dp; i++)
+		dp_factor *= 10;
+
+	snprintf(buf, sizeof(buf), "%lu.%*.*lu", val / dp_factor, dp, dp, val % dp_factor);
+
+	return buf;
 }
 
 static void
@@ -373,22 +491,22 @@ dump_rs(FILE *fp, const real_server_t *rs)
 #endif
 
 	conf_write(fp, "   ------< Real server >------");
-	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d EFF WEIGHT = %d"
+	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d EFF WEIGHT = %" PRIi64
 			    , inet_sockaddrtos(&rs->addr)
 			    , ntohs(inet_sockaddrport(&rs->addr))
-			    , rs->weight, rs->effective_weight);
+			    , real_weight(rs->effective_weight), rs->effective_weight);
 	dump_forwarding_method(fp, "", rs);
 
 	conf_write(fp, "   Alpha is %s", rs->alpha ? "ON" : "OFF");
-	conf_write(fp, "   connection timeout = %f", ((double)rs->connection_to) / TIMER_HZ);
+	conf_write(fp, "   connection timeout = %s", format_decimal(rs->connection_to, TIMER_HZ_DIGITS));
 	conf_write(fp, "   connection limit range = %" PRIu32 " -> %" PRIu32, rs->l_threshold, rs->u_threshold);
-	conf_write(fp, "   Delay loop = %f" , (double)rs->delay_loop / TIMER_HZ);
+	conf_write(fp, "   Delay loop = %s" , format_decimal(rs->delay_loop, TIMER_HZ_DIGITS));
 	if (rs->retry != UINT_MAX)
 		conf_write(fp, "   Retry count = %u" , rs->retry);
 	if (rs->delay_before_retry != ULONG_MAX)
-		conf_write(fp, "   Retry delay = %f" , (double)rs->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry delay = %s" , format_decimal(rs->delay_before_retry, TIMER_HZ_DIGITS));
 	if (rs->warmup != ULONG_MAX)
-		conf_write(fp, "   Warmup = %f", (double)rs->warmup / TIMER_HZ);
+		conf_write(fp, "   Warmup = %s", format_decimal(rs->warmup, TIMER_HZ_DIGITS));
 	conf_write(fp, "   Inhibit on failure is %s", rs->inhibit ? "ON" : "OFF");
 
 	if (rs->notify_up)
@@ -398,11 +516,16 @@ dump_rs(FILE *fp, const real_server_t *rs)
 		conf_write(fp, "     RS down notify script = %s, uid:gid %u:%u",
 				cmd_str(rs->notify_down), rs->notify_down->uid, rs->notify_down->gid);
 	if (rs->virtualhost)
-		conf_write(fp, "    VirtualHost = %s", rs->virtualhost);
+		conf_write(fp, "    VirtualHost = '%s'", rs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	if (rs->snmp_name)
+		conf_write(fp, "   SNMP name = %s", rs->snmp_name);
+#endif
 	conf_write(fp, "   Using smtp notification = %s", rs->smtp_alert ? "yes" : "no");
 
 	conf_write(fp, "   initial weight = %d", rs->iweight);
-	conf_write(fp, "   previous weight = %d", rs->pweight);
+	conf_write(fp, "   effective weight = %" PRIi64, rs->effective_weight);
+	conf_write(fp, "   previous effective_weight = %" PRIi64, rs->peffective_weight);
 	conf_write(fp, "   alive = %d", rs->alive);
 	conf_write(fp, "   num failed checkers = %u", rs->num_failed_checkers);
 	conf_write(fp, "   RS set = %d", rs->set);
@@ -421,6 +544,7 @@ dump_rs(FILE *fp, const real_server_t *rs)
 	}
 #endif
 }
+
 static void
 dump_rs_list(FILE *fp, const list_head_t *l)
 {
@@ -471,7 +595,7 @@ alloc_rs(const char *ip, const char *port)
 #endif
 #endif
 
-	new->weight = INT_MAX;
+	new->effective_weight = INT64_MAX;
 	new->forwarding_method = vs->forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
 	new->tun_type = vs->tun_type;
@@ -488,12 +612,13 @@ alloc_rs(const char *ip, const char *port)
 	new->retry = UINT_MAX;
 	new->delay_before_retry = ULONG_MAX;
 	new->virtualhost = NULL;
+#ifdef _WITH_SNMP_CHECKER_
+	new->snmp_name = NULL;
+#endif
 	new->smtp_alert = -1;
 
 	list_add_tail(&new->e_list, &vs->rs);
 	vs->rs_cnt++;
-
-	clear_dynamic_misc_check_flag();
 }
 
 /*
@@ -505,6 +630,9 @@ free_vs(virtual_server_t *vs)
 	list_del_init(&vs->e_list);
 	FREE_CONST_PTR(vs->vsgname);
 	FREE_CONST_PTR(vs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	FREE_CONST_PTR(vs->snmp_name);
+#endif
 	FREE_PTR(vs->s_svr);
 	free_rs_list(&vs->rs);
 	free_notify_script(&vs->notify_quorum_up);
@@ -535,14 +663,18 @@ dump_vs(FILE *fp, const virtual_server_t *vs)
 				    , inet_sockaddrtos(&vs->addr), ntohs(inet_sockaddrport(&vs->addr)));
 	if (vs->virtualhost)
 		conf_write(fp, "   VirtualHost = %s", vs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	if (vs->snmp_name)
+		conf_write(fp, "   SNMP name = '%s'", vs->snmp_name);
+#endif
 	if (vs->af != AF_UNSPEC)
 		conf_write(fp, "   Address family = inet%s", vs->af == AF_INET ? "" : "6");
 	else if (vs->vsg && vs->vsg->have_ipv4 && vs->vsg->have_ipv6)
 		conf_write(fp, "   Address family = IPv4 & IPv6");
 	else
 		conf_write(fp, "   Address family = unknown");
-	conf_write(fp, "   connection timeout = %f", (double)vs->connection_to / TIMER_HZ);
-	conf_write(fp, "   delay_loop = %f", (double)vs->delay_loop / TIMER_HZ);
+	conf_write(fp, "   connection timeout = %s", format_decimal(vs->connection_to, TIMER_HZ_DIGITS));
+	conf_write(fp, "   delay_loop = %s", format_decimal(vs->delay_loop, TIMER_HZ_DIGITS));
 	conf_write(fp, "   lvs_sched = %s", vs->sched);
 	conf_write(fp, "   Hashed = %sabled", vs->flags & IP_VS_SVC_F_HASHED ? "en" : "dis");
 #ifdef IP_VS_SVC_F_SCHED1
@@ -563,11 +695,9 @@ dump_vs(FILE *fp, const virtual_server_t *vs)
 		conf_write(fp, "   flag-3 = %sabled", vs->flags & IP_VS_SVC_F_SCHED3 ? "en" : "dis");
 	}
 #endif
-#ifdef IP_VS_SVC_F_ONEPACKET
 	conf_write(fp, "   One packet scheduling = %sabled%s",
 			(vs->flags & IP_VS_SVC_F_ONEPACKET) ? "en" : "dis",
 			((vs->flags & IP_VS_SVC_F_ONEPACKET) && vs->service_type != IPPROTO_UDP) ? " (inactive due to not UDP)" : "");
-#endif
 
 	if (vs->persistence_timeout)
 		conf_write(fp, "   persistence timeout = %u", vs->persistence_timeout);
@@ -594,9 +724,9 @@ dump_vs(FILE *fp, const virtual_server_t *vs)
 	if (vs->retry != UINT_MAX)
 		conf_write(fp, "   Retry count = %u" , vs->retry);
 	if (vs->delay_before_retry != ULONG_MAX)
-		conf_write(fp, "   Retry delay = %f" , (double)vs->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry delay = %s" , format_decimal(vs->delay_before_retry, TIMER_HZ_DIGITS));
 	if (vs->warmup != ULONG_MAX)
-		conf_write(fp, "   Warmup = %f", (double)vs->warmup / TIMER_HZ);
+		conf_write(fp, "   Warmup = %s", format_decimal(vs->warmup, TIMER_HZ_DIGITS));
 	conf_write(fp, "   Inhibit on failure is %s", vs->inhibit ? "ON" : "OFF");
 	conf_write(fp, "   quorum = %u, hysteresis = %u", vs->quorum, vs->hysteresis);
 	if (vs->notify_quorum_up)
@@ -688,6 +818,9 @@ alloc_vs(const char *param1, const char *param2)
 	}
 
 	new->virtualhost = NULL;
+#ifdef _WITH_SNMP_CHECKER_
+	new->snmp_name = NULL;
+#endif
 	new->alpha = false;
 	new->omega = false;
 	new->notify_quorum_up = NULL;
@@ -722,7 +855,7 @@ alloc_ssvr(const char *ip, const char *port)
 	port_str = (port && port[strspn(port, "0")]) ? port : NULL;
 
 	PMALLOC(new);
-	new->weight = 1;
+	new->effective_weight = 1;
 	new->iweight = 1;
 	new->forwarding_method = vs->forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
@@ -870,23 +1003,19 @@ format_vs(const virtual_server_t *vs)
 const char *
 format_vsge(const virtual_server_group_entry_t *vsge)
 {
-	/* alloc large buffer because of unknown length of vs->vsgname */
-	static char ret[INET6_ADDRSTRLEN + 1 + 4 + 1 + 5]; /* IPv6 addr + -abcd:ppppp */
-	uint16_t start;
+	static char ret[INET6_ADDRSTRLEN + 1 + INET6_ADDRSTRLEN + 1 + 5 + 1]; /* IPv6 addr-IPv6 addr:ppppp */
+	unsigned offs;
 
 	if (vsge->is_fwmark)
 		snprintf(ret, sizeof(ret), "FWM %u", vsge->vfwmark);
-	else if (vsge->range) {
-		start = vsge->addr.ss_family == AF_INET ?
-			  ntohl(((const struct sockaddr_in*)&vsge->addr)->sin_addr.s_addr) & 0xFF :
-			  ntohs(((const struct sockaddr_in6*)&vsge->addr)->sin6_addr.s6_addr16[7]);
-		snprintf(ret, sizeof(ret),
-			    vsge->addr.ss_family == AF_INET ?  "%s-%u,%d" : "%s-%x,%d",
-			    inet_sockaddrtos(&vsge->addr),
-			    start + vsge->range,
-			    ntohs(inet_sockaddrport(&vsge->addr)));
+	else if (inet_sockaddrcmp(&vsge->addr, &vsge->addr_end)) {
+		offs = snprintf(ret, sizeof(ret), "%s-",
+				inet_sockaddrtos(&vsge->addr));
+		snprintf(ret + offs, sizeof(ret) - offs, "%s,%d",
+				inet_sockaddrtos(&vsge->addr_end),
+				ntohs(inet_sockaddrport(&vsge->addr)));
 	} else
-		snprintf(ret, sizeof(ret), "%s:%d",
+		snprintf(ret, sizeof(ret), "%s,%d",
 			    inet_sockaddrtos(&vsge->addr), ntohs(inet_sockaddrport(&vsge->addr)));
 
 	return ret;
@@ -979,7 +1108,6 @@ validate_check_config(void)
 				vs->service_type = IPPROTO_UDP;
 			}
 
-#ifdef IP_VS_SVC_F_ONEPACKET
 			/* Check OPS not set for TCP or SCTP */
 			if (vs->flags & IP_VS_SVC_F_ONEPACKET &&
 			    vs->service_type != IPPROTO_UDP) {
@@ -987,11 +1115,11 @@ validate_check_config(void)
 				report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s: one packet scheduling requires UDP - resetting", FMT_VS(vs));
 				vs->flags &= ~(unsigned)IP_VS_SVC_F_ONEPACKET;
 			}
-#endif
 
 			/* Check port specified for udp/tcp/sctp unless persistent */
 			if (!vs->persistence_timeout &&
 			    !vs->vsg &&
+			    !vs->vfwmark &&
 			    !inet_sockaddrport(&vs->addr)) {
 				report_config_error(CONFIG_GENERAL_ERROR, "Virtual server %s: zero port only valid for persistent services - setting", FMT_VS(vs));
 				vs->persistence_timeout = IPVS_SVC_PERSISTENT_TIMEOUT;
@@ -1014,8 +1142,10 @@ validate_check_config(void)
 		/* A virtual server using fwmarks will ignore any protocol setting, so warn if one is set */
 		if (vs->service_type &&
 		    ((vs->vsg && list_empty(&vs->vsg->addr_range) && !list_empty(&vs->vsg->vfwmark)) ||
-		     (!vs->vsg && vs->vfwmark)))
+		     (!vs->vsg && vs->vfwmark))) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Warning: Virtual server %s: protocol specified for fwmark - protocol will be ignored", FMT_VS(vs));
+			vs->service_type = 0;
+		}
 
 		/* Check scheduler set */
 		if (!vs->sched[0]) {
@@ -1083,9 +1213,9 @@ validate_check_config(void)
 				rs->warmup = vs->warmup;
 			if (rs->delay_before_retry == ULONG_MAX)
 				rs->delay_before_retry = vs->delay_before_retry;
-			if (rs->weight == INT_MAX) {
-				rs->weight = vs->weight;
-				rs->iweight = rs->weight;
+			if (rs->effective_weight == INT64_MAX) {
+				rs->effective_weight = vs->weight;
+				rs->iweight = rs->effective_weight;
 			}
 
 			if (rs->smtp_alert == -1) {
@@ -1099,7 +1229,7 @@ validate_check_config(void)
 					rs->smtp_alert = true;
 				}
 			}
-			weight_sum += rs->weight;
+			weight_sum += rs->effective_weight;
 
 			/* Check if the real server is the same as the sorry server,
 			 * and if so the inhibit on failure settings must match. */
@@ -1131,6 +1261,7 @@ validate_check_config(void)
 
 		/* Check that the quorum isn't higher than the total weight of
 		 * the real servers, otherwise we will never be able to come up. */
+// TODO - Allow 253 * multiplier per MISC_CHECK if !reverse and ignore this if FILE_CHECK
 		if (vs->quorum > weight_sum) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Warning - quorum %u for %s exceeds total weight of real servers %u, reducing quorum to %u", vs->quorum, FMT_VS(vs), weight_sum, weight_sum);
 			vs->quorum = weight_sum;

@@ -22,8 +22,8 @@
  * Copyright (C) 2016-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _CHECK_DNS_CHECK_H
-#define _CHECK_DNS_CHECK_H
+#ifndef _CHECK_DNS_H
+#define _CHECK_DNS_H
 
 #include <stdint.h>
 #include <sys/types.h>
@@ -86,7 +86,7 @@ typedef struct _dns_header {
 typedef struct _dns_check {
 	uint16_t type;
 	const char *name;
-	uint8_t sbuf[DNS_BUFFER_SIZE];
+	uint8_t sbuf[DNS_BUFFER_SIZE] __attribute__((aligned(__alignof__(dns_header_t))));
 	size_t slen;
 } dns_check_t;
 

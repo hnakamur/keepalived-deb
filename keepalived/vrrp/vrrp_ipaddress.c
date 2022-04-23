@@ -68,6 +68,46 @@ ipaddresstos(char *buf, const ip_address_t *ip_addr)
 	return buf;
 }
 
+bool
+compare_ipaddress(const ip_address_t *X, const ip_address_t *Y)
+{
+	if (!X && !Y)
+		return false;
+
+	if (!X != !Y ||
+	    X->ifa.ifa_family != Y->ifa.ifa_family)
+		return true;
+
+	if (X->ifa.ifa_prefixlen != Y->ifa.ifa_prefixlen ||
+// We can't check ifp here and later. On a reload, has ifp been set up by now?
+//	    !X->ifp != !Y->ifp ||
+#ifdef _HAVE_VRRP_VMAC_
+	    X->use_vmac != Y->use_vmac ||
+#endif
+	    X->ifa.ifa_scope != Y->ifa.ifa_scope)
+		return true;
+
+	if (X->ifp &&
+#ifdef _HAVE_VRRP_VMAC_
+	    X->ifp->base_ifp != Y->ifp->base_ifp
+#else
+	    X->ifp != Y->ifp
+#endif
+				)
+		return true;
+
+	if (!string_equal(X->label, Y->label))
+		return true;
+
+	if (X->ifa.ifa_family == AF_INET6)
+		return X->u.sin6_addr.s6_addr32[0] != Y->u.sin6_addr.s6_addr32[0] ||
+			X->u.sin6_addr.s6_addr32[1] != Y->u.sin6_addr.s6_addr32[1] ||
+			X->u.sin6_addr.s6_addr32[2] != Y->u.sin6_addr.s6_addr32[2] ||
+			X->u.sin6_addr.s6_addr32[3] != Y->u.sin6_addr.s6_addr32[3];
+
+	return X->u.sin.sin_addr.s_addr != Y->u.sin.sin_addr.s_addr;
+}
+
 /* Add/Delete IP address to a specific interface_t */
 int
 netlink_ipaddress(ip_address_t *ip_addr, int cmd)
@@ -137,10 +177,8 @@ netlink_ipaddress(ip_address_t *ip_addr, int cmd)
 			 *     without service. HA/VRRP setups have their own "DAD"-like
 			 *     functionality, so it's not really needed from the IPv6 stack.
 			 */
-#ifdef IFA_F_NODAD	/* Since Linux 2.6.19 */
 			if (!(ip_addr->flagmask & IFA_F_NODAD))
 				ifa_flags |= IFA_F_NODAD;
-#endif
 		}
 
 		addattr_l(&req.n, sizeof(req), IFA_LOCAL,
@@ -254,8 +292,14 @@ format_ipaddress(const ip_address_t *ip_addr, char *buf, size_t buf_len)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " brd %s",
 			 inet_ntop2(ip_addr->u.sin.sin_brd.s_addr));
 	}
-	buf_p += snprintf(buf_p, buf_end - buf_p, " dev %s scope %s"
-			       , IF_NAME(ip_addr->ifp)
+	buf_p += snprintf(buf_p, buf_end - buf_p, " dev %s", IF_NAME(ip_addr->ifp));
+#ifdef _HAVE_VRRP_VMAC_
+	if (ip_addr->ifp != ip_addr->ifp->base_ifp)
+		buf_p += snprintf(buf_p, buf_end - buf_p, "@%s", ip_addr->ifp->base_ifp->ifname);
+	if (ip_addr->use_vmac)
+		buf_p += snprintf(buf_p, buf_end - buf_p, "%s" , " use_vmac");
+#endif
+	buf_p += snprintf(buf_p, buf_end - buf_p, " scope %s"
 			       , get_rttables_scope(ip_addr->ifa.ifa_scope));
 	if (ip_addr->label)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " label %s", ip_addr->label);
@@ -264,14 +308,10 @@ format_ipaddress(const ip_address_t *ip_addr, char *buf, size_t buf_len)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " peer %s/%d"
 				       , peer, ip_addr->ifa.ifa_prefixlen);
 	}
-#ifdef IFA_F_HOMEADDRESS		/* Linux 2.6.19 */
 	if (ip_addr->flags & IFA_F_HOMEADDRESS)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " home");
-#endif
-#ifdef IFA_F_NODAD			/* Linux 2.6.19 */
 	if (ip_addr->flagmask & IFA_F_NODAD)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " -nodad");
-#endif
 #ifdef IFA_F_MANAGETEMPADDR		/* Linux 3.14 */
 	if (ip_addr->flags & IFA_F_MANAGETEMPADDR)
 		buf_p += snprintf(buf_p, buf_end - buf_p, " mngtmpaddr");
@@ -341,7 +381,7 @@ parse_ipaddress(ip_address_t *ip_addr, const char *str, bool allow_subnet_mask)
 
 	/* No ip address, allocate a brand new one */
 	if (!new)
-		new = (ip_address_t *) MALLOC(sizeof(ip_address_t));
+		PMALLOC(new);
 
 	/* Parse ip address */
 	new->ifa.ifa_family = (strchr(str, ':')) ? AF_INET6 : AF_INET;
@@ -380,7 +420,9 @@ parse_ipaddress(ip_address_t *ip_addr, const char *str, bool allow_subnet_mask)
 ip_address_t *
 parse_route(const char *str)
 {
-	ip_address_t *new = (ip_address_t *)MALLOC(sizeof(ip_address_t));
+	ip_address_t *new;
+
+	PMALLOC(new);
 
 	/* Handle the specials */
 	if (!strcmp(str, "default") || !strcmp(str, "any") || !strcmp(str, "all")) {
@@ -428,7 +470,7 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 	unsigned preferred_lft;
 	bool preferred_lft_set = false;
 
-	new = (ip_address_t *) MALLOC(sizeof(ip_address_t));
+	PMALLOC(new);
 	if (!new) {
 		log_message(LOG_INFO, "Unable to allocate new ip_address");
 		return;
@@ -457,7 +499,7 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 			}
 
 			if (new->ifp) {
-				report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify static ipaddress device more than once for %s", strvec_slot(strvec, addr_idx));
+				report_config_error(CONFIG_GENERAL_ERROR, "Cannot specify ipaddress device more than once for %s", strvec_slot(strvec, addr_idx));
 				FREE(new);
 				return;
 			}
@@ -511,8 +553,15 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 				break;
 			}
 
-			new->label = MALLOC(IFNAMSIZ);
-			strncpy(new->label, strvec_slot(strvec, ++i), IFNAMSIZ);
+			param = strvec_slot(strvec, ++i);
+			if (strlen(param) >= IFNAMSIZ) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Address label %s is longer than maximum length %d - removing address", param, IFNAMSIZ - 1);
+				FREE(new);
+				return;
+			}
+
+			new->label = MALLOC(strlen(param) + 1);
+			strcpy(new->label, param);
 		} else if (!strcmp(str, "peer")) {
 			if (!param_avail) {
 				param_missing = true;
@@ -540,15 +589,11 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 				else
 					new->peer.sin_addr = peer.u.sin.sin_addr;
 			}
-#ifdef IFA_F_HOMEADDRESS		/* Linux 2.6.19 */
 		} else if (!strcmp(str, "home")) {
 			new->flags |= IFA_F_HOMEADDRESS;
 			new->flagmask |= IFA_F_HOMEADDRESS;
-#endif
-#ifdef IFA_F_NODAD			/* Linux 2.6.19 */
 		} else if (!strcmp(str, "-nodad")) {
 			new->flagmask |= IFA_F_NODAD;
-#endif
 #ifdef IFA_F_MANAGETEMPADDR		/* Linux 3.14 */
 		} else if (!strcmp(str, "mngtmpaddr")) {
 			new->flags |= IFA_F_MANAGETEMPADDR;
@@ -593,6 +638,8 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 			}
 			if (!(new->track_group = static_track_group_find(strvec_slot(strvec, i))))
 				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
+		} else if (!static_addr && !strcmp(str, "use_vmac")) {
+			new->use_vmac = true;
 		} else
 			report_config_error(CONFIG_GENERAL_ERROR, "Unknown configuration entry '%s' for ip address - ignoring", str);
 		i++;
@@ -658,6 +705,13 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 		new->track_group = NULL;
 	}
 
+#if 0
+	if (!new->ifp && new->use_vmac) {
+		report_config_error(CONFIG_GENERAL_ERROR, "use_vmac for a address requires an interface");
+		new->use_vmac = false;
+	}
+#endif
+
 	list_add_tail(&new->e_list, ip_list);
 }
 
@@ -668,37 +722,25 @@ address_exist(vrrp_t *vrrp, ip_address_t *ip_addr)
 	ip_address_t *ipaddr;
 	char addr_str[INET6_ADDRSTRLEN];
 	void *addr;
+	list_head_t *vip_list;
 
 	/* If the following check isn't made, we get lots of compiler warnings */
 	if (!ip_addr)
 		return true;
 
-
-	list_for_each_entry(ipaddr, &vrrp->vip, e_list) {
-		if (IP_ISEQ(ipaddr, ip_addr)) {
-			ipaddr->set = ip_addr->set;
+	for (vip_list = &vrrp->vip; vip_list; vip_list = vip_list == &vrrp->vip ? &vrrp->evip : NULL ) {
+		list_for_each_entry(ipaddr, vip_list, e_list) {
+			if (!compare_ipaddress(ipaddr, ip_addr)) {
+				ipaddr->set = ip_addr->set;
 #ifdef _WITH_IPTABLES_
-			ipaddr->iptable_rule_set = ip_addr->iptable_rule_set;
+				ipaddr->iptable_rule_set = ip_addr->iptable_rule_set;
 #endif
 #ifdef _WITH_NFTABLES_
-			ipaddr->nftable_rule_set = ip_addr->nftable_rule_set;
+				ipaddr->nftable_rule_set = ip_addr->nftable_rule_set;
 #endif
-			ipaddr->ifa.ifa_index = ip_addr->ifa.ifa_index;
-			return true;
-		}
-	}
-
-	list_for_each_entry(ipaddr, &vrrp->evip, e_list) {
-		if (IP_ISEQ(ipaddr, ip_addr)) {
-			ipaddr->set = ip_addr->set;
-#ifdef _WITH_IPTABLES_
-			ipaddr->iptable_rule_set = ip_addr->iptable_rule_set;
-#endif
-#ifdef _WITH_NFTABLES_
-			ipaddr->nftable_rule_set = ip_addr->nftable_rule_set;
-#endif
-			ipaddr->ifa.ifa_index = ip_addr->ifa.ifa_index;
-			return true;
+				ipaddr->ifa.ifa_index = ip_addr->ifa.ifa_index;
+				return true;
+			}
 		}
 	}
 
@@ -720,22 +762,18 @@ void
 get_diff_address(vrrp_t *old, vrrp_t *new, list_head_t *old_addr)
 {
 	ip_address_t *ip_addr, *ip_addr_tmp;
+	list_head_t *vip_list;
 
 	/* No addresses in previous conf */
 	if (list_empty(&old->vip) && list_empty(&old->evip))
 		return;
 
-	list_for_each_entry_safe(ip_addr, ip_addr_tmp, &old->vip, e_list) {
-		if (ip_addr->set && !address_exist(new, ip_addr)) {
-			list_del_init(&ip_addr->e_list);
-			list_add_tail(&ip_addr->e_list, old_addr);
-		}
-	}
-
-	list_for_each_entry_safe(ip_addr, ip_addr_tmp, &old->evip, e_list) {
-		if (ip_addr->set && !address_exist(new, ip_addr)) {
-			list_del_init(&ip_addr->e_list);
-			list_add_tail(&ip_addr->e_list, old_addr);
+	for (vip_list = &old->vip; vip_list; vip_list = vip_list == &old->vip ? &old->evip : NULL ) {
+		list_for_each_entry_safe(ip_addr, ip_addr_tmp, vip_list, e_list) {
+			if (ip_addr->set && !address_exist(new, ip_addr)) {
+				list_del_init(&ip_addr->e_list);
+				list_add_tail(&ip_addr->e_list, old_addr);
+			}
 		}
 	}
 }

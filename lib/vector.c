@@ -69,7 +69,10 @@ strvec_slot(const vector_t *strvec, size_t index)
 vector_t *
 vector_alloc_r(void)
 {
-	vector_t *v = (vector_t *) MALLOC(sizeof(vector_t));
+	vector_t *v;
+
+	PMALLOC(v);
+
 	return v;
 }
 
@@ -85,7 +88,7 @@ vector_init(unsigned int size)
 
 	v->allocated = size;
 	v->active = 0;
-	v->slot = (void *) MALLOC(sizeof(void *) * size);
+	v->slot = MALLOC(sizeof(void *) * size);
 	return v;
 }
 #endif
@@ -96,9 +99,9 @@ vector_alloc_slot_r(vector_t *v)
 {
 	v->allocated += VECTOR_DEFAULT_SIZE;
 	if (v->slot)
-		v->slot = REALLOC(v->slot, sizeof (void *) * v->allocated);
+		v->slot = REALLOC(v->slot, sizeof(void *) * v->allocated);
 	else
-		v->slot = (void *) MALLOC(sizeof (void *) * v->allocated);
+		v->slot = MALLOC(sizeof(void *) * v->allocated);
 }
 
 /* Copy / dup a vector */
@@ -112,7 +115,7 @@ vector_copy_r(const vector_t *v)
 	new->allocated = v->allocated;
 
 	size = sizeof(void *) * (v->allocated);
-	new->slot = (void *) MALLOC(size);
+	new->slot = MALLOC(size);
 	memcpy(new->slot, v->slot, size);
 
 	return new;
@@ -143,7 +146,7 @@ vector_ensure(const vector_t *v, unsigned int num)
 		return;
 
 	v->slot = REALLOC(v->slot, sizeof(void *) * (v->allocated * 2));
-	memset(&v->slot[v->allocated], 0, sizeof (void *) * v->allocated);
+	memset(&v->slot[v->allocated], 0, sizeof(void *) * v->allocated);
 	v->allocated *= 2;
 
 	if (v->allocated <= num)
@@ -309,7 +312,7 @@ vector_compact_r(const vector_t *v)
 		new->active = size;
 		new->allocated = size;
 
-		new->slot = (void *) MALLOC(sizeof(void *) * size);
+		new->slot = MALLOC(sizeof(void *) * size);
 
 		for (i = 0, j = 0; i < size; i++, j++) {
 			while (!v->slot[j])
@@ -324,24 +327,33 @@ vector_compact_r(const vector_t *v)
 	return new;
 }
 
-#ifdef _INCLUDE_UNUSED_CODE_
-/* dump vector slots */
-void
-vector_dump(FILE *fp, const vector_t *v)
+/* String vector related */
+char *
+make_strvec_str(const vector_t *v, unsigned start)
 {
-	unsigned int i;
+	size_t len;
+	char *str;
+	unsigned i;
 
-	fprintf(fp, "Vector Size : %d, active %d\n", v->allocated, v->active);
+	for (i = start, len = 0; i < v->allocated; i++) {
+		if (v->slot[i])
+			len += strlen(v->slot[i]) + 1;
+	}
 
-	for (i = 0; i < v->allocated; i++) {
-		if (v->slot[i] != NULL) {
-			fprintf(fp, "  Slot [%d]: %p\n", i, vector_slot(v, i));
+	str = MALLOC(len);
+
+	for (i = start, len = 0; i < v->allocated; i++) {
+		if (v->slot[i]) {
+			if (i > start)
+				str[len++] = ' ';
+			strcpy(str + len, v->slot[i]);
+			len += strlen(v->slot[i]);
 		}
 	}
-}
-#endif
 
-/* String vector related */
+	return str;
+}
+
 void
 free_strvec(const vector_t *strvec)
 {
@@ -373,6 +385,21 @@ strvec_remove_slot(vector_t *strvec, unsigned slot)
 }
 
 #ifdef _INCLUDE_UNUSED_CODE_
+/* dump vector slots */
+void
+vector_dump(FILE *fp, const vector_t *v)
+{
+	unsigned int i;
+
+	fprintf(fp, "Vector Size : %d, active %d\n", v->allocated, v->active);
+
+	for (i = 0; i < v->allocated; i++) {
+		if (v->slot[i] != NULL) {
+			fprintf(fp, "  Slot [%d]: %p\n", i, vector_slot(v, i));
+		}
+	}
+}
+
 void
 dump_strvec(const vector_t *strvec)
 {
