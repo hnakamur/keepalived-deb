@@ -1,4 +1,4 @@
+etc/keepalived
 usr/bin
 usr/sbin
-etc/keepalived
 usr/share/doc/keepalived/samples
