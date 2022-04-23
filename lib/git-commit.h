@@ -1,2 +1,3 @@
-#define GIT_DATE "07/13,2020"
-#define GIT_YEAR "2020"
+/* Dates are UTC */
+#define GIT_DATE "08/21,2021"
+#define GIT_YEAR "2021"

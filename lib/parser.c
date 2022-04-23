@@ -41,6 +41,15 @@
 #include <stdarg.h>
 #include <math.h>
 #include <inttypes.h>
+#include <signal.h>
+#include <dirent.h>
+#ifdef HAVE_MEMFD_CREATE
+#include <sys/mman.h>
+#endif
+#ifdef USE_MEMFD_CREATE_SYSCALL
+#include <sys/syscall.h>
+#include <linux/memfd.h>
+#endif
 
 #include "parser.h"
 #include "memory.h"
@@ -52,13 +61,58 @@
 #include "bitops.h"
 #include "utils.h"
 #include "process.h"
+#include "signals.h"
 
+#ifdef USE_MEMFD_CREATE_SYSCALL
+#ifndef SYS_memfd_create
+#define SYS_memfd_create __NR_memfd_create
+#endif
+#endif
+
+/* In order to ensure that all processes read the same configuration, the first
+ * process that reads the configuration writes it to a temporary file, and all
+ * the other processes read that temporary file.
+ *
+ * For simplicity, the temporary file is by default, and if memfd_create() is
+ * supported, a memfd type file, otherwise it will be an anonymous file in the
+ * filesystem that includes KA_TMP_DIR (default /tmp). The default can be
+ * overridden by the global_defs tmp_config_directory option.
+ *
+ * The temporary file contains all the lines of the original configuration file(s)
+ * stripped of leading and training whitespace and comments, with the following
+ * exceptions:
+ * 1. include statements are passed as blank lines.
+ * 2. When an included file is opened, a line starting "# " followed by the file
+ *    name is written.
+ * 3. When an included file is closed, a single character line "!" is written.
+ * 4. Any include file processing errors are written to the file preceeded by "#! ".
+ *
+ * The reasons for 2 and 3 are so that configuration errors can be logged with the
+ * correct file name and line number.
+ * The reason for 4 is so that include file processing errors can be written to the
+ * log files of all processes.
+ */
 
 #define DEF_LINE_END	"\n"
 
 #define BOB "{"
 #define EOB "}"
 #define WHITE_SPACE_STR " \t\f\n\r\v"
+
+/* INCLUDE_R will error if a returned entry is:
+ *   not readable
+ *   a directory
+ *   not a regular, non executable, file
+ *   cannot chdir() to the directory of the file
+ */
+typedef enum _include {
+	INCLUDE = 0,		/* No error if no files match etc */
+	INCLUDE_R = 0x01,	/* Error if directory, not readable, etc */
+	INCLUDE_M = 0x02,	/* Error if no files match unless wildcard specified */
+	INCLUDE_W = 0x04,	/* Error if no files match even if wildcard used */
+	INCLUDE_B = 0x08,	/* All glob brace specifiers must match */
+} include_t;
+
 
 typedef struct _defs {
 	const char *name;
@@ -117,16 +171,18 @@ typedef struct _seq {
 
 /* Structure for include file stack */
 typedef struct _include_file {
-	glob_t globbuf;
-	unsigned glob_next;
-	const char *file_name;
-	int curdir_fd;
-	FILE *stream;
-	unsigned num_matches;
-	const char *current_file_name;  //can be derived from globbuf_gl_pathv[glob_next-1]
-	size_t current_line_no;
+	glob_t		globbuf;
+	unsigned	glob_next;
+	const char	*file_name;
+	int		curdir_fd;
+	FILE		*stream;
+	unsigned	num_matches;
+	const char	*current_file_name;  //can be derived from globbuf_gl_pathv[glob_next-1]
+	size_t		current_line_no;
+	include_t	include_type;
+	unsigned	sav_include_check;
 
-	list_head_t e_list;
+	list_head_t	e_list;
 } include_file_t;
 
 
@@ -140,6 +196,20 @@ bool do_parser_debug;
 #ifdef _DUMP_KEYWORDS_
 bool do_dump_keywords;
 #endif
+#ifndef _ONE_PROCESS_DEBUG_
+const char *config_save_dir;
+#endif
+
+/* Error handling variables */
+static unsigned include_check;
+
+/* The following 3 variables should be static, but that causes an optimiser bug in GCC */
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+unsigned missing_directories;
+unsigned missing_files;
+bool have_wildcards;
+#endif
+static bool config_file_error;
 
 /* local vars */
 static vector_t *current_keywords;
@@ -158,6 +228,10 @@ static unsigned seq_list_count = 0;
 static int kw_level;
 static int block_depth;
 
+static FILE *conf_copy;
+static bool write_conf_copy;
+static bool read_conf_copy;
+
 /* Parameter definitions */
 static LIST_HEAD_INITIALIZE(defs); /* def_t */
 
@@ -168,20 +242,22 @@ static bool replace_param(char *, size_t, char const **);
 LIST_HEAD_INITIALIZE(include_stack);
 
 
-void
-report_config_error(config_err_t err, const char *format, ...)
+static void __attribute__ ((format (printf, 2, 0 )))
+vreport_config_error(config_err_t err, const char *format, va_list args)
 {
-	va_list args;
 	char *format_buf = NULL;
 	include_file_t *file = NULL;
-	
-	if (!list_empty(&include_stack))
+
+	if (!list_empty(&include_stack)) {
 		file = list_first_entry(&include_stack, include_file_t, e_list);
+		if (!file->current_file_name && !list_is_last(&file->e_list, &include_stack))
+			file = list_first_entry(&file->e_list, include_file_t, e_list);
+	}
 
 	/* current_file_name will be set if there is more than one config file, in which
 	 * case we need to specify the file name. */
 	if (file) {
-	       	if (file->current_file_name) {
+		if (file->current_file_name) {
 			/* "(file_name: Line line_no) format" + '\0' */
 			format_buf = MALLOC(1 + strlen(file->current_file_name) + 1 + 6 + 10 + 1 + 1 + strlen(format) + 1);
 			sprintf(format_buf, "(%s: Line %zu) %s", file->current_file_name, file->current_line_no, format);
@@ -192,22 +268,146 @@ report_config_error(config_err_t err, const char *format, ...)
 		}
 	}
 
-	va_start(args, format);
+	if (config_err == CONFIG_OK || config_err < err)
+		config_err = err;
 
 	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
 		vfprintf(stderr, format_buf ? format_buf : format, args);
 		fputc('\n', stderr);
-
-		if (config_err == CONFIG_OK || config_err < err)
-			config_err = err;
 	}
 	else
 		vlog_message(LOG_INFO, format_buf ? format_buf : format, args);
 
-	va_end(args);
-
 	if (format_buf)
 		FREE(format_buf);
+}
+
+void
+report_config_error(config_err_t err, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vreport_config_error(err, format, args);
+	va_end(args);
+}
+
+static void __attribute__ ((format (printf, 2, 3)))
+file_config_error(include_t error_type, const char *format, ...)
+{
+	va_list args;
+	include_file_t *file = NULL;
+
+	if (!list_empty(&include_stack))
+		file = list_first_entry(&include_stack, include_file_t, e_list);
+
+	va_start(args, format);
+
+	vreport_config_error(((include_check | (file ? file->include_type : 0)) & error_type)
+			      ? CONFIG_FILE_NOT_FOUND : CONFIG_OK, format, args);
+	if ((include_check | (file ? file->include_type : 0)) & error_type)
+		config_file_error = true;
+
+	/* If there is an error and we are writing the config,
+	 * write the error to the file so the processes reading
+	 * it can log the error. */
+	if (write_conf_copy) {
+		va_end(args);
+		va_start(args, format);
+		fprintf(conf_copy, "#! ");
+		vfprintf(conf_copy, format, args);
+		fprintf(conf_copy, "\n");
+	}
+
+	va_end(args);
+}
+
+#ifdef USE_MEMFD_CREATE_SYSCALL
+static int
+memfd_create(const char *name, unsigned int flags)
+{
+        int ret;
+
+        ret = syscall(SYS_memfd_create, name, flags);
+
+        return ret;
+}
+#endif
+
+static inline int
+open_tmpfile(const char *dir, int flags, mode_t mode)
+{
+#if HAVE_DECL_O_TMPFILE
+	return open(dir, flags | O_TMPFILE, mode);
+#else
+	int fd;
+	char *filename;
+	int dir_len = strlen(dir);
+
+	filename = MALLOC(dir_len + 1 + 17 + 1);  /* dir / keepalived_XXXXXX \0 */
+	strcpy(filename, dir);
+	filename[dir_len] = '/';
+	strcpy(filename + dir_len + 1, "keepalived_XXXXXX");
+
+	fd = mkostemp(filename, flags);
+	unlink(filename);
+	fchmod(fd, mode);
+
+	FREE(filename);
+
+	return fd;
+#endif
+}
+
+void
+use_disk_copy_for_config(const char *dir_name)
+{
+	int fd;
+	int fd_mem;
+	char buf[512];
+	ssize_t len;
+	FILE *new_conf_copy;
+
+	if (!write_conf_copy)
+		return;
+
+	fd = open_tmpfile(dir_name, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+	if (fd == -1) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Cannot open config directory %s for writing, errno %d - %m", dir_name, errno);
+		return;
+	}
+
+	/* Copy what we have already written to the disk based file */
+	rewind(conf_copy);
+	fd_mem = fileno(conf_copy);
+	lseek(fd_mem, 0L, SEEK_SET);
+
+	while ((len = read(fd_mem, buf, sizeof(buf))) > 0) {
+		if (write(fd, buf, len) != len)
+			break;
+	}
+
+	if (len) {
+		log_message(LOG_INFO, "Unable to config to new disk file on %s", dir_name);
+		close(fd);
+		return;
+	}
+
+	new_conf_copy = fdopen(fd, "a+");
+	if (!new_conf_copy) {
+		log_message(LOG_INFO, "fdopen of disk file error %d - %m", errno);
+		close(fd);
+		return;
+	}
+
+	fclose(conf_copy);
+	conf_copy = new_conf_copy;
+}
+
+void
+clear_config_status(void)
+{
+	config_err = CONFIG_OK;
 }
 
 config_err_t __attribute__ ((pure))
@@ -339,49 +539,106 @@ read_unsigned64_func(const char *number, int base, uint64_t *res, uint64_t min_v
 #endif
 }
 
+/* Read a fractional decimal with up to shift decimal places. Return value * 10^shift. For example to read 3.312 as milliseconds, but
+ * return 3312, as micro-seconds, specify a shift value of 3 (i.e. 10^3 = 1000). The min_val and max_val are in the units of the returned value.
+ */
 static bool
-read_double_func(const char *number, double *res, double min_val, double max_val, __attribute__((unused)) bool ignore_error)
+read_decimal_unsigned_long_func(const char *param, unsigned long *res, unsigned long min_val, unsigned long max_val, unsigned shift, bool ignore_error)
 {
-	double val;
-	char *endptr;
+	size_t param_len = strlen(param);
+	char *updated_param;
+	const char *dp;
+	unsigned num_dp;
 	const char *warn = "";
-	int ftype;
+	unsigned i;
+	bool round_up = false;
+	bool valid_number;
+	unsigned long long val;
+	char *endptr;
+	int sav_errno;
 
 #ifndef _STRICT_CONFIG_
 	if (ignore_error && !__test_bit(CONFIG_TEST_BIT, &debug))
 		warn = "WARNING - ";
 #endif
 
-	errno = 0;
-	val = strtod(number, &endptr);
-	*res = val;
-
-	if (*endptr)
-		report_config_error(CONFIG_INVALID_NUMBER, "%sinvalid number '%s'", warn, number);
-	else if (errno == ERANGE)
-		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' out of range", warn, number);
-	else {
-		ftype = fpclassify(val);
-		if (ftype == FP_INFINITE)	/* +/- Inf */
-			report_config_error(CONFIG_INVALID_NUMBER, "infinite number '%s'", number);
-		else if (ftype == FP_NAN)	/* NaN */
-			report_config_error(CONFIG_INVALID_NUMBER, "not a number '%s'", number);
-		else if (ftype == FP_SUBNORMAL)	{ /* to small */
-			*res = 0.0F;
-			return true;
-		}
-		else if (val < min_val || val > max_val)
-			report_config_error(CONFIG_INVALID_NUMBER, "number '%s' outside range [%g, %g]", number, min_val, max_val);
-		else /* FP_NORMAL or FP_ZERO */
-			return true;
+	if (param[0] == '-') {
+		report_config_error(CONFIG_INVALID_NUMBER, "%snegative number '%s'", warn, param);
+		return false;
 	}
+
+	/* Make sure we don't have too many decimal places */
+	dp = strchr(param, '.');
+	num_dp = dp ? param_len - (dp - param) - 1 : 0;
+	if (num_dp > shift) {
+		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' has too many decimal places", warn, param);
+		round_up = dp[shift + 1] >= '5';
+		num_dp = shift;
+	}
+
+	updated_param = MALLOC(param_len + shift + 1);	/* Allow to add shift trailing 0's and '\0' */
+
+	if (dp) {
+		strncpy(updated_param, param, dp - param);
+		strncpy(updated_param + (dp - param), dp + 1, num_dp);
+		updated_param[dp - param + num_dp] = '\0';
+	} else
+		strcpy(updated_param, param);
+
+	/* Add any necessary trailing 0s */
+	num_dp = shift - num_dp;
+	for (i = 0; i < num_dp; i++)
+		strcat(updated_param, "0");
+
+	errno = 0;
+	val = strtoull(updated_param, &endptr, 10);
+	if (round_up)
+		val++;
+	*res = (unsigned long)val;
+
+	valid_number = !*endptr;
+	sav_errno = errno;
+	FREE(updated_param);
+
+	if (!valid_number)
+		report_config_error(CONFIG_INVALID_NUMBER, "%sinvalid number '%s'", warn, param);
+	else if (sav_errno == ERANGE
+#if ULLONG_MAX > ULONG_MAX
+				     || val > ULONG_MAX
+#endif
+							) {
+		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' outside unsigned decimal range", warn, param);
+		return false;
+	} else if (val < min_val || val > max_val) {
+		unsigned long dp_val = 1;
+		unsigned d;
+		for (d = 0; d < shift; d++)
+			dp_val *= 10;
+		report_config_error(CONFIG_INVALID_NUMBER, "%snumber '%s' outside range [%lu.%*.*lu, %lu.%*.*lu]",
+			warn, param, min_val / dp_val, (int)shift, (int)shift, min_val % dp_val, max_val / dp_val, (int)shift, (int)shift, max_val % dp_val);
+	} else
+		return true;
 
 #ifdef _STRICT_CONFIG_
 	return false;
 #else
-	return ignore_error && val >= min_val && val <= max_val && !__test_bit(CONFIG_TEST_BIT, &debug);
+	return ignore_error && val >= min_val && val <= max_val;
 #endif
 }
+
+static bool
+read_decimal_unsigned_func(const char *str, unsigned *res, unsigned min_val, unsigned max_val, unsigned shift, bool ignore_error)
+{
+	unsigned long resl;
+	int ret;
+
+	ret = read_decimal_unsigned_long_func(str, &resl, min_val, max_val, shift, ignore_error);
+	if (ret)
+		*res = (unsigned)resl;
+
+	return ret;
+}
+
 
 bool
 read_int(const char *str, int *res, int min_val, int max_val, bool ignore_error)
@@ -402,9 +659,9 @@ read_unsigned64(const char *str, uint64_t *res, uint64_t min_val, uint64_t max_v
 }
 
 bool
-read_double(const char *str, double *res, double min_val, double max_val, bool ignore_error)
+read_decimal_unsigned(const char *str, unsigned *res, unsigned min_val, unsigned max_val, unsigned shift, bool ignore_error)
 {
-	return read_double_func(str, res, min_val, max_val, ignore_error);
+	return read_decimal_unsigned_func(str, res, min_val, max_val, shift, ignore_error);
 }
 
 bool
@@ -426,15 +683,125 @@ read_unsigned64_strvec(const vector_t *strvec, size_t index, uint64_t *res, uint
 }
 
 bool
-read_double_strvec(const vector_t *strvec, size_t index, double *res, double min_val, double max_val, bool ignore_error)
-{
-	return read_double_func(strvec_slot(strvec, index), res, min_val, max_val, ignore_error);
-}
-
-bool
 read_unsigned_base_strvec(const vector_t *strvec, size_t index, int base, unsigned *res, unsigned min_val, unsigned max_val, bool ignore_error)
 {
 	return read_unsigned_func(strvec_slot(strvec, index), base, res, min_val, max_val, ignore_error);
+}
+
+bool
+read_decimal_unsigned_strvec(const vector_t *strvec, size_t index, unsigned *res, unsigned min_val, unsigned max_val, unsigned shift, bool ignore_error)
+{
+	return read_decimal_unsigned_func(strvec_slot(strvec, index), res, min_val, max_val, shift, ignore_error);
+}
+
+/* read_hex_str() reads a hex string, which can include spaces, and saves the string in
+ * MALLOC'd memory at data.
+ * Hex characters 0-9, A-F and a-f are valid.
+ * The string can include wildcard characters, x or X, in which
+ * case mask will be allocated and used to indicate the wildcard half octets (nibbles)
+ */
+static uint8_t
+hex_val(char p, bool allow_wildcard)
+{
+	if (p >= '0' && p <= '9')
+		return p - '0';
+	if (p >= 'a')
+		p -= ('a' - 'A');
+	if (p >= 'A' && p <= 'F')
+		return p - 'A' + 10;
+
+	if (allow_wildcard && p == 'X')
+		return 0xfe;
+
+	return 0xff;
+}
+
+uint16_t
+read_hex_str(const char *str, uint8_t **data, uint8_t **data_mask)
+{
+	size_t str_len;
+	uint8_t *buf;
+	uint8_t *mask;
+	const char *p = str;
+	uint8_t val = 0;
+	uint8_t val1;
+	uint8_t mask_val;
+	bool using_mask = false;
+	uint16_t len;
+
+	/* The output octet string cannot be longer than (strlen(str) + 1)/2 */
+	str_len = (strlen(str) + 1) / 2;
+	buf = MALLOC(str_len);
+	mask = MALLOC(str_len);
+
+	len = 0;
+	while (true) {
+		/* Skip spaces */
+		while (*p == ' ' || *p == '\t')
+			p++;
+
+		if (!*p)
+			break;
+
+		val = hex_val(*p++, !!data_mask);
+		if (val == 0xff)
+			break;
+		if (val == 0xfe) {
+			mask_val = 0x0f;
+			val = 0;
+			using_mask = true;
+		} else
+			mask_val = 0;
+
+		if (*p && *p != ' ') {
+			val1 = val << 4;
+			mask_val <<= 4;
+			val = hex_val(*p++, !!data_mask);
+			if (val == 0xff)
+				break;
+			if (val == 0xfe) {
+				mask_val |= 0x0f;
+				val = 0;
+				using_mask = true;
+			}
+			val |= val1;
+		}
+
+		buf[len] = val;
+		mask[len] = mask_val;
+		len++;
+	}
+
+	if (val == 0xff || !len) {
+		FREE_ONLY(buf);
+		FREE_ONLY(mask);
+		return 0;
+	}
+
+	/* Reduce the buffer size of appropriate */
+	if (len < str_len) {
+		buf = REALLOC(buf, len);
+		if (using_mask)
+			mask = REALLOC(mask, len);
+	}
+
+	*data = buf;
+	if (using_mask)
+		*data_mask = mask;
+	else
+		FREE_ONLY(mask);
+
+#if 0
+	for (int i = 0;  i < len; i++)
+		printf("%2.2X ", buf[i]);
+	printf("\n");
+
+	for (i = 0;  i < len; i++)
+		printf("%2.2X ", mask[i]);
+	printf("\n");
+#endif
+
+	return len;
 }
 
 void
@@ -451,7 +818,7 @@ keyword_alloc(vector_t *keywords_vec, const char *string, void (*handler) (const
 
 	vector_alloc_slot(keywords_vec);
 
-	keyword = (keyword_t *) MALLOC(sizeof(keyword_t));
+	PMALLOC(keyword);
 	keyword->string = string;
 	keyword->handler = handler;
 	keyword->active = active;
@@ -549,10 +916,10 @@ dump_keywords(vector_t *keydump, int level, FILE *fp)
 {
 	unsigned int i;
 	keyword_t *keyword_vec;
-	char file_name[1 + 3 + 1 + 8 + 1 + PID_MAX_DIGITS + 1];
+	char file_name[KA_TMP_DIR_LEN + 1 + 8 + 1 + PID_MAX_DIGITS + 1];		/* KA_TMP_DIR/keywords.PID\0 */
 
 	if (!level) {
-		snprintf(file_name, sizeof(file_name), "/tmp/keywords.%d", getpid());
+		snprintf(file_name, sizeof(file_name), KA_TMP_DIR "/keywords.%d", getpid());
 		fp = fopen_safe(file_name, "w");
 		if (!fp)
 			return;
@@ -1178,6 +1545,7 @@ add_lst(char *buf)
 			PMALLOC(value);
 			value->val = STRDUP("");
 			INIT_LIST_HEAD(&value->e_list);
+			list_add_tail(&value->e_list, &value_set->values);
 		}
 
 		/* Add the value_set to the list of value_sets */
@@ -1221,44 +1589,168 @@ dump_definitions(void)
 }
 #endif
 
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+static DIR *
+gl_opendir(const char *name)
+{
+	DIR *dirp;
+
+	have_wildcards = true;
+
+	dirp = opendir(name);
+
+	if (!dirp)
+		missing_directories++;
+
+	return dirp;
+}
+
+static int
+gl_lstat(const char *pathname, struct stat *statbuf)
+{
+	int ret;
+
+	ret = lstat(pathname, statbuf);
+
+	if (ret)
+		missing_files++;
+
+	return ret;
+}
+
+static bool __attribute__((pure))
+have_brace(const char *conf_file)
+{
+	const char *p = conf_file;
+
+	if (!*p)
+		return false;
+
+	do {
+		if (*p == '\\')
+			p++;
+		else if (*p == '{')
+			return true;
+	} while (*++p);
+
+	return false;
+}
+#endif
+
+static bool
+open_and_check_glob(glob_t *globbuf, const char *conf_file, include_t include_type)
+{
+	int	res;
+
+	globbuf->gl_offs = 0;
+
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+	globbuf->gl_closedir = (void *)closedir;
+	globbuf->gl_readdir = (void *)readdir;
+	globbuf->gl_opendir = (void *)gl_opendir;
+	globbuf->gl_lstat = (void *)gl_lstat;
+	globbuf->gl_stat = (void *)stat;
+#endif
+
+	/* NOTE: the following three variables are not declared static, since otherwise GCC (at least v9.3.0,
+	 * 9.3.1 and 10.2.1) -O1 optimisation assumes that they cannot be altered by the call to glob(), if
+	 * they have static scope. Declaring them static volatile also solves the problem, as does not
+	 * initialising the values in this function (which just wouldn't work).
+	 * This is an optimisation error of course, since the gl_opendir() and gl_lstat() functions can modify
+	 * the values, and pointers to these functions are passed to glob().
+	 * What makes this even more difficult is that if the values of missing_directories and missing_files
+	 * are printed in a log_message() after the return from glob(), then everything works OK.
+	 *
+	 * See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97783 for more details.
+	 */
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+	missing_files = 0;
+	missing_directories = 0;
+	have_wildcards = false;
+#endif
+
+	res = glob(conf_file, GLOB_MARK
+#if HAVE_DECL_GLOB_BRACE
+					| GLOB_BRACE
+#endif
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+					| GLOB_ALTDIRFUNC
+#endif
+						    , NULL, globbuf);
+
+	if (res) {
+		if (res == GLOB_NOMATCH) {
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+			if (missing_files || missing_directories)
+				file_config_error(have_brace(conf_file) ? INCLUDE_B : INCLUDE_M, "Config files missing '%s'.", conf_file);
+			else if (have_wildcards && ((include_check | include_type) & INCLUDE_W))
+				file_config_error(INCLUDE_W, "No config files matched '%s'.", conf_file);
+#else
+			if ((include_check | include_type) & INCLUDE_W)
+				file_config_error(INCLUDE_W, "No config files matched '%s'.", conf_file);
+#endif
+		} else
+			file_config_error(INCLUDE_R, "Error reading config file(s): glob(\"%s\") returned %d, skipping.", conf_file, res);
+
+		return false;
+	}
+
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+	if (missing_directories || missing_files) {
+		file_config_error(INCLUDE_B, "Some config files missing: \"%s\".", conf_file);
+
+		if ((include_check | include_type) & INCLUDE_B) {
+			globfree(globbuf);
+			return false;
+		}
+	}
+#endif
+
+	return true;
+}
+
+static bool
+check_glob_file(const char *file_name)
+{
+	struct stat stb;
+
+	if (file_name[0] && file_name[strlen(file_name)-1] == '/') {
+		/* This is a directory - so skip */
+		file_config_error(INCLUDE_R, "Configuration file '%s' is a directory - skipping"
+				, file_name);
+		return false;
+	}
+
+	/* Make sure what we have opened is a regular file, and not for example a directory or executable */
+	if (stat(file_name, &stb) ||
+	    !S_ISREG(stb.st_mode) ||
+	    (stb.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+		file_config_error(INCLUDE_R, "Configuration file '%s' is not a regular non-executable file - skipping", file_name);
+		return false;
+	}
+
+	return true;
+}
+
 bool
 check_conf_file(const char *conf_file)
 {
 	glob_t globbuf;
 	size_t i;
 	bool ret = true;
-	int res;
-	struct stat stb;
 	unsigned num_matches = 0;
 
-	globbuf.gl_offs = 0;
-	res = glob(conf_file, GLOB_MARK
-#if HAVE_DECL_GLOB_BRACE
-					| GLOB_BRACE
-#endif
-						    , NULL, &globbuf);
-	if (res) {
-		report_config_error(CONFIG_FILE_NOT_FOUND, "Unable to find configuration file %s (glob returned %d)", conf_file, res);
+	if (!open_and_check_glob(&globbuf, conf_file, INCLUDE))
 		return false;
-	}
 
 	for (i = 0; i < globbuf.gl_pathc; i++) {
-		if (globbuf.gl_pathv[i][strlen(globbuf.gl_pathv[i])-1] == '/') {
-			/* This is a directory - so skip */
+		if (!check_glob_file(globbuf.gl_pathv[i])) {
+			ret = false;
 			continue;
 		}
 
 		if (access(globbuf.gl_pathv[i], R_OK)) {
-			log_message(LOG_INFO, "Unable to read configuration file %s", globbuf.gl_pathv[i]);
-			ret = false;
-			break;
-		}
-
-		/* Make sure that the file is a regular file, and not for example a directory or executable */
-		if (stat(globbuf.gl_pathv[i], &stb) ||
-		    !S_ISREG(stb.st_mode) ||
-		     (stb.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-			log_message(LOG_INFO, "Configuration file '%s' is not a regular non-executable file", globbuf.gl_pathv[i]);
+			report_config_error(CONFIG_FILE_NOT_FOUND, "Unable to read configuration file %s", globbuf.gl_pathv[i]);
 			ret = false;
 			break;
 		}
@@ -1268,7 +1760,7 @@ check_conf_file(const char *conf_file)
 
 	if (ret) {
 		if (num_matches > 1)
-			report_config_error(CONFIG_MULTIPLE_FILES, "WARNING, more than one file matches configuration file %s, using %s", conf_file, globbuf.gl_pathv[0]);
+			report_config_error(CONFIG_MULTIPLE_FILES, "WARNING, multiple configuration file matches of %s, starting with %s", conf_file, globbuf.gl_pathv[0]);
 		else if (num_matches == 0) {
 			report_config_error(CONFIG_FILE_NOT_FOUND, "Unable to find configuration file %s", conf_file);
 			ret = false;
@@ -1754,15 +2246,16 @@ read_value_block(const vector_t *strvec)
 bool
 read_timer(const vector_t *strvec, size_t index, unsigned long *res, unsigned long min_time, unsigned long max_time, bool ignore_error)
 {
-	double timer;
+	unsigned long timer;
 	bool ret;
-	double fmin_time, fmax_time;
 
-	fmin_time = (double)min_time / TIMER_HZ;
-	fmax_time = (double)((max_time) ? max_time : TIMER_MAXIMUM) / TIMER_HZ;
+	if (!max_time)
+		max_time = TIMER_MAXIMUM;
 
-	ret = read_double_strvec(strvec, index, &timer, fmin_time, fmax_time, ignore_error);
-	*res = timer * TIMER_HZ > TIMER_MAXIMUM ? TIMER_MAXIMUM : (unsigned long)(timer * TIMER_HZ);
+	ret = read_decimal_unsigned_long_func(strvec_slot(strvec, index), &timer, min_time, max_time, TIMER_HZ_DIGITS, ignore_error);
+
+	if (ret)
+		*res = timer;
 
 	return ret;
 }
@@ -1791,58 +2284,45 @@ void skip_block(bool need_block_start)
 static bool
 open_conf_file(include_file_t *file)
 {
-	struct stat stb;
 	unsigned i;
 	FILE *stream;
 
 	while (file->glob_next < file->globbuf.gl_pathc) {
 		i = file->glob_next++;
 
-		if (file->globbuf.gl_pathv[i][strlen(file->globbuf.gl_pathv[i])-1] == '/') {
-			/* This is a directory - so skip */
+		if (!check_glob_file(file->globbuf.gl_pathv[i]))
 			continue;
-		}
 
-		log_message(LOG_INFO, "Opening file '%s'.", file->globbuf.gl_pathv[i]);
 		stream = fopen(file->globbuf.gl_pathv[i], "r");
 		if (!stream) {
-			log_message(LOG_INFO, "Configuration file '%s' open problem (%s) - skipping"
-				       , file->globbuf.gl_pathv[i], strerror(errno));
+			file_config_error(INCLUDE_R, "Configuration file '%s' open problem (%s) - skipping"
+					       , file->globbuf.gl_pathv[i], strerror(errno));
 			continue;
 		}
 
-		/* Make sure what we have opened is a regular file, and not for example a directory or executable */
-		if (fstat(fileno(stream), &stb) ||
-		    !S_ISREG(stb.st_mode) ||
-		    (stb.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-			log_message(LOG_INFO, "Configuration file '%s' is not a regular non-executable file - skipping", file->globbuf.gl_pathv[i]);
-			fclose(stream);
-			continue;
-		}
+		if (__test_bit(LOG_DETAIL_BIT, &debug))
+			log_message(LOG_INFO, "Opening file '%s'.", file->globbuf.gl_pathv[i]);
+
+		/* Allow tracking of file names/numbers */
+		if (write_conf_copy)
+			fprintf(conf_copy, "# %s\n", file->globbuf.gl_pathv[i]);
 
 		file->stream = stream;
 		file->num_matches++;
 
 		/* We only want to report the file name if there is more than one file used */
-		if (!list_is_last(&include_stack, &file->e_list) || file->globbuf.gl_pathc > 1)
+		if (!list_is_last(&file->e_list, &include_stack) || file->globbuf.gl_pathc > 1)
 			file->current_file_name = file->globbuf.gl_pathv[i];
 		file->current_line_no = 0;
 
 		if (strchr(file->globbuf.gl_pathv[i], '/')) {
-			/* If the filename contains a directory element, change to that directory.
-			   The man page open(2) states that fchdir() didn't support O_PATH until Linux 3.5,
-			   even though testing on Linux 3.1 shows it appears to work. To be safe, don't
-			   use it until Linux 3.5. */
-			file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY
-#if HAVE_DECL_O_PATH && LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
-								     | O_PATH
-#endif
-									     );
+			/* If the filename contains a directory element, change to that directory. */
+			file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY | O_PATH);
 
 			char *confpath = STRDUP(file->globbuf.gl_pathv[i]);
 			dirname(confpath);
 			if (chdir(confpath) < 0)
-				log_message(LOG_INFO, "chdir(%s) error (%s)", confpath, strerror(errno));
+				file_config_error(INCLUDE_R, "chdir(%s) error (%s)", confpath, strerror(errno));
 			FREE(confpath);
 		} else
 			file->curdir_fd = -1;
@@ -1854,40 +2334,34 @@ open_conf_file(include_file_t *file)
 }
 
 static bool
-open_glob_file(const char *conf_file)
+open_glob_file(const char *conf_file, include_t include_type)
 {
-	int	res;
 	include_file_t *file;
 
 	PMALLOC(file);
 	INIT_LIST_HEAD(&file->e_list);
 
-	file->globbuf.gl_offs = 0;
-	res = glob(conf_file, GLOB_MARK
-#if HAVE_DECL_GLOB_BRACE
-					| GLOB_BRACE
-#endif
-						    , NULL, &file->globbuf);
+	file->include_type = include_type;
+	file->sav_include_check = include_check;
+	list_head_add(&file->e_list, &include_stack);
 
-	if (res) {
-		if (res == GLOB_NOMATCH)
-			log_message(LOG_INFO, "No config files matched '%s'.", conf_file);
-		else
-			log_message(LOG_INFO, "Error reading config file(s): glob(\"%s\") returned %d, skipping.", conf_file, res);
+	if (!open_and_check_glob(&file->globbuf, conf_file, include_type)) {
+		list_head_del(&file->e_list);
 		FREE(file);
 		return false;
 	}
 
 	if (!open_conf_file(file)) {
-		log_message(LOG_INFO, "%s - no matching file", conf_file);
+		if (!file->globbuf.gl_pathc)
+			file_config_error(INCLUDE_R, "%s - no matching file", conf_file);
 
 		globfree(&file->globbuf);
+		list_head_del(&file->e_list);
 		FREE(file);
 		return false;
 	}
 
 	file->file_name = STRDUP(conf_file);
-	list_head_add(&file->e_list, &include_stack);
 
 	return true;
 }
@@ -1897,10 +2371,19 @@ end_file(include_file_t *file)
 {
 	int res;
 
-	fclose(file->stream);
+	if (file->stream != conf_copy)
+		fclose(file->stream);
+
+	if (write_conf_copy) {
+		/* Indicate a file is being closed */
+		fprintf(conf_copy, "!\n");
+	}
 
 // WHY??
 //	free_seq_list(&seq_list);
+
+	/* Restore the include_check value from when this glob was opened */
+	include_check = file->sav_include_check;
 
 	/* If we changed directory, restore the previous directory */
 	if (file->curdir_fd != -1) {
@@ -1948,18 +2431,60 @@ get_next_file(void)
 }
 
 static bool
+is_include(const char *buf)
+{
+	if (strncmp(buf, "include", 7))
+		return false;
+
+	if (!buf[7])
+		return false;
+
+	if (isspace(buf[7]))
+		return true;
+
+	/* Is "include" followed by one of the value include types? */
+	if (isspace(buf[8]) && strchr("rmwba", buf[7]))
+		return true;
+
+	return false;
+}
+
+static bool
 check_include(const char *buf)
 {
 	const char *p;
+	include_t include_type;
 
-	if (strncmp(buf, "include", 7) ||
-	    (buf[7] != ' ' && buf[7] != '\t'))
+	if (!is_include(buf))
 		return false;
 
-	p = buf + 8;
+	if (isspace(buf[7])) {
+		p = buf + 8;
+		include_type = INCLUDE;
+	} else {
+		p = buf + 9;
+		if (buf[7] == 'r')
+			include_type = INCLUDE_R;
+		else if (buf[7] == 'a')
+			include_type = INCLUDE_R | INCLUDE_M | INCLUDE_B | INCLUDE_W;
+		else if (buf[7] == 'w')
+			include_type = INCLUDE_R | INCLUDE_M | INCLUDE_W;
+#if HAVE_DECL_GLOB_ALTDIRFUNC
+		else if (buf[7] == 'm')
+			include_type = INCLUDE_R | INCLUDE_M;
+		else /* if (buf[7] == 'b') */
+			include_type = INCLUDE_R | INCLUDE_B;
+#else
+		else {
+			report_config_error(CONFIG_WARNING, "include%c not supported - treating as includer", buf[7]);
+			include_type = INCLUDE_R;
+		}
+#endif
+	}
+
 	p += strspn(p, " \t");
 
-	open_glob_file(p);
+	open_glob_file(p, include_type);
 
 	return true;
 }
@@ -2055,6 +2580,14 @@ read_line(char *buf, size_t size)
 			}
 		} else {
 			/* Get the next non-blank line */
+
+			/* Check we haven't completed all the files */
+			if (list_empty(&include_stack)) {
+				eof = true;
+				buf[0] = '\0';
+				break;
+			}
+
 			file = list_first_entry(&include_stack, include_file_t, e_list);
 
 			do {
@@ -2069,6 +2602,61 @@ read_line(char *buf, size_t size)
 					eof = true;
 					buf[0] = '\0';
 					break;
+				}
+
+				if (read_conf_copy) {
+					if (buf[0] == '#') {
+						if (buf[1] == '!') {
+#ifndef _ONE_PROCESS_DEBUG_
+							if (prog_type == PROG_TYPE_PARENT)
+#endif
+								report_config_error(CONFIG_FILE_NOT_FOUND, "%.*s", (int)strlen(buf + 3) - 1, buf + 3);
+							buf[0] = '\0';
+							continue;
+						}
+
+						FILE *fps = file->stream;
+
+						PMALLOC(file);
+						INIT_LIST_HEAD(&file->e_list);
+
+						file->stream = fps;
+						file->globbuf.gl_offs = 0;
+						file->num_matches = 1;
+						buf[strlen(buf) - 1] = '\0';
+						file->file_name = STRDUP(buf + 2);
+						file->current_file_name = file->file_name;
+						list_head_add(&file->e_list, &include_stack);
+						if (strchr(file->current_file_name, '/')) {
+							/* If the filename contains a directory element, change to that directory. */
+							file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY | O_PATH);
+
+							char *confpath = STRDUP(buf + 2);
+							dirname(confpath);
+							if (chdir(confpath) < 0)
+								log_message(LOG_INFO, "chdir(%s) error (%s)", confpath, strerror(errno));
+							FREE(confpath);
+						} else
+							file->curdir_fd = -1;
+
+						buf[0] = '\0';
+						continue;
+					} else if (buf[0] == '!') {
+						if (file->curdir_fd != -1) {
+							if (fchdir(file->curdir_fd))
+								log_message(LOG_INFO, "Failed to restore previous directory after include");
+							close(file->curdir_fd);
+						}
+						file = list_first_entry(&include_stack, include_file_t, e_list);
+						FREE_CONST_PTR(file->current_file_name);
+
+						list_del_init(&file->e_list);
+						FREE(file);
+						file = list_first_entry(&include_stack, include_file_t, e_list);
+
+						buf[0] = '\0';
+						continue;
+					}
 				}
 
 				/* Check if we have read the end of a line */
@@ -2088,11 +2676,23 @@ read_line(char *buf, size_t size)
 						def->multiline = false;
 				}
 
-				if (!len)
-					continue;
-
 				buf[len] = '\0';
+				if (!len) {
+					/* We need to preserve line numbers */
+					if (write_conf_copy)
+						fprintf(conf_copy, "\n");
+					continue;
+				}
+
 				decomment(buf);
+
+				if (write_conf_copy) {
+					if (is_include(buf)) {
+						/* We need to preserve line numbers */
+						fprintf(conf_copy, "\n");
+					} else
+						fprintf(conf_copy, "%s\n", buf);
+				}
 			} while (!buf[0]);
 
 			if (!buf[0])
@@ -2304,7 +2904,7 @@ alloc_value_block(void (*alloc_func) (const vector_t *), const vector_t *strvec)
 								, strvec_slot(strvec, 0), strvec_slot(strvec, 1));
 	}
 
-	buf = (char *) MALLOC(MAXBUF);
+	buf = (char *)MALLOC(MAXBUF);
 	while (first_vec || read_line(buf, MAXBUF)) {
 		if (first_vec)
 			vec = first_vec;
@@ -2500,15 +3100,20 @@ process_stream(vector_t *keywords_vec, int need_bob)
 
 /* Data initialization */
 void
-init_data(const char *conf_file, const vector_t * (*init_keywords) (void))
+init_data(const char *conf_file, const vector_t * (*init_keywords) (void), bool copy_config)
 {
+	bool file_opened = false;
+	int fd;
+#ifndef _ONE_PROCESS_DEBUG_
+	static unsigned conf_num = 0;
+#endif
+
 	/* A parent process or previous config load may have left these set */
 	block_depth = 0;
 	kw_level = 0;
 	sublevel = 0;
 	skip_sublevel = 0;
 	multiline_seq_depth = 0;
-	config_err = CONFIG_OK;
 	random_seed = 0;
 	random_seed_configured = false;
 
@@ -2529,9 +3134,82 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void))
 	/* Stream handling */
 	current_keywords = keywords;
 
-	/* Open the first file */
-	if (open_glob_file(conf_file)) {
+	if (copy_config) {
+		if (!conf_copy) {
+#if defined HAVE_MEMFD_CREATE || defined USE_MEMFD_CREATE_SYSCALL
+			fd = memfd_create("/keepalived/consolidated_configuration", MFD_CLOEXEC);
 
+			/* SELinux can allow memfd_create() to succeed, but reads and writes fail.
+			 * Perversely the open does not log an SELinux error if keepalived has no
+			 * permissions for "tmpfs", but if it has read and write permissions but
+			 * not open permission, then the open fails. */
+			if (fd != -1) {
+				char read_byte;		/* coverity[suspicious_sizeof] is generated if this is an int */
+
+				if (read(fd, &read_byte, 1) == -1) {
+					if (errno == EACCES)
+						log_message(LOG_INFO, "SELinux permissions for memfd (tmpfs) appear to be missing for keepalived");
+					else
+						log_message(LOG_INFO, "read from memfd failed with errno %d - %m", errno);
+					close(fd);
+					fd = open_tmpfile(RUN_DIR, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+				}
+			}
+#endif
+#ifndef HAVE_MEMFD_CREATE
+#ifdef USE_MEMFD_CREATE_SYSCALL
+			if (fd == -1 && errno == ENOSYS)
+#endif
+				fd = open_tmpfile(RUN_DIR, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+#endif
+			if (fd == -1)
+				log_message(LOG_INFO, "conf_copy open error %d - %m", errno);
+			else {
+				conf_copy = fdopen(fd, "w+");
+				if (!conf_copy)
+					log_message(LOG_INFO, "fdopen of conf_copy fd error %d - %m", errno);
+			}
+		} else {
+			if (ftruncate(fileno(conf_copy), 0))
+				log_message(LOG_INFO, "Failed to truncate config copy file (%d) - %m", errno);
+
+			rewind(conf_copy);
+		}
+
+		if (conf_copy)
+			write_conf_copy = true;
+	}
+
+	if (!copy_config && conf_copy) {
+		include_file_t *file;
+
+		PMALLOC(file);
+		INIT_LIST_HEAD(&file->e_list);
+
+		file->globbuf.gl_offs = 0;
+		file->stream = conf_copy;
+		file->num_matches = 1;
+		file->curdir_fd = -1;
+		errno = 0;
+		rewind(conf_copy);
+		if (errno)
+			log_message(LOG_INFO, "rewind config file failed (%d) - %m", errno);
+		file->file_name = STRDUP(conf_file);
+		file->current_file_name = file->file_name;
+
+		list_head_add(&file->e_list, &include_stack);
+
+		read_conf_copy = true;
+		file_opened = true;
+	} else if (open_glob_file(conf_file, INCLUDE_R | INCLUDE_M | INCLUDE_W)) {
+		/* Opened the first file */
+		file_opened = true;
+
+		log_message(LOG_INFO, "Configuration file %s", conf_file);
+	} else
+		file_config_error(INCLUDE_R, "Failed to open configuration file");
+
+	if (file_opened) {
 		register_null_strvec_handler(null_strvec);
 		process_stream(current_keywords, 0);
 		unregister_null_strvec_handler();
@@ -2545,13 +3223,151 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void))
 						      , block_depth, EOB, BOB);
 	}
 
+	if (conf_copy && write_conf_copy) {
+		fflush(conf_copy);
+		write_conf_copy = false;
+
+		/* Set file offset to beginning ready for next write */
+		rewind(conf_copy);
+
+#ifndef _ONE_PROCESS_DEBUG_
+		if (config_save_dir) {
+			char buf[128];
+			pid_t pid = getpid();
+
+			sprintf(buf, "cp /proc/%d/fd/%d %s/keepalived.conf.%d.%u", pid, fileno(conf_copy), config_save_dir, pid, conf_num++);
+			if (system(buf)) {
+				/* If it fails, there is nothing we can do about it */
+			};
+		}
+#endif
+	}
+
 	/* Close the password database if it was opened */
 	endpwent();
 
 	free_keywords(keywords);
 	free_parser_data();
-#ifdef _WITH_VRRP_
-	clear_rt_names();
-#endif
+
 	notify_resource_release();
+}
+
+int
+get_config_fd(void)
+{
+	if (!conf_copy)
+		return -1;
+
+	return fileno(conf_copy);
+}
+
+void
+set_config_fd(int fd)
+{
+	conf_copy = fdopen(fd, "w+");
+	if (conf_copy) {
+		write_conf_copy = true;
+		rewind(conf_copy);
+	} else
+		log_message(LOG_INFO, "Unable to open config copy file (%d) - %m", errno);
+}
+
+void include_check_set(const vector_t *strvec)
+{
+	const char *word;
+	unsigned int i;
+	int add_remove = 0;	/* -1 = remove, +1 = add, 0 = set */
+	unsigned new_flag;
+	int offset;
+
+	if (strvec && vector_size(strvec) > 1) {
+		for (i = 1; i < vector_size(strvec); i++) {
+			word = strvec_slot(strvec, i);
+
+			/* Are we adding or removing bits, or setting? */
+			add_remove = 0;
+			offset = 1;
+			if (word[0] == '-')
+				add_remove = -1;
+			else if (word[0] == '+')
+				add_remove = +1;
+			else {
+				offset = 0;
+				if (i == 1)
+					include_check = 0;
+				else {
+					report_config_error(CONFIG_GENERAL_ERROR, "Duplicate include_check '%s' specified - ignoring", word);
+					continue;
+				}
+			}
+
+			new_flag = 0;
+			if (!strcmp(word + offset, "read"))
+				new_flag = INCLUDE_R;
+			else if (!strcmp(word + offset, "match"))
+				new_flag = INCLUDE_M;
+			else if (!strcmp(word + offset, "wildcard_match"))
+				new_flag = INCLUDE_W;
+			else if (!strcmp(word + offset, "brace_match"))
+				new_flag = INCLUDE_B;
+			else
+				report_config_error(CONFIG_GENERAL_ERROR, "Unknown include_check type '%s' - ignoring", word + offset);
+#if !HAVE_DECL_GLOB_ALTDIRFUNC
+			if (new_flag & (INCLUDE_M | INCLUDE_B)) {
+				if (!add_remove) {
+					report_config_error(CONFIG_WARNING, "include_check type '%s' - not supported, treating as 'read'", word + offset);
+					new_flag = INCLUDE_R;
+				} else {
+					report_config_error(CONFIG_WARNING, "include_check type '%s' - not supported, ignoring", word + offset);
+					new_flag = 0;
+				}
+			}
+#endif
+
+			if (new_flag) {
+				if (!add_remove)
+					include_check = INCLUDE_R | new_flag;
+				else if (add_remove == 1)
+					include_check |= new_flag;
+				else /* if (add_remove == -1) */
+					include_check &= ~new_flag;
+			}
+		}
+	} else
+		include_check = INCLUDE_R | INCLUDE_M | INCLUDE_W | INCLUDE_B;
+}
+
+bool
+had_config_file_error(void)
+{
+	return config_file_error;
+}
+
+void
+separate_config_file(void)
+{
+	char buf[32];	/* /proc/self/fd/2147483647\0 */
+	int fd_orig;
+	int fd;
+
+	if (!conf_copy) {
+		log_message(LOG_INFO, "No conf_copy");
+		return;
+	}
+
+	/* We need to open the config file on a different file descriptor so that
+	 * it can be read independantly from the other keepalived processes */
+	fd_orig = fileno(conf_copy);
+	snprintf(buf, sizeof(buf), "/proc/self/fd/%d", fd_orig);
+	if ((fd = open(buf, O_RDONLY)) == -1) {
+		log_message(LOG_INFO, "Failed to open %s for conf_copy", buf);
+		return;
+	}
+#ifdef HAVE_DUP3
+	dup3(fd, fd_orig, O_CLOEXEC);
+#else
+	dup2(fd, fd_orig);
+	fcntl(fd_orig, F_SETFD, fcntl(fd_orig, F_GETFD) | FD_CLOEXEC);
+#endif
+	close(fd);
 }

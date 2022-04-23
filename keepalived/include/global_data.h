@@ -30,10 +30,7 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sched.h>
-
-#ifdef HAVE_LINUX_NETFILTER_X_TABLES_H
 #include <linux/netfilter/x_tables.h>
-#endif
 
 #ifdef _HAVE_LIBIPSET_
 #include <linux/netfilter/ipset/ip_set.h>
@@ -43,9 +40,7 @@
 #include <linux/netfilter/nf_tables.h>
 #endif
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 #include <sys/resource.h>
-#endif
 
 /* local includes */
 #include "list_head.h"
@@ -101,11 +96,9 @@ typedef struct _data {
 #ifdef _WITH_BFD_
 	const char			*bfd_process_name;
 #endif
-#if HAVE_DECL_CLONE_NEWNET
 	const char			*network_namespace;		/* network namespace name */
 	const char			*network_namespace_ipvs;	/* network namespace name for ipvs */
 	bool				namespace_with_ipsets;		/* override for namespaces with ipsets on Linux < 3.13 */
-#endif
 	const char			*local_name;
 	const char			*instance_name;		/* keepalived instance name */
 #ifdef _WITH_LINKBEAT_
@@ -123,11 +116,15 @@ typedef struct _data {
 	notify_script_t			*shutdown_script;
 	unsigned			shutdown_script_timeout;
 #ifndef _ONE_PROCESS_DEBUG_
+	const char			*reload_check_config;	/* log file name for validating new configuration before reloading */
 	const char			*reload_time_file;
 	bool				reload_repeat;
 	time_t				reload_time;
 	bool				reload_date_specified;
+	const char			*reload_file;
 #endif
+	const char 			*config_directory;
+	bool				data_use_instance;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
 	bool				allow_if_changes;
@@ -135,6 +132,7 @@ typedef struct _data {
 	int				smtp_alert_vrrp;
 	const char			*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
+	bool				disable_local_igmp;
 #endif
 #ifdef _WITH_LVS_
 	ipvs_timeout_t			lvs_timeouts;
@@ -142,13 +140,13 @@ typedef struct _data {
 	bool				checker_log_all_failures;
 	struct lvs_syncd_config		lvs_syncd;
 	bool				lvs_flush;		/* flush any residual LVS config at startup */
-	lvs_flush_t			lvs_flush_onstop;	/* flush any LVS config at shutdown */
+	lvs_flush_t			lvs_flush_on_stop;	/* flush any LVS config at shutdown */
 #endif
 	int				max_auto_priority;
 	long				min_auto_priority_delay;
 #ifdef _WITH_VRRP_
-	struct sockaddr_in		vrrp_mcast_group4;
-	struct sockaddr_in6		vrrp_mcast_group6;
+	struct sockaddr_in6		vrrp_mcast_group6 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
+	struct sockaddr_in		vrrp_mcast_group4 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
 	unsigned			vrrp_garp_delay;
 	timeval_t			vrrp_garp_refresh;
 	unsigned			vrrp_garp_rep;
@@ -157,6 +155,11 @@ typedef struct _data {
 	unsigned			vrrp_garp_lower_prio_rep;
 	unsigned			vrrp_garp_interval;
 	unsigned			vrrp_gna_interval;
+	unsigned			vrrp_down_timer_adverts;
+#ifdef _HAVE_VRRP_VMAC_
+	unsigned			vrrp_vmac_garp_intvl;
+	bool				vrrp_vmac_garp_all_if;
+#endif
 	bool				vrrp_lower_prio_no_advert;
 	bool				vrrp_higher_prio_send_advert;
 	int				vrrp_version;		/* VRRP version (2 or 3) */
@@ -168,16 +171,13 @@ typedef struct _data {
 	const char			*vrrp_ipset_address;
 	const char			*vrrp_ipset_address6;
 	const char			*vrrp_ipset_address_iface6;
-#ifdef HAVE_IPSET_ATTR_IFACE
 	const char			*vrrp_ipset_igmp;
 	const char			*vrrp_ipset_mld;
-#endif
 #endif
 #endif
 #ifdef _WITH_NFTABLES_
 	const char			*vrrp_nf_table_name;
 	int				vrrp_nf_chain_priority;
-	bool				vrrp_nf_counters;
 	bool				vrrp_nf_ifindex;
 #endif
 	bool				vrrp_check_unicast_src;
@@ -188,9 +188,7 @@ typedef struct _data {
 	bool				vrrp_no_swap;
 	unsigned			vrrp_realtime_priority;
 	cpu_set_t			vrrp_cpu_mask;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				vrrp_rlimit_rt;
-#endif
 #endif
 #ifdef _WITH_LVS_
 	bool				have_checker_config;
@@ -198,9 +196,15 @@ typedef struct _data {
 	bool				checker_no_swap;
 	unsigned			checker_realtime_priority;
 	cpu_set_t			checker_cpu_mask;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				checker_rlimit_rt;
+#ifdef _WITH_NFTABLES_
+	const char			*ipvs_nf_table_name;
+	int				ipvs_nf_chain_priority;
+	uint32_t			ipvs_nftables_start_fwmark;
 #endif
+#endif
+#ifdef _WITH_NFTABLES_
+	bool				nf_counters;
 #endif
 #ifdef _WITH_BFD_
 	bool				have_bfd_config;
@@ -208,9 +212,7 @@ typedef struct _data {
 	bool				bfd_no_swap;
 	unsigned			bfd_realtime_priority;
 	cpu_set_t			bfd_cpu_mask;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				bfd_rlimit_rt;
-#endif
 #endif
 	notify_fifo_t			notify_fifo;
 #ifdef _WITH_VRRP_
@@ -249,7 +251,7 @@ typedef struct _data {
 	bool				vrrp_netlink_cmd_rcv_bufs_force;
 	unsigned			vrrp_netlink_monitor_rcv_bufs;
 	bool				vrrp_netlink_monitor_rcv_bufs_force;
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	unsigned			process_monitor_rcv_bufs;
 	bool				process_monitor_rcv_bufs_force;
 #endif
@@ -270,6 +272,10 @@ typedef struct _data {
 	int				vrrp_rx_bufs_multiples;
 	unsigned			vrrp_startup_delay;
 	bool				log_unknown_vrids;
+#ifdef _HAVE_VRRP_VMAC_
+	const char			*vmac_prefix;
+	const char			*vmac_addr_prefix;
+#endif
 #endif
 } data_t;
 
@@ -282,6 +288,7 @@ extern void alloc_email(const char *);
 extern data_t *alloc_global_data(void);
 extern void init_global_data(data_t *, data_t *, bool);
 extern void free_global_data(data_t *);
+extern FILE *open_dump_file(const char *) __attribute__((malloc));
 extern void dump_global_data(FILE *, data_t *);
 
 #endif

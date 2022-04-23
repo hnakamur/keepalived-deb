@@ -16,7 +16,9 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
 	 -e 's|@RUN_DIR[@]|$(RUN_DIR)|g' \
-	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g'
+	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g' \
+	 -e 's|@SYSTEMD_SERVICE_TYPE[@]|$(SYSTEMD_SERVICE_TYPE)|g' \
+	 -e 's|@SYSTEMD_EXEC_START_OPTIONS[@]|$(SYSTEMD_EXEC_START_OPTIONS)|g'
 
 sbin_PROGRAMS		= keepalived
 keepalived_SOURCES	= main.c
@@ -45,11 +47,13 @@ if WITH_BFD
   BFD_LIB		= bfd/libbfd.a
 endif
 
-keepalived.service: Makefile
+if INIT_SYSTEMD
+keepalived.service: $(srcdir)/Makefile.am
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.service: $(srcdir)/keepalived.service.in
+endif
 
 SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) $(TRACKER_SUBDIR) etc
 
@@ -61,12 +65,6 @@ MOSTLYCLEANFILES	= keepalived.service
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
 
-sysconfigdir		= $(sysconfdir)/sysconfig
-sysconfig_DATA		= etc/sysconfig/keepalived
-
-configdir		= $(sysconfdir)/@PACKAGE@
-config_DATA		= etc/keepalived/keepalived.conf
-
 if INIT_SYSTEMD
 systemdsystemunit_DATA	= keepalived.service
 endif
@@ -74,4 +72,41 @@ endif
 if INIT_OPENRC
 initdir			= $(sysconfdir)/init.d
 init_DATA		= etc/openrc/keepalived
+endif
+
+if WITH_IPVS
+# checks for realpath, and also not busybox version which does not support --relative-to
+install-exec-hook:
+	$(MKDIR_P) $(DESTDIR)/$(bindir)
+	@( \
+	realpath --relative-to=/ / >/dev/null 2>&1; \
+	if [ $$? -eq 0 ]; then \
+		$(LN_S) `realpath --relative-to="$(DESTDIR)/$(bindir)" "$(DESTDIR)/$(sbindir)/keepalived"` $(DESTDIR)/$(bindir)/genhash; \
+	else \
+		if [ $(bindir) = $(sbindir) ]; then \
+			d= ; \
+			s= ; \
+		else \
+			d=`echo $(bindir) | sed -e "s:^/::"`; \
+			s=`echo $(sbindir) | sed -e "s:^/::"`; \
+			\
+			while [ 1 ]; do \
+				d1=`echo $$d | sed -e "s:/.*::"`; \
+				s1=`echo $$s | sed -e "s:/.*::"`; \
+				if [ $$d1 != $$s1 ]; then \
+					break; \
+				fi; \
+				d=`echo $$d | sed -e "s:^[^/]*/::"`; \
+				s=`echo $$s | sed -e "s:^[^/]*/::"`; \
+				if [ -z $$d ]; then break; fi; \
+				if [ -z $$s ]; then break; fi; \
+			done; \
+			\
+			d=`echo /$$d/ | sed -e "s:/[^/.]*/:/../:g" -e "s:/[^/.]*/:/../:g" -e "s:^/::"`; \
+			s=$$s/ ; \
+		fi; \
+		\
+		$(LN_S) $$d$${s}keepalived $(DESTDIR)/$(bindir)/genhash; \
+	fi; \
+	)
 endif

@@ -3,9 +3,9 @@
  *              <www.linuxvirtualserver.org>. It monitor & manipulate
  *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        old_socket.h include file.
+ * Part:        Config read completion notification include file.
  *
- * Author:      Alexandre Cassen, <acassen@linux-vs.org>
+ * Author:      Quentin Armitage, <quentin@armitage.org.uk>
  *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,30 +17,24 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2021-2021 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _OLD_SOCKET_H
-#define _OLD_SOCKET_H 1
+#ifndef _CONFIG_NOTIFY_H
+#define _CONFIG_NOTIFY_H
 
 #include "config.h"
 
-#if !HAVE_DECL_SOCK_NONBLOCK || !HAVE_DECL_SOCK_CLOEXEC
 #include <stdbool.h>
+#include <stdio.h>
 
-/* Kernels < 2.6.27 and glibc < 2.9 don't support the SOCK_CLOEXEC or SOCK_NONBLOCK options */
-
-/* We need to know if SOCK_NONBLOCK is desired */
-#if !HAVE_DECL_SOCK_NONBLOCK
-#define SOCK_NONBLOCK	04000
+extern void queue_reload(void);
+extern void open_config_read_fd(void);
+extern void notify_config_read(void);
+#ifndef _ONE_PROCESS_DEBUG_
+extern void save_config(bool, const char *, void(*)(FILE *));
 #endif
-
-/* SOCK_CLOEXEC is always wanted, so we don't want to set if it is not defined */
-#if !HAVE_DECL_SOCK_CLOEXEC
-#define SOCK_CLOEXEC	0
+#ifdef THREAD_DUMP
+extern void register_config_notify_addresses(void);
 #endif
-
-extern bool set_sock_flags(int fd, int cmd, long flags);
-#endif
-
 #endif

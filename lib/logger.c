@@ -29,9 +29,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <memory.h>
-#ifndef HAVE_SIGNALFD
-#include <signal.h>
-#endif
+#include <syslog.h>
 
 #include "logger.h"
 #include "bitops.h"
@@ -39,6 +37,8 @@
 
 /* Boolean flag - send messages to console as well as syslog */
 static bool log_console = false;
+
+int log_facility = LOG_DAEMON;				/* Optional logging facilities */
 
 #ifdef ENABLE_LOG_TO_FILE
 /* File to write log messages to */
@@ -51,6 +51,12 @@ void
 enable_console_log(void)
 {
 	log_console = true;
+}
+
+void
+open_syslog(const char *ident)
+{
+	openlog(ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0), log_facility);
 }
 
 #ifdef ENABLE_LOG_TO_FILE
@@ -111,34 +117,9 @@ update_log_file_perms(mode_t umask_bits)
 }
 #endif
 
-#ifndef HAVE_SIGNALFD
-static inline bool
-block_signals(sigset_t *cur_set)
-{
-	sigset_t block_set;
-
-	sigfillset(&block_set);
-	if (!sigprocmask(SIG_BLOCK, &block_set, cur_set))
-		return false;
-
-	/* Yes, we are logging without disabling signals,
-	 * but it would be useful to know that sigprocmask has
-	 * failed. The only error that could occur according
-	 * to sigprocmask(2) is EFAULT, which would be very
-	 * strange since the sigsets are on the stack. */
-	syslog(LOG_ERR, "%s", "sigprocmask failed in block_signals()");
-
-	return true;
-}
-#endif
-
 void
-vlog_message(int facility, const char* format, va_list args)
+vlog_message(const int facility, const char* format, va_list args)
 {
-#ifndef HAVE_SIGNALFD
-	sigset_t cur_set;
-	bool restore_signals = false;
-#endif
 #if !HAVE_VSYSLOG
 	char buf[MAX_LOG_MSG+1];
 #endif
@@ -182,10 +163,6 @@ vlog_message(int facility, const char* format, va_list args)
 		localtime_r(&t, &tm);
 
 		if (log_console && __test_bit(DONT_FORK_BIT, &debug)) {
-#ifndef HAVE_SIGNALFD
-			if (!block_signals(&cur_set))
-				restore_signals = true;
-#endif
 
 			strftime(timestamp, sizeof(timestamp), "%c", &tm);
 			fprintf(stderr, "%s: %s\n", timestamp, buf);
@@ -193,13 +170,9 @@ vlog_message(int facility, const char* format, va_list args)
 #ifdef ENABLE_LOG_TO_FILE
 		if (log_file) {
 			p = timestamp;
-			p += strftime(timestamp, sizeof(timestamp), "%a %b %T", &tm);
+			p += strftime(timestamp, sizeof(timestamp), "%a %b %d %T", &tm);
 			p += snprintf(p, timestamp + sizeof(timestamp) - p, ".%9.9ld", ts.tv_nsec);
 			strftime(p, timestamp + sizeof(timestamp) - p, " %Y", &tm);
-#ifndef HAVE_SIGNALFD
-			if (!restore_signals && !block_signals(&cur_set))
-				restore_signals = true;
-#endif
 			fprintf(log_file, "%s: %s\n", timestamp, buf);
 			if (always_flush_log_file)
 				fflush(log_file);
@@ -208,25 +181,12 @@ vlog_message(int facility, const char* format, va_list args)
 	}
 
 	if (!__test_bit(NO_SYSLOG_BIT, &debug)) {
-#ifndef HAVE_SIGNALFD
-		if (!restore_signals && !block_signals(&cur_set))
-			restore_signals = true;
-#endif
-
-		if (!(facility & LOG_FACMASK))
-			facility |= LOG_USER;
-
 #if HAVE_VSYSLOG
 		vsyslog(facility, format, args);
 #else
 		syslog(facility, "%s", buf);
 #endif
 	}
-
-#ifndef HAVE_SIGNALFD
-	if (restore_signals)
-		sigprocmask(SIG_SETMASK, &cur_set, NULL);
-#endif
 }
 
 void

@@ -29,6 +29,8 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+#include "scheduler.h"
+
 /* State flags */
 enum daemon_bits {
 #ifdef _WITH_VRRP_
@@ -47,11 +49,13 @@ enum daemon_bits {
 #define SET_RELOAD      (reload = 1)
 #define UNSET_RELOAD    (reload = 0)
 
+/* Special pseudo-pointer to indicate default reload file */
+#define DEFAULT_RELOAD_FILE		((void *)1)
+
 /* Global vars exported */
 extern const char *version_string;	/* keepalived version */
 extern unsigned long daemon_mode;	/* Which child processes are run */
 extern const char *conf_file;		/* Configuration file */
-extern int log_facility;		/* Optional logging facilities */
 #ifdef _WITH_VRRP_
 extern pid_t vrrp_child;		/* VRRP child process ID */
 extern const char *vrrp_pidfile;	/* overrule default pidfile */
@@ -87,6 +91,8 @@ extern bool running_vrrp(void) __attribute__ ((pure));
 #ifdef _WITH_LVS_
 extern bool running_checker(void) __attribute__ ((pure));
 #endif
+extern void reinitialise_global_vars(void);
+extern void start_reload(thread_ref_t);
 
 #ifdef THREAD_DUMP
 extern void thread_dump_signal(void *, int);
@@ -96,5 +102,6 @@ extern int keepalived_main(int, char**); /* The "real" main function */
 
 extern unsigned child_wait_time;
 extern bool umask_cmdline;
+extern unsigned num_reloading;
 
 #endif

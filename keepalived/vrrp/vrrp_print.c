@@ -29,29 +29,29 @@
 
 #include "logger.h"
 #include "list_head.h"
+#include "global_data.h"
 
 #include "vrrp.h"
 #include "vrrp_data.h"
 #include "vrrp_print.h"
 #include "utils.h"
 
-static const char *dump_file = "/tmp/keepalived.data";
-static const char *stats_file = "/tmp/keepalived.stats";
+static const char *dump_file = KA_TMP_DIR "/keepalived.data";
+static const char *stats_file = KA_TMP_DIR "/keepalived.stats";
 
 void
 vrrp_print_data(void)
 {
-	FILE *file = fopen_safe(dump_file, "w");
+	FILE *fp;
 
-	if (!file) {
-		log_message(LOG_INFO, "Can't open %s (%d: %s)",
-			dump_file, errno, strerror(errno));
+	fp = open_dump_file(dump_file);
+
+	if (!fp)
 		return;
-	}
 
-	dump_data_vrrp(file);
+	dump_data_vrrp(fp);
 
-	fclose(file);
+	fclose(fp);
 }
 
 void

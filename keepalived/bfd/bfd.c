@@ -89,7 +89,7 @@ void
 bfd_set_poll(bfd_t *bfd)
 {
 	if (__test_bit(LOG_DETAIL_BIT, &debug))
-		log_message(LOG_INFO, "BFD_Instance(%s) Starting poll sequence",
+		log_message(LOG_INFO, "(%s) Starting poll sequence",
 			    bfd->iname);
 	/*
 	 * RFC5880:
@@ -181,7 +181,7 @@ bfd_build_packet(bfdpkt_t *pkt, bfd_t *bfd, char *buf,
 	ssize_t len = sizeof (bfdhdr_t);
 
 	memset(buf, 0, bufsz);
-	pkt->hdr = (bfdhdr_t *) buf;
+	pkt->hdr = PTR_CAST(bfdhdr_t, buf);
 
 	/* If we are responding to a poll, but also wanted
 	 * to send a poll, we can send the parameters now */

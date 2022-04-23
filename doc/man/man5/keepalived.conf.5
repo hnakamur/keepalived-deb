@@ -1,7 +1,13 @@
-.TH keepalived.conf 5 2020-05-31 "Keepalived" "Keepalived Configuration's Manual"
+.TH keepalived.conf 5 2021-08-13 "Keepalived" "Keepalived Configuration's Manual"
 .SH NAME
 keepalived.conf - configuration file for Keepalived
 .br
+.PP
+.SH Note:
+This documentation MUST be considered as THE exhaustive source of information in
+order to configure Keepalived. This documenation is supported and maintained by
+Keepalived Core-Team.
+.PP
 .SH DESCRIPTION
 \fBkeepalived.conf\fR is the configuration file which describes all the
 Keepalived keywords. Keywords are placed in hierarchies of blocks and
@@ -10,8 +16,8 @@ subblocks, each layer being delimited by '{' and '}' pairs.
 Comments start with '#' or '!' to the end of the line and can start
 anywhere in a line.
 .PP
-The keyword 'include' allows inclusion of other configuration files from within
-the main configuration file, or from subsequently included files.
+The keyword 'include' and variants allow inclusion of other configuration files
+from within the main configuration file, or from subsequently included files.
 .PP
 The format of the include directive is:
 
@@ -24,11 +30,34 @@ supports them.
 After opening an included file, the current directory is set to the directory of
 the file itself, so any relative paths included from a file are relative to the
 directory of the including file itself.
+
+The include variants add additional include checks to the current include_check level (see below)
+The variants are:
+.br
+\fBincluder\fR FILENAME - same as include_check readable
+.br
+\fBincludem\fR FILENAME - same as include_check match
+.br
+\fBincludew\fR FILENAME - same as include_check wildcard_match
+.br
+\fBincludeb\fR FILENAME - same as include_check brace_match
+.br
+\fBincludea\fR FILENAME - all include_check checks
 .PP
-\fBNote:\fR
-This documentation MUST be considered as THE exhaustive source of information in
-order to configure Keepalived. This documenation is supported and maintained by
-Keepalived Core-Team.
+NOTE: If the libc glob() function does not support GLOB_ALTDIRFUNC (e.g. Musl libc as on Alpine Linux etc.),
+then only includea, includer and includew of the above options will work.
+.PP
+Why do we want to allow errors? Suppose a configuration has optional files in /etc/keepalived/conf.d,
+then \fIinclude_/etc/keepalived/conf.d/*\fR could be specified, but it should not
+error if there are no files in the directory; in this case \fIincluder\fR should be used. Otherwise it
+is sensible to use \fIincludea\fR.
+
+include handling will not work with if the include line uses conditional configuration or
+parameter substitution, since the detection of the include keywords is done before the
+processing on conditional configuration and parameter substitution.
+
+The basic \fIinclude\fR keyword is retained for backward compatibility, since it does not
+produce config errors if files could not be opened etc.
 .PP
 .SH PARAMETER SYNTAX
 \fB<BOOL>\fR
@@ -62,19 +91,41 @@ a non root user.
 
 All scripts should be written so that they will terminate on receipt of a SIGTERM
 signal. Scripts will be sent SIGTERM if their parent terminates, or it is a script
-the keepalived is awaiting its exit status and it has run for too long.
+that keepalived is awaiting its exit status and it has run for too long.
 .PP
 .SH Quoted strings
-Quoted strings are specified between " characters; more specifically a string
-will only end after a quoted string if there is whitespace afterwards. For
-example:
+Quoted strings are specified between " or ' characters and strings are delimited by
+whitespace. In the examples below the \' characters are not part of the strings and should not be specified:
+
 .nf
 .RS
-"abcd" efg h jkl "mnop"
+\'abcd" efg h jkl "mnop\'
+.RE
+
+.fi
+will be the single string:
+
+.nf
+.RS
+\'abcd efg h jkl mnop\'
+.RE
+
+whereas:
+
+.nf
+.RS
+\'abcd "efg h jkl" mnop\'
 .RE
 .fi
-will be the single string "abcd efg h jkl mnop", i.e. the embedded " characters
-are removed.
+
+will be the three strings:
+
+.nf
+.RS
+\'abcd\', \'efg h jkl\' and \'mnop\'
+.RE
+
+i.e. the " and ' characters are removed and any intervening whitespace is retained.
 .PP
 Quoted strings can also have escaped characters, like the shell. \\a, \\b, \\E, \\f,
 \\n, \\r, \\t, \\v, \\nnn and \\xXX (where nnn is up to 3 octal digits, and XX is any
@@ -109,6 +160,7 @@ are:
 contains subblocks of
 \fBGlobal definitions,
 Linkbeat interfaces,
+Interface up/down transition delays,
 Static track groups,
 Static addresses,
 Static routes,\fR
@@ -122,7 +174,7 @@ and
 # keepalived in a separate network namespace:
 # --
 # Set the network namespace to run in.
-# The directory /var/run/keepalived will be created as an
+# The directory /run/keepalived will be created as an
 # unshared mount point, for example for pid files.
 # syslog entries will have _NAME appended to the ident.
 # Note: the namespace cannot be changed on a configuration reload.
@@ -135,7 +187,7 @@ and
 \fBnet_namespace_ipvs \fRNAME
 
 # ipsets wasn't network namespace aware until Linux 3.13, and so
-# if running with # an earlier version of the kernel, by default
+# if running with an earlier version of the kernel, by default
 # use of ipsets is disabled if using a namespace and vrrp_ipsets
 # has not been specified. This options overrides the default and
 # allows ipsets to be used with a namespace on kernels prior to 3.13.
@@ -143,11 +195,11 @@ and
 
 # If multiple instances of keepalived are run in the same namespace,
 # this will create pid files with NAME as part of the file names,
-# in /var/run/keepalived.
+# in /run/keepalived.
 # Note: the instance name cannot be changed on a configuration reload
 \fBinstance \fRNAME
 
-# Create pid files in /var/run/keepalived
+# Create pid files in /run/keepalived
 \fBuse_pid_dir\fR
 
 # Poll to detect media link failure using ETHTOOL, MII or ioctl interface
@@ -159,8 +211,31 @@ and
 # (default: 5)
 \fBchild_wait_time \fRSECS
 
+Note: All processes/scripts run by keepalived are run with parent death signal set
+to SIGTERM. All such processes/scripts should either not change the action for
+SIGTERM, or ensure that the process/script terminates once SIGTERM is received,
+possibly following any cleanup actions needed.
+
 # Global definitions configuration block
 \fBglobal_defs \fR{
+    # In order to ensure that all processes read exactly the same configuration,
+    # while the config is first read it is written, by default, to a memory based
+    # file (or to an anonymous file in /tmp/ if memfd_create() is not supported).
+    # If your configuration is very large, you may not want the copy to be
+    # held in memory, in which case specifing the \fItmp_config_directory\fR causes the
+    # configuration to be written to an anonymous file on the filesystem on which
+    # the specified directory resides, which must be writeable by keepalived.
+    # This setting cannot be changed on a reload, and it should be specified as
+    # early as possible in the configuration.
+    \fBtmp_config_directory\fR DIRECTORY
+
+    # config_save_dir causes keepalived to save configuration state and
+    # configuration files before and after each reload. This is used for debugging
+    # purposes if there appear to be problems related to repeated reloads.
+    # The directory will be created if it does not exist, but all parent
+    # directories must exist.
+    \fBconfig_save_dir\fR DIRECTORY
+
     # Set the process names of the keepalived processes to the default values:
     #   keepalived, keepalived_vrrp, keepalived_ipvs, keepalived_bfd
     \fBprocess_names\fR
@@ -168,7 +243,7 @@ and
     # Specify the individual process names
     \fBprocess_name\fR NAME
     \fBvrrp_process_name\fR NAME
-    \fBipvs_process_name\fR NAME
+    \fBchecker_process_name\fR NAME
     \fBbfd_process_name\fR NAME
 
     # The startup and shutdown scripts are run once, when keepalived starts
@@ -278,11 +353,13 @@ and
     # flush any existing LVS configuration at startup
     \fBlvs_flush\fR
 
-    # flush remaining LVS configuration at shutdown
+    # flush remaining LVS configuration at shutdown (for large configurations
+    # this is much faster than the default approach of deleting each RS and
+    # each VS individually).
     # If VS is specified, remove each keepalived managed virtual
     # server without explicitly removing the real servers (the kernel will
     # remove them).
-    \fBlvs_flush_onstop [VS]\fR
+    \fBlvs_flush_on_stop [VS]\fR
 
     # delay for second set of gratuitous ARPs after transition to MASTER.
     # in seconds, 0 for no second set.
@@ -296,14 +373,19 @@ and
 
     # delay for second set of gratuitous ARPs after lower priority
     # advert received when MASTER.
+    # (default: vrrp_garp_master_delay)
     \fBvrrp_garp_lower_prio_delay \fR10
+
+    # Default value for vrrp down_timer_adverts.
+    \fBvrrp_down_timer_adverts \fR[1:100]
 
     # number of gratuitous ARP messages to send at a time after
     # lower priority advert received when MASTER.
+    # (default: vrrp_garp_master_repeat)
     \fBvrrp_garp_lower_prio_repeat \fR1
 
     # minimum time interval for refreshing gratuitous ARPs while MASTER.
-    # in seconds.
+    # in seconds (resolution seconds).
     # (default: 0 (no refreshing))
     \fBvrrp_garp_master_refresh \fR60
 
@@ -311,12 +393,12 @@ and
     # (default: 1)
     \fBvrrp_garp_master_refresh_repeat \fR2
 
-    # Delay in ms between gratuitous ARP messages sent on an interface
+    # Delay between gratuitous ARP messages sent on an interface
     # decimal, seconds (resolution usecs).
     # (default: 0)
     \fBvrrp_garp_interval \fR0.001
 
-    # Delay in ms between unsolicited NA messages sent on an interface
+    # Delay between unsolicited NA messages sent on an interface
     # decimal, seconds (resolution usecs).
     # (default: 0)
     \fBvrrp_gna_interval \fR0.000001
@@ -328,6 +410,17 @@ and
     # causes only one ARP/NA message to be sent, with no repeat 5 seconds
     # later.
     \fBvrrp_min_garp \fR[<BOOL>]
+
+    # The following option causes periodic GARP/NA messages to be sent on
+    # interfaces of VIPs/eVIPs that are not the interface of the VRRP
+    # instance, in order to ensure that switch MAC caches are maintained
+    # (specified in seconds).
+    # Many switches have a default cache timeout of 300 seconds, and so
+    # a garp repeat rate of 1/3rd of that would be sensible. The maximum
+    # permitted value is 1 day (86400 seconds);
+    # By default, it will only send on VMAC interfaces; specifying \fBall\fR
+    # will cause it to send GARP/NA on each interface used by the VRRP instance.
+    \fBvrrp_garp_extra_if [all] \fR100
 
     # If a lower priority advert is received, don't send another advert.
     # This causes adherence to the RFCs. Defaults to false, unless
@@ -374,6 +467,19 @@ and
     \fBnftables_counters\fR
     \fBnftables_ifindex\fR
 
+    # Similarly for IPVS iptables - used for setting fwmarks for virtual
+    # server groups. keepalived will allocate a fwmark for each virtual
+    # server group, so that only one virtual server for each group needs
+    # to be configured in IPVS, by using a fwmark, and nftables will be
+    # used to set the fwmark for each of the virtual server
+    # address/protocol/port combinations specified.
+    # nftables_ipvs_start_fwmark specifies the first fwmark for keepalived
+    # to use (default 1000). This will be incremented for each subsequent
+    # virtual server group.
+    \fBnftables_ipvs \fR[TABLENAME]
+    \fBnftables_ipvs_priority \fRPRIORITY
+    \fBnftables_ipvs_start_fwmark \fRNUMBER
+
     # Use iptables as the firewall.
     # Note: it is necessary for the specified chain to exist in
     # the iptables and/or ip6tables configuration, and for the chain
@@ -381,6 +487,20 @@ and
     # It will probably be necessary to have this filtering after accepting
     # any ESTABLISHED,RELATED packets, because IPv4 might select the VIP as
     # the source address for outgoing connections.
+    # Note: although the default chains that are used are INPUT and OUTPUT,
+    # since those are the only chains that will always exist, it is not safe
+    # or sensible to use those chains and specific chains should be created
+    # and called from appropriate points in the iptables configuration. The
+    # chains used for keepalived should not be used for any other purpose, and
+    # should have no rules configured, other than the rules that keepalived
+    # manages.
+    # A startup_script (see above) can be used to create the chains and to
+    # add rules to call them. A shutdown_script can be used to remove the
+    # iptables configuration added by the startup_script.
+    # Note2: If using ipsets, the iptables VIP rules are appended to the end
+    # of the specified chains; if not using ipsets, the VIP rules are inserted
+    # at the beginning of the chains. Any IGMP rules are always appended to
+    # the end of the chains.
     # (default: INPUT)
     \fBvrrp_iptables \fRkeepalived
 
@@ -400,6 +520,14 @@ and
     # and/or "6" and _igmp/_mld to previously specified names.
     \fBvrrp_ipsets \fR[keepalived [keepalived6 [keepalived_if6 [keepalived_igmp [keepalived_mld]]]]]
 
+    # An alternative to moving IGMP messages from VMACs to their parent interfaces
+    # is to disable them altogether in the kernel by setting
+    # igmp_link_local_mcast_reports false.
+    # This stops IGMP join etc messages for 224.0.0.0/24, since they should
+    # always be forwarded to all interfaces (see RFC4541).
+    # This is available from Linux 4.3 onwards.
+    disable_local_igmp
+
     # The following enables checking that when in unicast mode, the
     # source address of a VRRP packet is one of our unicast peers.
     \fBvrrp_check_unicast_src\fR
@@ -411,10 +539,23 @@ and
     # (default: don't skip)
     \fBvrrp_skip_check_adv_addr\fR
 
-    # Enforce strict VRRP protocol compliance. This will prohibit:
-    #   0 VIPs
-    #   unicast peers
-    #   IPv6 addresses in VRRP version 2
+    # Enforce strict VRRP protocol compliance. This currently includes
+    #  enforcing the following. Please note that other checks may be
+    #  added in the future if they are found to be missing:
+    #   0 VIPs not allowed
+    #   unicast peers not allowed
+    #   IPv6 addresses not allowed in VRRP version 2
+    #   First IPv6 VIP is not link local
+    #   State MASTER can be configured if and only if priority is 255
+    #   Authentication is not supported
+    #   Preempt delay is not supported
+    #   Accept mode cannot be set for VRRPv2
+    #   If accept/no accept is not specified, accept is set if priority
+    #    is 255 aand cleared otherwise
+    #   Gratuitous ARP repeats cannot be enabled
+    #   Cannot clear lower_prio_no_advert
+    #   Cannot set higher_prio_send_advert
+    #   Cannot use vmac_xmit_base
     \fBvrrp_strict\fR
 
     # Send vrrp instance priority notifications on notify FIFOs.
@@ -587,11 +728,11 @@ and
 
     # Allow configuration to include interfaces that don't exist at startup.
     # This allows keepalived to work with interfaces that may be deleted and restored
-    #   and also allows virtual and static routes and rules on VMAC interfaces.
-    #   allow_if_changes allows an interface to be deleted and recreated with a
-    #   different type or underlying interface, eg changing from vlan to macvlan
-    #   or changing a macvlan from eth1 to eth2. This is predominantly used for
-    #   reporting duplicate VRID errors at startup if allow_if_changes is not set.
+    # and also allows virtual and static routes and rules on VMAC interfaces.
+    # allow_if_changes allows an interface to be deleted and recreated with a
+    # different type or underlying interface, eg changing from vlan to macvlan
+    # or changing a macvlan from eth1 to eth2. This is predominantly used for
+    # reporting duplicate VRID errors at startup if allow_if_changes is not set.
     \fBdynamic_interfaces [allow_if_changes]\fR
 
     # The following options are only needed for large configurations, where either
@@ -668,10 +809,45 @@ and
     # on the interface on which they are received.
     \fBlog_unknown_vrids\fR
 
+    # Specify the prefix for generated VMAC names (default "vrrp")
+    \fBvmac_prefix \fRSTRING
+
+    # Specify the prefix for generated VMAC names for VIPs which use a VMAC but are not
+    # on the VRRP instance's interface (default vmac_prefix value)
+    \fBvmac_addr_prefix \fRSTRING
+
     # Specify random seed for ${_RANDOM}, to make configurations repeatable (default
     # is to use a seed based on the time, so that each time a different configuration
     # will be generated).
     \fBrandom_seed \fRUNSIGNED_INT
+
+    # If a configuration reload is attempted with an updated configuration file that has
+    # errors, keepalived may terminate, and possibly enter a loop indefinitely restarting
+    # and terminating. If reload_check_config is set, then keepalived will attempt to
+    # validate the configuration before initiating a reload, and only initiate the reload
+    # if the configuration is valid.
+    \fBreload_check_config \fR[LOG_FILE]
+
+    # Treat any missing include file as an error. The OPTIONS can be any combination of
+    #   readable	- error if a match is not a readable file
+    #   match		- error if no file matches (unless wildcard specified)
+    #   wildcard_match	- error if no file matches (even if wildcard specified)
+    #   brace_match	- error if a brace expansion does not match a file
+    # Note: match, wildcard_match and brace_match include the readable check.
+    # The setting of include_check is saved when a new include file is opened, and restored
+    # when the file is closed. This means that the include_check setting when reading a
+    # file cannot be changed by a subsequently included file. To change the setting for all
+    # included files, include_check should be set at the beginning of the configuration file
+    # specified in the command line (default /etc/keepalived/keepalived.conf).
+    # Note2: If the libc glob() function does not support GLOB_ALTDIRFUNC (e.g. Musl libc as
+    # on Alpine Linux etc.), then only readable and wildcard_match of the above options will work.
+    # It is possible to add or remove individual settings; '+' means add the following
+    # checks, '-' means remove the following checks. For example
+    #   \fIinclude_check +match -wildcard_match\fR
+    # adds the requirement that there is a matching file, and removes the requirement for
+    # wildcard matches.
+    # If no option is specified, it is the same as specifying all options.
+    \fBinclude_check \fR[OPTIONS]
 
     # reload_time_file allows a reload of keepalived to be scheduled in the future. This is
     # particularly useful if there is a master keepalived and one or more backup keepalived
@@ -711,6 +887,33 @@ and
     # some times are duplicated and hence ambiguous.
     \fBreload_time_file\fR ABSOLUTE-PATHNAME-OF-FILE
     \fBreload_repeat\fR
+
+    # Some users frequently update their configurations and reload keepalived. reload_file
+    # provides a mechanism that allows the configuration update processes not to update the
+    # configuration files while keepalived is reading them.
+    # The reload file will be created by keepalived before it starts reading configuration
+    # files, unless the file exists. If the file already exists, it will be truncated. Once
+    # keepalived has completed reading the files it will remove the reload file.
+    # If reload_file with no file name is specified, the default filename keepalived.reload
+    # in the PID directory will be used.
+    # The best way to use the reload file is for the configuration update process to touch
+    # the reload file before it signals keepalived to reload, and then wait for the file
+    # to be deleted, which indicates that keepalived has finished reading the config files.
+    # When keepalived starts reading the configuration files, since it truncates the reload
+    # file, if update process creates the reload_file with non-zero size, it can detect
+    # the reloading starting by the reload_file becoming zero length.
+    \fBreload_file\fR [ABSOLUTE-PATHNAME-OF-FILE]
+
+    # Sending SIGUSR1 to keepalived causes it to dump its data structures
+    # for debugging purposes, although some users use this feature and
+    # process the output. Please note that the format of the .data files
+    # produced is not guaranteed to maintain backward compatibility.
+    # The standard file names are keepalived_parent.data, keepalived.data,
+    # keepalived_check.data and keepalived_bfd.data. This causes a problem
+    # if more than one keepalived instance is running on a system.
+    # In order to alleviate this, enabling data_use_instance includes the
+    # instance name and network namespace in the file name of the .data files.
+    \fBdata_use_instance \fR[<BOOL>]
 }
 .fi
 .SH Linkbeat interfaces
@@ -862,8 +1065,10 @@ sync_group_tracking_weight is set on the group weight 0 must be set.
 Likewise, if the vrrp instance is the address owner, weight 0 must also be set.
 
 For real servers monitoring the file, the limits of values read from the track
-file are 2147483646 to -2147483647. The value, once multiplied by the weight, will
-be added to the real server's IPVS weight.
+file are 2147483648 to -2147483648. The value, once multiplied by the weight, will
+be added to the real server's IPVS weight. If the result is <= than 2147483648
+then the checker will be in the FAULT state.
+
 NOTE: weights for track_file for real servers are not fully implemented yet. In
 particular allowing weight 0, handling negative calculated values and reloading.
 .PP
@@ -1028,17 +1233,17 @@ The syntax for bfd instance is :
     # local port is valid, it is required)
     \fBsource_ip \fR<IP ADDRESS>
 
-    # Required min RX interval, in ms
+    # Required min RX interval, in ms (resolution is micro-seconds e.g. 3.312)
     # (default is 10 ms)
-    \fBmin_rx \fR<INTEGER>
+    \fBmin_rx \fR<DECIMAL>
 
-    # Desired min TX interval, in ms
+    # Desired min TX interval, in ms (resolution is micro-seconds)
     # (default is 10 ms)
-    \fBmin_tx \fR<INTEGER>
+    \fBmin_tx \fR<DECIMAL>
 
-    # Desired idle TX interval, in ms
+    # Desired idle TX interval, in ms (resolution is micro-seconds)
     # (default is 1000 ms)
-    \fBidle_tx \fR<INTEGER>
+    \fBidle_tx \fR<DECIMAL>
 
     # Number of missed packets after
     # which the session is declared down
@@ -1256,7 +1461,7 @@ The syntax for vrrp_sync_group is :
     #   $(n-3) and $(n-1) are ALWAYS sent in uppercase, and the possible
     # strings sent are the same ones listed above
     #   ("GROUP"/"INSTANCE", "MASTER"/"BACKUP"/"FAULT"/"STOP"/"DELETED")
-    # (note: STOP and DELETED are only applicable to instances)
+    # (note: DELETED is only applicable to instances)
     \fBnotify \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
     # The notify fifo output is the same as the last 4 parameters for the "notify"
@@ -1317,7 +1522,7 @@ The syntax for garp_group is :
     # The physical interface to which the intervals apply
     \fBinterface \fR<STRING>
 
-    # A list of interfaces accross which the delays are aggregated.
+    # A list of interfaces across which the delays are aggregated.
     \fBinterfaces \fR{
         <STRING>
         <STRING>
@@ -1328,18 +1533,18 @@ The syntax for garp_group is :
 .SH VRRP instance(s)
 .PP
 A VRRP Instance is the VRRP protocol key feature. It defines and configures
-VRRP behaviour to run on a specific interface. Each VRRP Instances are related
-to a uniq interface.
+VRRP behaviour to run on a specific interface. Each VRRP Instance is related
+to a unique interface.
 .PP
 .nf
 The syntax for vrrp_instance is :
 
 \fBvrrp_instance \fR<STRING> {
     # Initial state, MASTER|BACKUP
-    # As soon as the other machine(s) come up,
-    # an election will be held and the machine
-    # with the highest priority will become MASTER.
-    # So the entry here doesn't matter a whole lot.
+    # If the priority is 255, then the instance will transition immediately
+    # to MASTER if state MASTER is specified; otherwise the instance will
+    # wait between 3 and 4 advert intervals before it can transition,
+    # depending on the priority.
     \fBstate \fRMASTER
 
     # interface for inside_network, bound by vrrp.
@@ -1351,7 +1556,13 @@ The syntax for vrrp_instance is :
     #   added to the default interface.
     \fBinterface \fReth0
 
-    # Use VRRP Virtual MAC.
+    # Use VRRP Virtual MAC (macvlan).
+    # The macvlan will be created on the configured interface for
+    # the VRRP instance, and the VIPs, and eVIPs of the matching address
+    # family, which do not specify a different interface will be configured
+    # on the macvlan.
+    # The VRRP adverts will also be sent and received on the macvlan
+    # interface, unless vmac_xmit_base is configured.
     # \fBNOTE\fR: If sysctl net.ipv4.conf.all.rp_filter is set,
     # and this vrrp_instance is an IPv4 instance, using
     # this option will cause the individual interfaces to be
@@ -1359,7 +1570,22 @@ The syntax for vrrp_instance is :
     # all.rp_filter, as will default.rp_filter, and all.rp_filter
     # will be set to 0.
     # The original settings are restored on termination.
+    # \fBNOTE 2\fR: If using use_vmac with unicast peers,
+    # vmac_xmit_base must be set.
     \fBuse_vmac \fR[<VMAC_INTERFACE>]
+
+    # use_vmac_addr is used to create VMAC (macvlan) interfaces for
+    # each interface that is used by a VIP or eVIP where the interface
+    # is not the same as the interface on which the VRRP instance is
+    # configured or the eVIP's address family does not match the VRRP
+    # instance's. Alternatively, use_vmac can be specified against each
+    # VIP/eVIP that specifies an interface (dev).
+    # NOTE: if use_vmac is specfied and an eVIP is not the same address
+    # family as the vrrp instance, unless use_vmac_addr is specified, or
+    # use_vmac is specified for the eVIP, the eVIP will be configured on
+    # the vrrp instance's VMAC, which will have the wrong MAC address for
+    # the address family of the eVIP.
+    \fBuse_vmac_addr\fR
 
     # Send/Recv VRRP messages from base interface instead of
     # VMAC interface
@@ -1381,7 +1607,13 @@ The syntax for vrrp_instance is :
     # the virtual ip addresses determine whether IPv4 or IPv6 is used).
     \fBnative_ipv6\fR
 
-    # Ignore VRRP interface faults (default unset)
+    # Ignore VRRP interface faults (default unset).
+    # Note: when using IPv6, setting the interface administratively down, e.g.
+    #   'ip link set IF down' will by default cause all IPv6 addresses to be
+    #   deleted from the interface, and consequently the VRRP instance will
+    #   go to fault state due to the addresses being deleted. Setting sysctl
+    #   net.ipv6.conf.IF.keep_addr_on_down to 1 will allow non link-local addresses
+    #   to remain when the interface is downed.
     \fBdont_track_primary\fR
 
     # optional, monitor these as well.
@@ -1506,6 +1738,15 @@ The syntax for vrrp_instance is :
     \fBgarp_lower_prio_repeat \fR1
     \fBgarp_master_refresh \fR60
     \fBgarp_master_refresh_repeat \fR2
+    \fBgarp_extra_if [all] \fR100	# specifying 0 disables feature
+
+    # The VRRP RFCs state that the master down timer is 3 advert intervals plus
+    # a skew time. Setting down_timer_adverts means the master down timer will be
+    # down_timer_adverts advert intervals.
+    # The default is 3, to conform with the VRRP RFCs. Setting this to any other
+    # value is a deviation from the VRRP protocol. All virtual routers for a given
+    # VRRP instance MUST use the same value.
+    \fBdown_timer_adverts \fR[1-100]
 
     # If a lower priority advert is received, don't send another advert.
     # This causes adherence to the RFCs (defaults to global
@@ -1522,7 +1763,15 @@ The syntax for vrrp_instance is :
 
     # arbitrary unique number from 1 to 255
     # used to differentiate multiple instances of vrrpd
-    # running on the same NIC (and hence same socket).
+    # running on the same network interface and address
+    # family (and hence same socket).
+    # Note: using the same virtual_router_id with the same
+    # address family on different interfaces has been known
+    # to cause problems with some network switches; if you
+    # are experiencing problems with using the same
+    # virtual_router_id on different interfaces, but the problems
+    # are resolved by not duplicating virtual_router_ids, the
+    # your network switches are probably not functioning correctly.
     \fBvirtual_router_id \fR51
 
     # for electing MASTER, highest priority wins.
@@ -1568,8 +1817,20 @@ The syntax for vrrp_instance is :
     # preferred_lft is set to 0 to deprecate IPv6 addresses (this is the
     # default if the address mask is /128). Use "preferred_lft forever"
     # to specify that a /128 address should not be deprecated.
+    # NOTE: care needs to be taken if dev is specified for an address and
+    # your network uses MAC learning switches. The VRRP protocol ensures
+    # that the source MAC address of the interface sending adverts is
+    # maintained in the MAC cache of switches; however by default this
+    # will not work for the MACs of any VIPs/eVIPs that are configured on
+    # different interfaces from the interface on which the VRRP instance is
+    # configured, since the interface, especially if it is a VMAC interface,
+    # will only send using the MAC address of the interface in response to
+    # ARP requests. This may mean that the interface MAC addresses may
+    # time out in the MAC caches of switches. In order to avoid this, use
+    # the garp_extra_if or garp_extra_if_vmac options to send periodic
+    # GARP/ND messages on those interfaces.
     \fBvirtual_ipaddress \fR{
-        <IPADDR>[/<MASK>] [brd <IPADDR>] [dev <STRING>] [scope <SCOPE>]
+        <IPADDR>[/<MASK>] [brd <IPADDR>] [dev <STRING>] [use_vmac] [scope <SCOPE>]
                           [label <LABEL>] [peer <IPADDR>] [home]
                           [-nodad] [mngtmpaddr] [noprefixroute]
                           [autojoin] [no_track] [preferred_lft nn|forever]
@@ -1646,7 +1907,19 @@ The syntax for vrrp_instance is :
     # for backwards compatibility
     \fBpreempt\fR
 
-    # Seconds after startup or seeing a lower priority master until preemption
+    # Seconds of delay until preemption after getting the advertisement timeout
+    # at startup or when seeing a lower priority master.
+    #
+    # Since it is a delay, it cannot speed up taking over as master.
+    # "preempt_delay" specifies the time in seconds to delay preempting compared
+    # to if "preempt_delay" is not specified. Advertisement timeout is
+    # 3 * advert_int + skew_time. Skew_time is defined by RFC3768 and RFC5798.
+    #
+    # So if "advert_int" is 1, and priority is 128, the instance would normally
+    # wait 3.5 seconds before taking over as master. If "preempt_delay 2" is
+    # specified, then the delay before taking over as master would be approximately
+    # 5.5 seconds.
+    #
     # (if not disabled by "nopreempt").
     # Range: 0 (default) to 1000 (e.g. 4.12)
     # NOTE: For this to work, the initial state must not be MASTER.
@@ -1692,6 +1965,41 @@ The syntax for vrrp_instance is :
     \fBlinkbeat_use_polling\fR
 }
 .fi
+.SH Interface up/down status change debouncing
+.PP
+    If an interface that is being used (or tracked) by a VRRP instance goes to down state,
+    the VRRP instance(s) will, by default, immediately transition to FAULT state, and when
+    all relevant interfaces are back up again the VRRP instance(s) will immediately transition
+    to BACKUP state.
+
+    This can cause problems if interfaces are bouncing, and so delays can be specified
+    between the interface state change and the transition to FAULT/BACKUP state. If the
+    interface returns to its original state before the delay expires, no associated VRRP
+    instance state transition will occur.
+.PP
+.nf
+	interface_up_down_delays {
+	    ifname down_delay [up_delay]
+	    ifname2 down_delay [up_delay]
+	    ...
+	}
+.PP
+    The delays are specified in seconds, with a resolution of microseconds, e.g. a delay of
+    0.00001 means 10 usecs. A delay of 0 means no delay in state change. The maximum delay
+    that can be specified is 255 seconds.
+
+    If up_delay is omitted, it is set to be the same as the down delay.
+
+    The delay on an interface must be less than two (or more precisely one less than
+    down_timer_adverts (default 3)) times the advert interval of any VRRP instance
+    using that interface (otherwise a backup instance, while not receiving adverts
+    may time out and become master before this instance transitions to FAULT state).
+    Consequently the up/down delays can be dynamically reduced if another instance is
+    master with a shorter advert interval.
+
+    If the VRRP instance is using a VMAC, it will inherit the up/down debounce delays of
+    its parent interface.
+.fi
 .SH LVS CONFIGURATION
 contains subblocks of
 \fBVirtual server group(s)\fR
@@ -1730,9 +2038,10 @@ The port for the virtual server can only be omitted if the virtual service is pe
 .PP
 This feature offers a way to simplify your configuration by factorizing virtual server
 definitions. If you need to define a bunch of virtual servers with exactly the same
-real server topology then this feature will make your configuration much more readable
-and will optimize healthchecking task by only spawning one healthchecking where
-multiple virtual server declaration will spawn a dedicated healthchecker for every
+real server topology then this feature will make your configuration much more readable,
+optimize the duplication of IPVS virtual servers if \fInftables_ipvs\fR is used,
+and will optimize healthchecking task by only spawning one healthchecker where
+multiple virtual servers declaration would spawn a dedicated healthchecker for every
 real server which will waste system resources.
 .PP
 Any combination of IP addresses, IP address ranges and firewall marks can be used, provided
@@ -1741,8 +2050,19 @@ of all the real servers of any virtual server using the virtual server group. Th
 exception to this is that the virtual server group can be configured with both IPv4 and IPv6
 addresses and fwmarks provided that all the real servers (and sorry servers) of all virtual
 servers using the virtual server group use tunnel forwarding; if fwmarks are specified in
-this case, the address family must be specified.
-Use of this option is intended for very large LVSs.
+this case, the address family must be specified (the one exception to this is if the virtual
+server group has no IP addresses (i.e. fwmarks only) and all the real/sorry servers are
+tunnelled, it will default to IPv4; it is not good practice to rely on this and the address
+families of the fwmarks should be configured).
+Use of this option is intended for very large LVSs, but note, this can create a huge number
+of virtual servers unless \fInftables_ipvs\fR is used. The use of \fInftables_ipvs\fR is
+stringly recommended due to the very significant optimisations and efficiencies it provides.
+
+NOTE: do not configure more than one TCP, one UDP and one SCTP virtual server with the same
+IP address family using the same virtual server group (or to put it another way do not have
+two virtual servers with the same protocol and address family using the same virtual server
+group); if all the real servers are tunnelled, then you must not have both IPv4 and IPv6
+virtual servers with the same protocol.
 .PP
 .nf
 The syntax for virtual_server_group is :
@@ -1752,9 +2072,10 @@ The syntax for virtual_server_group is :
     <IPADDR> [<PORT>]
     <IPADDR> [<PORT>]
     ...
-    # <IPADDR RANGE> has the form
-    # XXX.YYY.ZZZ.WWW-VVV eg 192.168.200.1-10
-    # range includes both .1 and .10 address
+    # <IPADDR RANGE> is any of the following forms (or their IPv6 equivalents)
+    # XXX.YYY.ZZZ.WWW-VVV eg 192.168.200.1-10 (includes both .1 and .10)
+    # AAA.BBB.CCC.DDD-EEE.FFF.GGG.HHH eg 192.168.200.250-192.168.201.10
+    # III.JJJ.KKK.LLL/nn eg 192.168.202.8/29
     <IPADDR RANGE> [<PORT>] # VIP range [VPORT]
     <IPADDR RANGE> [<PORT>]
     ...
@@ -1798,7 +2119,7 @@ The syntax for virtual_server is :
     \fBmh-port\fR
     # Enable mh-fallback for mh scheduler  (-b mh-fallback in ipvsadm)
     \fBmh-fallback\fR
-    # Enable One-Packet-Scheduling for UDP (-O in ipvsadm)
+    # Enable One-Packet-Scheduling for UDP (-o in ipvsadm)
     \fBops\fR
 
     # Override default LVS forwarding method (default is NAT).
@@ -1831,6 +2152,11 @@ The syntax for virtual_server is :
     # eg virtualhost www.firewall.loc
     # Overridden by virtualhost config of real server or checker
     \fBvirtualhost \fR<STRING>
+
+    # snmp_name is a text string that is returned as part of the snmp
+    # data for this virtual server. It can be used to help identify the
+    # virtual server when parsing SNMP output.
+    \fBsnmp_name \fR<STRING>
 
     # On daemon startup assume that all RSs are down
     # and healthchecks failed. This helps to prevent
@@ -1888,7 +2214,7 @@ The syntax for virtual_server is :
     \fBretry \fR<INTEGER>
 
     # delay before retry after failure. Defaults to delay_loop for DNS_CHECK,
-    # 3 seconds for HTTP_CHECK and SSL_CHECK, and 1 second otherwise.
+    # 3 seconds for HTTP_GET and SSL_GET, and 1 second otherwise.
     \fBdelay_before_retry \fR<TIMER>
 
     # Optional random delay to start the initial check
@@ -1936,6 +2262,11 @@ The syntax for virtual_server is :
         # eg virtualhost www.firewall.loc
         # Overridden by virtualhost config of a checker
         \fBvirtualhost \fR<STRING>
+
+	# snmp_name is a text string that is returned as part of the snmp
+	# data for this real server. It can be used to help identify the
+	# real server when parsing SNMP output.
+	\fBsnmp_name \fR<STRING>
 
         \fBalpha \fR<BOOL>                    # see above
         \fBconnect_timeout \fR<TIMER>         # see above
@@ -2092,16 +2423,23 @@ The syntax for virtual_server is :
             # Script execution timeout
             \fBmisc_timeout \fR<INTEGER>
 
-            # If set, the exit code from healthchecker is used
-            # to dynamically adjust the weight as follows:
+            # If misc_dynamic is set, the exit code from healthchecker
+            # is used to dynamically adjust the weight as follows:
             #   exit status 0: svc check success, weight
             #     unchanged.
             #   exit status 1: svc check failed.
-            #   exit status 2-255: svc check success, weight
-            #     changed to 2 less than exit status.
-            #   (for example: exit status of 255 would set
-            #     weight to 253)
-            # NOTE: do not have more than one dynamic MISC_CHECK per real_server.
+            #   exit status 2-255: svc check success,
+            #     then the RS weight is increased by
+            #     (exit status - 2 - rs configured weight).
+            #     An exit status of 10 will set the RS weight to 10. If
+            #       the exit status subsequently changes to 20, the RS
+            #       weight will become 20.
+            #     If there is only one MISC_CHECK and no FILE_CHECKers
+            #       the effect is to set the RS weight to two less than
+            #       the exit status.
+            #     (for example: an exit status of 255 would set
+            #       weight to 253 if no other MISC_CHECKers or
+            #       FILE_CHECKers where configured on the RS)
             \fBmisc_dynamic\fR
 
             # Specify the username/groupname that the script should
@@ -2128,16 +2466,33 @@ The syntax for virtual_server is :
         #   HOST_UNREACH, NET_UNREACH, PORT_UNREACH. HOST_UNREACH relies on ARP requests
         #   timing out, and so connect_timeout should be long enough to allow for this (e.g.
         #   at least 4 seconds).
+	# If payload is specified, the HEX_STR will be sent as the UDP data, otherwise a
+	# random payload will be sent.
+	# If require_reply is specified, the received data length is checked to ensure that it
+	# lies between min_reply_length and max_reply_length.
+	# If require_reply without a hex string is specified, udp reply data must be received
+	# but the data content is not checked.
+	# If a require_reply HEX_STR is specified, the reply data will be checked against the
+	# HEX_STR, which must match up to the minimum of the received data length and the length
+	# of the require_reply HEX_STR.
+	# The format of HEX_STR is quite free format, for example:
+	#   Ab12f 3 456 546443123
+	# would be interpreted as:
+	#   AB 12 0F 03 45 06 54 64 43 12 03
+	# For the require_reply HEX_STR, a character can be specified as X or x, in which case
+	# the value of those 4 bits in the reply is ignored. This allows, for example, for
+	# some form of counter or otherwise.
         # It may be that you will want to use PING_CHECK to the same server as well.
         \fBUDP_CHECK \fR{
-	        \fBrequire_reply\fR		# Require a reply packet for check to be successful
+		\fBpayload\fR <HEX_STR>
+	        \fBrequire_reply\fR [<HEX_STR>]	# Require a reply packet for check to be successful
+		min_reply_length <INT>		# default 0
+		max_reply_length <INT>		# default is 255
         }
 
         # File checker
         # This reads and monitors the contents of a file, where STRING is the name specified
         # in the track_file configuration block (see above).
-        # NOTE: weights for track_file for real servers are not fully implemented yet. In
-        # particular allowing weight 0, handling negative calculated values and reloading.
         \fBFILE_CHECK \fR{
             \fBtrack_file \fR<STRING>
 
@@ -2368,7 +2723,7 @@ Example:
 The above will create 2 virtual servers, each with 3 real servers
 .SH Pre-defined definitions
 .PP
-The following pre-defined definitions are defined:
+The following definitions are pre-defined:
 .sp
 \fB${_PWD} : \fRThe directory of the current configuration file (this can be changed if using the include directive).
 .br

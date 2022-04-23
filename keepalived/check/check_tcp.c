@@ -34,9 +34,6 @@
 #include "smtp.h"
 #include "utils.h"
 #include "parser.h"
-#if !HAVE_DECL_SOCK_CLOEXEC
-#include "old_socket.h"
-#endif
 #ifdef THREAD_DUMP
 #include "scheduler.h"
 #endif
@@ -52,24 +49,24 @@ free_tcp_check(checker_t *checker)
 }
 
 static void
-dump_tcp_check(FILE *fp, const checker_t *checker)
+dump_tcp_check(FILE *fp, __attribute__((unused)) const checker_t *checker)
 {
 	conf_write(fp, "   Keepalive method = TCP_CHECK");
-	dump_checker_opts(fp, checker);
 }
 
 static bool
-tcp_check_compare(const checker_t *old_c, checker_t *new_c)
+compare_tcp_check(const checker_t *old_c, checker_t *new_c)
 {
 	return compare_conn_opts(old_c->co, new_c->co);
 }
+
+static const checker_funcs_t tcp_checker_funcs = { CHECKER_TCP, free_tcp_check, dump_tcp_check, compare_tcp_check, NULL };
 
 static void
 tcp_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	/* queue new checker */
-	queue_checker(free_tcp_check, dump_tcp_check, tcp_connect_thread,
-		      tcp_check_compare, NULL, CHECKER_NEW_CO(), true);
+	queue_checker(&tcp_checker_funcs, tcp_connect_thread, NULL, CHECKER_NEW_CO(), true);
 }
 
 static void
@@ -150,7 +147,7 @@ tcp_check_thread(thread_ref_t thread)
 	checker_t *checker = THREAD_ARG(thread);
 	int status;
 
-	status = tcp_socket_state(thread, tcp_check_thread);
+	status = tcp_socket_state(thread, tcp_check_thread, 0);
 
 	/* If status = connect_in_progress, next thread is already registered.
 	 * If it is connect_success, the fd is still open.
@@ -205,21 +202,11 @@ tcp_connect_thread(thread_ref_t thread)
 		return;
 	}
 
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on tcp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on tcp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
-
 	status = tcp_bind_connect(fd, co);
 
 	/* handle tcp connection status & register check worker thread */
 	if(tcp_connection_state(fd, status, thread, tcp_check_thread,
-			co->connection_to)) {
+			co->connection_to, 0)) {
 		close(fd);
 
 		if (status == connect_fail) {
