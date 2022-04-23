@@ -1,3 +1,9 @@
+keepalived (1:2.1.5-1ubuntu1ppa1~jammy) jammy; urgency=medium
+
+  * Change debian-branch to ubuntu/jammy
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Sat, 23 Apr 2022 16:59:09 +0900
+
 keepalived (1:2.1.5-1ubuntu1ppa1~focal) focal; urgency=medium
 
   * New upstream version 2.1.5
