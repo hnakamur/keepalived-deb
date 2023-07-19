@@ -43,6 +43,9 @@
 #endif
 #include "align.h"
 #include "pidfile.h"
+#ifdef _WITH_JSON_
+#include "global_json.h"
+#endif
 
 /* global vars */
 data_t *global_data = NULL;
@@ -90,9 +93,9 @@ static void
 set_default_mcast_group(data_t * data)
 {
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR_VRRP_GROUP, 0, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group4));
+	inet_stosockaddr(INADDR_VRRP_GROUP, NULL, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group4));
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR6_VRRP_GROUP, 0, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group6));
+	inet_stosockaddr(INADDR6_VRRP_GROUP, NULL, PTR_CAST(sockaddr_t, &data->vrrp_mcast_group6));
 }
 
 static void
@@ -221,6 +224,10 @@ alloc_global_data(void)
 	new->lvs_syncd.mcast_group.ss_family = AF_UNSPEC;
 #endif
 #endif
+#endif
+
+#ifdef _WITH_JSON_
+	new->json_version = JSON_VERSION_V1;
 #endif
 
 	return new;
@@ -582,6 +589,7 @@ dump_global_data(FILE *fp, data_t * data)
 #endif
 		conf_write(fp, " Default interface = %s", data->default_ifp ? data->default_ifp->ifname : DFLT_INT);
 	conf_write(fp, " Disable local IGMP = %s", data->disable_local_igmp ? "yes" : "no");
+	conf_write(fp, " Use VRRPv2 checksum for VRRPv3 IPv4 = %s", data->v3_checksum_as_v2 ? "yes" : "no");
 	if (data->lvs_syncd.ifname) {
 		if (data->lvs_syncd.vrrp)
 			conf_write(fp, " LVS syncd vrrp instance = %s"
@@ -813,4 +821,7 @@ dump_global_data(FILE *fp, data_t * data)
 		conf_write(fp, " current realtime priority = %u", val);
 	if ((val = get_cur_rlimit_rttime()))
 		conf_write(fp, " current realtime time limit = %u", val);
+#ifdef _WITH_JSON_
+	conf_write(fp, " json_version %u", global_data->json_version);
+#endif
 }

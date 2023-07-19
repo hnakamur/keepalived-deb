@@ -385,13 +385,60 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 #endif
 
 /* Compute a checksum */
+#ifdef USE_MEMCPY_FOR_ALIASING
 uint16_t
-in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
+in_csum(const void *addr, size_t len, uint32_t csum, uint32_t *acc)
 {
-	register size_t nleft = len;
-	const uint16_t *w = addr;
-	register uint16_t answer;
-	register uint32_t sum = csum;
+	size_t nleft = len;
+	uint16_t w16;
+	const unsigned char *b_addr = addr;
+
+	/*
+	 *  Our algorithm is simple, using a 32 bit accumulator (sum),
+	 *  we add sequential 16 bit words to it, and at the end, fold
+	 *  back all the carry bits from the top 16 bits into the lower
+	 *  16 bits.
+	 */
+
+	/* What is not so simple is dealing with strict aliasing. We can only
+	 * access the data via a char/unsigned char pointer, since that is the
+	 * only type of pointer that can be used for aliasing.
+	 * The trick here is we use memcpy to copy the uint16_t via an unsigned
+	 * char *. The memcpy doesn't actually happen since the compiler sees
+	 * what is happening, optimizes it out and accesses the original memory,
+	 * but since the code is written to only access the original memory via
+	 * the unsigned char *, the compiler knows this might be aliasing.
+	 */
+	while (nleft > 1) {
+		memcpy(&w16, b_addr, sizeof(w16));
+		csum += w16;
+		b_addr += sizeof(w16);
+		nleft -= sizeof(w16);
+	}
+
+	/* mop up an odd byte, if necessary */
+	if (nleft == 1)
+		csum += htons(*b_addr << 8);
+
+	if (acc)
+		*acc = csum;
+
+	/*
+	 * add back carry outs from top 16 bits to low 16 bits
+	 */
+	csum = (csum >> 16) + (csum & 0xffff);	/* add hi 16 to low 16 */
+	csum += (csum >> 16);			/* add carry */
+	return ~csum & 0xffff;			/* truncate to 16 bits */
+}
+#else
+typedef uint16_t __attribute__((may_alias)) uint16_t_a;
+uint16_t
+in_csum(const void *addr, size_t len, uint32_t csum, uint32_t *acc)
+{
+	size_t nleft = len;
+	const uint16_t_a *w = addr;
+	uint16_t answer;
+	uint32_t sum = csum;
 
 	/*
 	 *  Our algorithm is simple, using a 32 bit accumulator (sum),
@@ -419,13 +466,14 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 	answer = (~sum & 0xffff);		/* truncate to 16 bits */
 	return (answer);
 }
+#endif
 
 /* IP network to ascii representation - address is in network byte order */
 const char *
 inet_ntop2(uint32_t ip)
 {
 	static char buf[16];
-	const unsigned char (*bytep)[4] = (unsigned char (*)[4])&ip;
+	const unsigned char (*bytep)[4] = (const unsigned char (*)[4])&ip;
 
 	sprintf(buf, "%d.%d.%d.%d", (*bytep)[0], (*bytep)[1], (*bytep)[2], (*bytep)[3]);
 	return buf;

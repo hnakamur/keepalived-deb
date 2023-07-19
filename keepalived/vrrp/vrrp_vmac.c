@@ -39,6 +39,9 @@
 #include "vrrp_ipaddress.h"
 #include "vrrp_firewall.h"
 #include "global_data.h"
+#ifdef _HAVE_LIBNM_
+#include "vrrp_vmac_nm.h"
+#endif
 
 const char * const macvlan_ll_kind = "macvlan";
 #ifdef _HAVE_VRRP_IPVLAN_
@@ -122,6 +125,10 @@ change_link_local_address(interface_t *ifp, struct in6_addr *old_addr, struct in
 {
 	ip_address_t ipaddress;
 
+	/* There is no point in replacing the address with the same address */
+	if (inaddr_equal(AF_INET6, old_addr, new_addr))
+		return true;
+
 	memset(&ipaddress, 0, sizeof(ipaddress));
 
 	/* Delete the old address */
@@ -155,10 +162,6 @@ replace_link_local_address(interface_t *ifp)
 
 	/* Create a new address */
 	make_link_local_address(&ipaddress_new, ifp->base_ifp->hw_addr);
-
-	/* There is no point in replacing the address with the same address */
-	if (inaddr_equal(AF_INET6, &ipaddress_new, &ifp->sin6_addr))
-		return true;
 
 	if (!change_link_local_address(ifp, &ifp->sin6_addr, &ipaddress_new))
 		return false;
@@ -401,6 +404,11 @@ netlink_link_add_vmac(vrrp_t *vrrp, const interface_t *old_interface)
 		 * get updated by out of date queued messages */
 		kernel_netlink_poll();
 	}
+
+#ifdef _HAVE_LIBNM_
+	/* Set the interface not managed by NetworkManager */
+	set_vmac_unmanaged_nm(vrrp->vmac_ifname);
+#endif
 
 	ifp->vmac_type = MACVLAN_MODE_PRIVATE;
 

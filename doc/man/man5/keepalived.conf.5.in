@@ -439,6 +439,9 @@ possibly following any cleanup actions needed.
     # (default: 2, but IPv6 instances will use version 3)
     \fBvrrp_version \fR<2 or 3>
 
+    # See vrrp_instance description of V3_checksum_as_V2
+    \fBv3_checksum_as_v2\fR [<BOOL>]
+
     # keepalived uses a firewall (either nftables or iptables) for two purposes:
     #  i)  To implement no_accept mode
     #  ii) To stop IGMP/MLD/Router-Solicit packets being sent on VMAC interfaces,
@@ -545,7 +548,7 @@ possibly following any cleanup actions needed.
     #   0 VIPs not allowed
     #   unicast peers not allowed
     #   IPv6 addresses not allowed in VRRP version 2
-    #   First IPv6 VIP is not link local
+    #   First IPv6 VIP is link local
     #   State MASTER can be configured if and only if priority is 255
     #   Authentication is not supported
     #   Preempt delay is not supported
@@ -556,6 +559,7 @@ possibly following any cleanup actions needed.
     #   Cannot clear lower_prio_no_advert
     #   Cannot set higher_prio_send_advert
     #   Cannot use vmac_xmit_base
+    #   Cannot have no VIPs with VRRPv3
     \fBvrrp_strict\fR
 
     # Send vrrp instance priority notifications on notify FIFOs.
@@ -686,7 +690,9 @@ possibly following any cleanup actions needed.
     \fBscript_user \fRusername [groupname]
 
     # Don't run scripts configured to be run as root if any part of the path
-    # is writable by a non-root user.
+    # is writable by a non-root user. Also, enforce the default script_user is
+    # keepalived_script, and don't default to the user under which keepalived
+    # is running (usually root).
     \fBenable_script_security\fR
 
     # Rather than using notify scripts, specifying a fifo allows more
@@ -797,7 +803,8 @@ possibly following any cleanup actions needed.
 
     # The umask to use for creating files. The number can be specified in hex, octal
     #   or decimal. BITS are I{R|W|X}{USR|GRP|OTH}, e.g. IRGRP, separated by '|'s.
-    #   The default umask is IWGRP | IWOTH. This option cannot override the
+    #   IRWX{U|G|O} can also be specified.
+    #   The default umask is IXUSR | IRWXG | IRWXO. This option cannot override the
     #   command-line option.
     \fBumask \fR[NUMBER|BITS]
 
@@ -919,6 +926,10 @@ possibly following any cleanup actions needed.
     # In order to alleviate this, enabling data_use_instance includes the
     # instance name and network namespace in the file name of the .data files.
     \fBdata_use_instance \fR[<BOOL>]
+
+    # json_version 2 puts the VRRP data in a named array and adds
+    # track_process details. Default is version 1.
+    \fBjson_version \fR{1|2}
 }
 .fi
 .SH Linkbeat interfaces
@@ -1280,6 +1291,11 @@ The syntax for bfd instance is :
     #  (255 disables hop count checking)
     \fBmax_hops \fR<INTEGER>
 
+    # RFC 5883 specifies port 4784 must be used for multihop bfd, rather than
+    # port 3784. Specifying multihop enables that option, but if multiple hops
+    # are in use, then max_hops (see above) will also need to be configured.
+    \fBmultihop\fR [<BOOL>]
+
     # Default tracking weight
     # Normally, positive weights are added to the vrrp instance priority when
     # the bfd instance is up, negative weights reduce the priority when it is down.
@@ -1369,12 +1385,12 @@ to a third party event such as interface, scripts, file, BFD.
 .sp
 \fBImportant\fR: for a SYNC group to run reliably, it is vital that all instances in
 the group are MASTER or that they are all either BACKUP or FAULT. A
-situation with half instances having higher priority on machine A
-half others with higher priority on machine B will lead to constant
+situation where some instances have higher priority on machine A
+and others have higher priority on machine B will lead to constant
 re-elections. For this reason, when instances are grouped, any
-track scripts/files configured against member VRRP instances will have
-their tracking weights automatically set to zero, in order to avoid
-inconsistent priorities across instances.
+track scripts/files configured against member VRRP instances must have
+their tracking weights unset (i.e. equal to zero). Any trackers with
+a non-zero priority will be ignored.
 .PP
 .nf
 The syntax for vrrp_sync_group is :
@@ -1762,6 +1778,10 @@ The syntax for vrrp_instance is :
     \fBunicast_ttl\fR {0..255}
 
     # The checksum calculation when using VRRPv3 changed after v1.3.6.
+    #  The reason for the change is that keepalived was calculating the
+    #  checksum using the multicast address even when it was using
+    #  unicast, whereas the checksum should be calculated using the
+    #  actual address that is in the IPv4 header.
     #  Setting this flag forces the old checksum algorithm to be used
     #  to maintain backward compatibility, although keepalived will
     #  attempt to maintain compatibility anyway if it sees an old
@@ -1769,6 +1789,13 @@ The syntax for vrrp_instance is :
     #  of old checksums. [This option may not be enabled - check output
     #  of `keepalived -v` for OLD_CHKSUM_COMPAT.]
     \fBold_unicast_checksum \fR[never]
+
+    # Some manufacturers (e.g. Cisco) interpret RFC5798 5.2.8 as applying
+    #  only to IPv6, since the pseudo-header in RFC2460 is specified only
+    #  for IPv6. Keepalived by default uses a pseudo-header for VRRPv3 IPv4
+    #  as well. Setting this option turns off including the pseudo-header
+    #  in the checksum calculation for VRRPv3 IPv4.
+    \fBv3_checksum_as_v2\fR [<BOOL>]
 
     # interface specific settings, same as global parameters.
     # default to global parameters
@@ -1788,6 +1815,25 @@ The syntax for vrrp_instance is :
     # VRRP instance MUST use the same value.
     \fBdown_timer_adverts \fR[1-100]
 
+    # Some users experience "thread_timer_expired" log messages. These are caused
+    # by the kernel not scheduling keepalived quickly enough after a timer expired,
+    # which is always due to insufficient CPU resources being available (if running
+    # keepalived in a VM it could be due to the VM itself not being scheduled), or
+    # keepalived not being run at a high enough priority (see realtime scheduling
+    # options above).
+    # If nopreempt is configured and another instance has become master, then there
+    # are circumstances where this instance is required not to resume as master, but
+    # rather transition to backup.
+    # If using this option (and nopreempt is configured), keepalived will calculate
+    # whether another instance may have taken over (based on the advert interval and
+    # the highest priority of the other instances - default 254 unless specified with
+    # this option), and if that time has expired since the last advert has been sent,
+    # the VRRP instance will revert to backup state (remember to include and track_script
+    # etc. weights when calculating the highest priority of other instances).
+    \fbthread_timer_expired \fR[HIGHEST_PRIORITY_OF_OTHER_INSTANCES]
+
+    # If keepalived is late running by more than 2 advert intervals for a VRRP instance,
+    # it is possible that another instance has taken over as master.
     # If a lower priority advert is received, don't send another advert.
     # This causes adherence to the RFCs (defaults to global
     # vrrp_lower_priority_dont_send_advert).
@@ -1920,6 +1966,18 @@ The syntax for vrrp_instance is :
         <IPADDR>[/<MASK>] ...
         ...
     }
+
+    # Specifying no virtual IP addresses is generally a configuration error
+    # and VRRP version 3 explicitly states that the minimum number of addresses
+    # is 1. Consequently keepalived warns if no VIPs are configured.
+    # There are, however, circumstances when it is useful to have no VIPs, for
+    # example when cloud servers, e.g. AWS, where floating IP addresses are
+    # managed administratively, and are not configured on the cloud virtual
+    # server. Specifying no_virtual_ipaddress supresses warnings for no VIPs,
+    # and allows VRRPv3 to be used with no VIPs.
+    # WARNING - when using this with VRRPv3 it causes a protocol violation and
+    # may not work with other VRRP implementations.
+    \fBno_virtual_ipaddress\fR
 
     # Set the promote_secondaries flag on the interface to stop other
     # addresses in the same CIDR being removed when 1 of them is removed
@@ -2445,12 +2503,17 @@ The syntax for virtual_server is :
                 # The maximum offset into the returned data for the
                 #   start of the subject match.
                 \fBregex_max_offset \fR<OFFSET>
+		# SSL_GET only - see SSL_GET below for description
+		\fBtls_compliant\fR
             }
         }
 
         \fBSSL_GET \fR{
             # when provided, send Server Name Indicator during SSL handshake
             \fBenable_sni\fR
+	    # Comply with TLS protocol - send close_notify alert
+	    #   (see SSL_set_quiet_shutdown(3) man page)
+	    \fBtls_compliant\fR
         }
 
         # TCP healthchecker

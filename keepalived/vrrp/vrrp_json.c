@@ -38,6 +38,7 @@
 #include "logger.h"
 #include "timer.h"
 #include "utils.h"
+#include "global_data.h"
 #include "json_writer.h"
 
 static inline double
@@ -109,6 +110,18 @@ vrrp_json_track_script_dump(json_writer_t *wr, list_head_t *e)
 	jsonw_string(wr, cmd_str(&vscript->script));
 	return 0;
 }
+
+#ifdef _WITH_TRACK_PROCESS_
+static int
+vrrp_json_track_process_dump(json_writer_t *wr, list_head_t *e)
+{
+	tracked_process_t *tpr = list_entry(e, tracked_process_t, e_list);
+	vrrp_tracked_process_t *vprocess = tpr->process;
+
+	jsonw_string(wr, vprocess->pname);
+	return 0;
+}
+#endif
 
 static int
 vrrp_json_array_dump(json_writer_t *wr, const char *prop, list_head_t *l,
@@ -207,6 +220,9 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 	/* Tracking related */
 	vrrp_json_array_dump(wr, "track_ifp", &vrrp->track_ifp, vrrp_json_track_ifp_dump);
 	vrrp_json_array_dump(wr, "track_script", &vrrp->track_script, vrrp_json_track_script_dump);
+#ifdef _WITH_TRACK_PROCESS_
+	vrrp_json_array_dump(wr, "track_process", &vrrp->track_process, vrrp_json_track_process_dump);
+#endif
 
 #ifdef _WITH_VRRP_AUTH_
 	jsonw_uint_field(wr, "auth_type", vrrp->auth_type);
@@ -248,6 +264,57 @@ vrrp_json_stats_dump(json_writer_t *wr, vrrp_t *vrrp)
 	return 0;
 }
 
+#ifdef _WITH_TRACK_PROCESS_
+static int
+vrrp_json_vprocess_dump(json_writer_t *wr, list_head_t *e)
+{
+	vrrp_tracked_process_t *vprocess = list_entry(e, vrrp_tracked_process_t, e_list);
+	char *params, *p;
+
+	jsonw_start_object(wr);
+
+	jsonw_string_field(wr, "process", vprocess->pname);
+	if (vprocess->process_params) {
+		params = MALLOC(vprocess->process_params_len);
+		memcpy(params, vprocess->process_params, vprocess->process_params_len);
+		p = params;
+		for (p = strchr(params, '\0'); p < params + vprocess->process_params_len - 1; p = strchr(params + 1, '\0'))
+			*p = ' ';
+		jsonw_string_field(wr, "parameters", params);
+		FREE(params);
+	}
+	jsonw_string_field(wr, "param_match",
+		vprocess->param_match == PARAM_MATCH_NONE ? "none" :
+		vprocess->param_match == PARAM_MATCH_EXACT ? "exact" :
+		vprocess->param_match == PARAM_MATCH_PARTIAL ? "partial" :
+		vprocess->param_match == PARAM_MATCH_INITIAL ? "initial" :
+		"unknown");
+	jsonw_uint_field(wr, "min_processes", vprocess->quorum);
+	if (vprocess->quorum_max < UINT_MAX)
+		jsonw_uint_field(wr, "max_processes", vprocess->quorum_max);
+	jsonw_uint_field(wr, "current_processes", vprocess->num_cur_proc);
+	jsonw_bool_field(wr, "have_quorum", vprocess->have_quorum);
+	jsonw_int_field(wr, "weight", vprocess->weight_reverse ? -(int)vprocess->weight : vprocess->weight);
+	jsonw_float_field(wr, "terminate_delay", (double)vprocess->terminate_delay / TIMER_HZ);
+	jsonw_float_field(wr, "fork_delay", (double)vprocess->fork_delay / TIMER_HZ);
+	jsonw_bool_field(wr, "fork_delay_timer_running", vprocess->fork_timer_thread);
+	jsonw_bool_field(wr, "terminate_delay_timer_running", vprocess->terminate_timer_thread);
+	jsonw_bool_field(wr, "full_command", vprocess->full_command);
+
+	jsonw_end_object(wr);
+
+	return 0;
+}
+
+static int
+vrrp_json_vprocesses_dump(json_writer_t *wr)
+{
+	vrrp_json_array_dump(wr, "track_process", &vrrp_data->vrrp_track_processes, vrrp_json_vprocess_dump);
+
+	return 0;
+}
+#endif
+
 /*
  *	Split dump function for future purpose
  *	this offer generic integration for mapping
@@ -260,6 +327,12 @@ vrrp_json_dump(FILE *fp)
 	vrrp_t *vrrp;
 
 	wr = jsonw_new(fp);
+
+	if (global_data->json_version == JSON_VERSION_V2) {
+		jsonw_start_object(wr);
+		jsonw_name(wr, "vrrp");
+	}
+
 	jsonw_start_array(wr);
 
 	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
@@ -270,6 +343,16 @@ vrrp_json_dump(FILE *fp)
 	}
 
 	jsonw_end_array(wr);
+
+	if (global_data->json_version == JSON_VERSION_V2) {
+#ifdef _WITH_TRACK_PROCESS_
+		if (!list_empty(&vrrp_data->vrrp_track_processes))
+			vrrp_json_vprocesses_dump(wr);
+#endif
+
+		jsonw_end_object(wr);
+	}
+
 	jsonw_destroy(&wr);
 	return 0;
 }

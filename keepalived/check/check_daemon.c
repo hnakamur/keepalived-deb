@@ -235,17 +235,19 @@ checker_terminate_phase1(bool schedule_next_thread)
 	if (using_ha_suspend || __test_bit(LOG_ADDRESS_CHANGES, &debug))
 		kernel_netlink_close();
 
-	/* Terminate all script processes */
-	if (master->child.rb_root.rb_node)
-		script_killall(master, SIGTERM, true);
+	if (check_data) {
+		/* Terminate all script processes */
+		if (master->child.rb_root.rb_node)
+			script_killall(master, SIGTERM, true);
 
-	/* Stop monitoring files */
-	if (!list_empty(&check_data->track_files))
-		stop_track_files();
+		/* Stop monitoring files */
+		if (!list_empty(&check_data->track_files))
+			stop_track_files();
 
-	/* Send shutdown messages */
-	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug))
-		clear_services();
+		/* Send shutdown messages */
+		if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug))
+			clear_services();
+	}
 
 	if (schedule_next_thread) {
 		/* If there are no child processes, we can terminate immediately,
@@ -308,8 +310,6 @@ set_effective_weights(void)
 static void
 start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 {
-	init_checkers_queue();
-
 	/* Parse configuration file */
 	if (reload)
 		global_data = alloc_global_data();
@@ -533,7 +533,7 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 	UNSET_RELOAD;
 
 #ifdef _MEM_CHECK_
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
 #endif
 }
 
@@ -650,6 +650,10 @@ register_check_thread_addresses(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	register_signal_handler_address("sigreload_check", sigreload_check);
 	register_signal_handler_address("sigend_check", sigend_check);
+	register_signal_handler_address("sigusr1_check", sigusr1_check);
+#ifdef THREAD_DUMP
+	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
+#endif
 #endif
 }
 #endif
@@ -737,6 +741,10 @@ start_check_child(void)
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_CHECK, "Healthcheck child process");
 #endif
+#ifdef _OPENSSL_MEM_CHECK_
+	if (__test_bit(OPENSSL_MEM_CHECK_BIT, &debug))
+		openssl_mem_log_init("OpenSSL_lib", "OpenSSL library");
+#endif
 
 	free_parent_mallocs_startup(true);
 
@@ -786,7 +794,7 @@ start_check_child(void)
 #endif
 
 #ifdef _MEM_CHECK_
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
 #endif
 
 	/* Launch the scheduling I/O multiplexer */

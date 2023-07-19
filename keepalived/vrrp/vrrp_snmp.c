@@ -222,6 +222,7 @@ enum snmp_vrrp_magic {
 	VRRP_SNMP_INSTANCE_NOTIFY_DELETED,
 	VRRP_SNMP_INSTANCE_MULTICAST_ADDRESSTYPE,
 	VRRP_SNMP_INSTANCE_MULTICAST_ADDRESS,
+	VRRP_SNMP_INSTANCE_V3_CHECKSUM_AS_V2,
 	VRRP_SNMP_TRACKEDINTERFACE_NAME,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT,
 	VRRP_SNMP_TRACKEDINTERFACE_WEIGHT_REVERSE,
@@ -2219,6 +2220,9 @@ vrrp_snmp_instance(struct variable *vp, oid *name, size_t *length,
 			return PTR_CAST(u_char, &PTR_CAST(struct sockaddr_in, &rt->mcast_daddr)->sin_addr);
 		}
 		break;
+	case VRRP_SNMP_INSTANCE_V3_CHECKSUM_AS_V2:
+		long_ret.u = (__test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &rt->flags)) ? 1 : 2;
+		return PTR_CAST(u_char, &long_ret);
 	default:
 		return NULL;
 	}
@@ -2661,6 +2665,8 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_instance, 3, {3, 1, 34}},
 	{VRRP_SNMP_INSTANCE_MULTICAST_ADDRESS, ASN_OCTET_STR, RONLY,
 	 vrrp_snmp_instance, 3, {3, 1, 35}},
+	{VRRP_SNMP_INSTANCE_V3_CHECKSUM_AS_V2, ASN_INTEGER, RONLY,
+	 vrrp_snmp_instance, 3, {3, 1, 36}},
 
 	/* vrrpTrackedInterfaceTable */
 	{VRRP_SNMP_TRACKEDINTERFACE_NAME, ASN_OCTET_STR, RONLY,
@@ -4494,15 +4500,15 @@ vrrp_rfcv3_snmp_proto_err_notify(vrrp_t *vrrp)
 #endif
 
 static bool
-vrrp_handles_global_oid(void)
+vrrp_handles_global_oid(const data_t *global_data_in_use)
 {
 #ifdef _WITH_SNMP_VRRP_
-	if (global_data->enable_snmp_vrrp) {
+	if (global_data_in_use->enable_snmp_vrrp) {
 #ifdef _WITH_LVS_
 		if (!running_checker())
 			return true;
 #ifdef _WITH_SNMP_CHECKER_
-		if (!global_data->enable_snmp_checker)
+		if (!global_data_in_use->enable_snmp_checker)
 			return true;
 #endif
 #else
@@ -4521,7 +4527,7 @@ vrrp_snmp_agent_init(const char *snmp_socket_name)
 		return;
 
 	/* We let the check process handle the global OID if it is running and with snmp */
-	snmp_agent_init(snmp_socket_name, vrrp_handles_global_oid());
+	snmp_agent_init(snmp_socket_name, vrrp_handles_global_oid(global_data));
 
 #ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_vrrp)
@@ -4547,22 +4553,22 @@ vrrp_snmp_agent_init(const char *snmp_socket_name)
 }
 
 void
-vrrp_snmp_agent_close(void)
+vrrp_snmp_agent_close(const data_t *global_data_in_use)
 {
 	if (!snmp_running)
 		return;
 
 #ifdef _WITH_SNMP_VRRP_
-	if (global_data->enable_snmp_vrrp)
+	if (global_data_in_use->enable_snmp_vrrp)
 		snmp_unregister_mib(vrrp_oid, OID_LENGTH(vrrp_oid));
 #endif
 #ifdef _WITH_SNMP_RFCV2_
-	if (global_data->enable_snmp_rfcv2)
+	if (global_data_in_use->enable_snmp_rfcv2)
 		snmp_unregister_mib(vrrp_rfcv2_oid, OID_LENGTH(vrrp_rfcv2_oid));
 #endif
 #ifdef _WITH_SNMP_RFCV3_
-	if (global_data->enable_snmp_rfcv3)
+	if (global_data_in_use->enable_snmp_rfcv3)
 		snmp_unregister_mib(vrrp_rfcv3_oid, OID_LENGTH(vrrp_rfcv3_oid));
 #endif
-	snmp_agent_close(vrrp_handles_global_oid());
+	snmp_agent_close(vrrp_handles_global_oid(global_data_in_use));
 }

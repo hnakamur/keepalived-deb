@@ -284,8 +284,8 @@ vrrp_terminate_phase2(int exit_status)
 #ifdef _WITH_SNMP_RFCV3_
 	    global_data->enable_snmp_rfcv3 ||
 #endif
-	    snmp_option)
-		vrrp_snmp_agent_close();
+	    false)
+		vrrp_snmp_agent_close(global_data);
 #endif
 
 #ifdef _WITH_LVS_
@@ -494,6 +494,13 @@ stop_vrrp(int status)
 
 /* Daemon init sequence */
 static void
+delayed_start_clear_thread(__attribute__((unused)) thread_ref_t thread)
+{
+	vrrp_delayed_start_time.tv_sec = 0;
+	log_message(LOG_INFO, "Delayed start completed");
+}
+
+static void
 start_vrrp(data_t *prev_global_data)
 {
 	/* Clear the flags used for optimising performance */
@@ -536,7 +543,7 @@ start_vrrp(data_t *prev_global_data)
 
 	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
 #if defined _WITH_SNMP_RFC_ || defined _WITH_SNMP_VRRP_
-		if ((
+		if (
 #ifdef _WITH_SNMP_VRRP_
 		     global_data->enable_snmp_vrrp ||
 #endif
@@ -546,14 +553,20 @@ start_vrrp(data_t *prev_global_data)
 #ifdef _WITH_SNMP_RFCV3_
 		     global_data->enable_snmp_rfcv3 ||
 #endif
-		     snmp_option)) {
-			if (reload)
+		     false) {
+			if (snmp_running)
 				snmp_epoll_info(master);
 			else
 				vrrp_snmp_agent_init(global_data->snmp_socket);
 #ifdef _WITH_SNMP_RFC_
 			snmp_vrrp_start_time = time_now;
 #endif
+		} else {
+// We have a problem at reload if VRRP had SNMP and checker didn't, but now checker does.
+// Also race condition if changing so checker does and we dont, from other way round.
+// SOLUTION: Stop snmp before reload and start afterwards. ? A race anyway
+			if (snmp_running)
+				vrrp_snmp_agent_close(old_global_data);
 		}
 #endif
 
@@ -590,11 +603,13 @@ start_vrrp(data_t *prev_global_data)
 
 	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
 		/* Init & start the VRRP packet dispatcher */
+		thread_add_event(master, vrrp_dispatcher_init, NULL, 0);
+
 		if (!reload && global_data->vrrp_startup_delay) {
 			vrrp_delayed_start_time = timer_add_long(time_now, global_data->vrrp_startup_delay);
+			thread_add_timer(master, delayed_start_clear_thread, NULL, global_data->vrrp_startup_delay);
 			log_message(LOG_INFO, "Delaying startup for %g seconds", global_data->vrrp_startup_delay / TIMER_HZ_DOUBLE);
 		}
-		thread_add_event(master, vrrp_dispatcher_init, NULL, 0);
 
 		if (!reload && global_data->disable_local_igmp)
 			set_disable_local_igmp();
@@ -815,7 +830,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 #ifdef _WITH_SNMP_RFCV3_
 	    global_data->enable_snmp_rfcv3 ||
 #endif
-	    snmp_option)
+	    false)
 		with_snmp = true;
 #endif
 
@@ -873,7 +888,7 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 
 	/* Post initializations */
 #ifdef _MEM_CHECK_
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
 #endif
 }
 
@@ -973,6 +988,9 @@ register_vrrp_thread_addresses(void)
 	register_signal_handler_address("sigusr2_vrrp", sigusr2_vrrp);
 #ifdef _WITH_JSON_
 	register_signal_handler_address("sigjson_vrrp", sigjson_vrrp);
+#endif
+#ifdef THREAD_DUMP
+	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
 #endif
 #endif
 }
@@ -1122,7 +1140,7 @@ start_vrrp_child(void)
 	/* Note: there may be a proc_events_ack_timer thread which will not
 	 * exist when the same configuration is reloaded. This is a thread_t,
 	 * which currently adds 120 bytes to the allocated memory. */
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
 #endif
 
 #ifdef _WITH_PERF_
@@ -1157,5 +1175,6 @@ register_vrrp_parent_addresses(void)
 	register_thread_address("vrrp_respawn_thread", vrrp_respawn_thread);
 	register_thread_address("delayed_restart_vrrp_child_thread", delayed_restart_vrrp_child_thread);
 #endif
+	register_thread_address("delayed_start_clear_thread", delayed_start_clear_thread);
 }
 #endif

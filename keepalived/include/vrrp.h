@@ -64,7 +64,9 @@ enum vrrp_flags_bits {
 	VRRP_FLAG_CHECK_UNICAST_SRC,		/* It set, check the source address of a unicast advert */
 	VRRP_FLAG_PROMOTE_SECONDARIES,		/* Set promote_secondaries option on interface */
 	VRRP_FLAG_EVIP_OTHER_FAMILY,		/* There are eVIPs of the different address family from the vrrp family */
+	VRRP_FLAG_ALLOW_NO_VIPS,		/* Suppresses warnings re no VIPs */
 	VRRP_FLAG_NOPREEMPT,			/* true if higher prio does not preempt lower */
+	VRRP_FLAG_V3_CHECKSUM_AS_V2,		/* Omit pseudo header from VRRPv3 IPv4 checksum calculation */
 #ifdef _HAVE_VRRP_VMAC_
 	VRRP_VMAC_BIT,
 	VRRP_VMAC_UP_BIT,
@@ -313,6 +315,7 @@ typedef struct _vrrp_t {
 	uint8_t			effective_priority;	/* effective priority value */
 	int			total_priority;		/* base_priority +/- track_script, track_interface, track_bfd and track_file weights.
 							   effective_priority is this within the range [1,254]. */
+	uint8_t			highest_other_priority;	/* Used for timer_expired_backup */
 	bool			vipset;			/* All the vips are set ? */
 	list_head_t		vip;			/* ip_address_t - list of virtual ip addresses */
 	unsigned		vip_cnt;		/* size of vip list */
@@ -328,6 +331,7 @@ typedef struct _vrrp_t {
 							 * value we were originally configured with.
 							 * In v2, this will always be the configured adver_int.
 							 */
+	timeval_t		last_advert_sent;	/* Time of sending last advert */
 	size_t			kernel_rx_buf_size;	/* Socket receive buffer size */
 
 #ifdef _WITH_FIREWALL_

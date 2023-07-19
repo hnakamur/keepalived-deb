@@ -3,9 +3,9 @@
  *              <www.linuxvirtualserver.org>. It monitor & manipulate
  *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        check_parser.c include file.
+ * Part:        vrrp_vmac_nm.c include file.
  *
- * Author:      Alexandre Cassen, <acassen@linux-vs.org>
+ * Author:      Quentin Armitage, <quentin@armitage.org.uk>
  *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,26 +17,16 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2022-2022 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _CHECK_PARSER_H
-#define _CHECK_PARSER_H
+#ifndef _VRRP_VMAC_NM_H
+#define _VRRP_VMAC_NM_H
 
-/* Global include */
-#include <stdbool.h>
+/* global includes */
 
-/* local include */
-#include "vector.h"
-#include "check_data.h"
+/* local includes */
 
-extern virtual_server_t *current_vs;
-extern real_server_t *current_rs;
-extern virtual_server_group_t *current_vsg;
-
-
-/* Prototypes */
-extern const vector_t *check_init_keywords(void);
-extern void init_check_keywords(bool);
+extern void set_vmac_unmanaged_nm(const char *);
 
 #endif
