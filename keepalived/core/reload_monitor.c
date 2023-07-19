@@ -67,6 +67,7 @@ reload_timer_thread(__attribute__((unused)) thread_ref_t thread)
 	inotify_thread = NULL;
 
 	close(inotify_fd);
+	inotify_fd = -1;
 
 	if (!global_data->reload_repeat ||
 	    global_data->reload_date_specified)
@@ -305,7 +306,7 @@ watch_file(int fd)
 static void
 inotify_event_thread(thread_ref_t thread)
 {
-	char buf[256];
+	char buf[256] __attribute__((aligned(__alignof__(struct inotify_event))));
 	char *buf_ptr;
 	struct inotify_event* event;
 	ssize_t len;
@@ -327,7 +328,7 @@ inotify_event_thread(thread_ref_t thread)
 #endif
 
 		for (buf_ptr = buf; buf_ptr < buf + len; buf_ptr += event->len + sizeof(struct inotify_event)) {
-			event = (struct inotify_event*)buf_ptr;
+			event = PTR_CAST(struct inotify_event, buf_ptr);
 
 #ifdef RELOAD_DEBUG
 			log_message(LOG_INFO, "File %s, wd %d, cookie %" PRIu32, event->len ? event->name : "[NONE]", event->wd, event->cookie);
@@ -398,7 +399,7 @@ inotify_event_thread(thread_ref_t thread)
 		}
 	}
 
-	inotify_thread = thread_add_read(master, inotify_event_thread, NULL, thread->u.f.fd, TIMER_NEVER, false);
+	inotify_thread = thread_add_read(master, inotify_event_thread, NULL, thread->u.f.fd, TIMER_NEVER, 0);
 }
 
 void
@@ -410,15 +411,7 @@ start_reload_monitor(void)
 	char time_buf[20];
 #endif
 
-#ifdef HAVE_INOTIFY_INIT1
 	inotify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-#else
-	inotify_fd = inotify_init();
-	if (inotify_fd != -1) {
-		fcntl(inotify_fd, F_SETFD, FD_CLOEXEC);
-		fcntl(inotify_fd, F_SETFL, O_NONBLOCK);
-	}
-#endif
 
 	file_name = strrchr(global_data->reload_time_file, '/');
 	if (!file_name) {
@@ -450,7 +443,7 @@ start_reload_monitor(void)
 		log_message(LOG_INFO, "Reload scheduled for %s", format_time_t(time_buf, sizeof(time_buf), global_data->reload_time));
 #endif
 
-	inotify_thread = thread_add_read(master, inotify_event_thread, NULL, inotify_fd, TIMER_NEVER, false);
+	inotify_thread = thread_add_read(master, inotify_event_thread, NULL, inotify_fd, TIMER_NEVER, 0);
 }
 
 void

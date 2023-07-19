@@ -31,21 +31,21 @@
 /* local includes */
 #include "list_head.h"
 #include "vector.h"
+#include "vrrp_static_track.h"
+
 
 /* Configuration data root */
 typedef struct _vrrp_data {
 	list_head_t		static_track_groups;	/* static_track_group_t */
 	list_head_t		static_addresses;	/* ip_address_t */
-#ifdef _HAVE_FIB_ROUTING_
 	list_head_t		static_routes;		/* ip_route_t */
 	list_head_t		static_rules;		/* ip_rule_t */
-#endif
 	list_head_t		vrrp_sync_group;	/* vrrp_sgroup_t */
 	list_head_t		vrrp;			/* vrrp_t */
 	list_head_t		vrrp_socket_pool;	/* sock_t */
 	list_head_t		vrrp_script;		/* vrrp_script_t */
 	list_head_t		vrrp_track_files;	/* tracked_file_t */
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	list_head_t		vrrp_track_processes;	/* vrrp_tracked_process_t */
 	size_t			vrrp_max_process_name_len;
 	bool			vrrp_use_process_cmdline;
@@ -60,24 +60,24 @@ typedef struct _vrrp_data {
 /* Global Vars exported */
 extern vrrp_data_t *vrrp_data;
 extern vrrp_data_t *old_vrrp_data;
-extern char *vrrp_buffer;
+extern void *vrrp_buffer;
 extern size_t vrrp_buffer_len;
 
 /* prototypes */
-extern void alloc_static_track_group(const char *);
+extern static_track_group_t *alloc_static_track_group(const char *);
 extern void alloc_saddress(const vector_t *);
 extern void alloc_sroute(const vector_t *);
 extern void alloc_srule(const vector_t *);
-extern void alloc_vrrp_sync_group(const char *);
-extern void alloc_vrrp(const char *);
+extern vrrp_sgroup_t *alloc_vrrp_sync_group(const char *);
+extern vrrp_t *alloc_vrrp(const char *);
 extern void alloc_vrrp_unicast_peer(const vector_t *);
 extern void alloc_vrrp_track_if(const vector_t *);
-extern void alloc_vrrp_script(const char *);
+extern vrrp_script_t *alloc_vrrp_script(const char *);
 extern void free_vscript(vrrp_script_t *);
 extern void alloc_vrrp_track_script(const vector_t *);
 extern void alloc_vrrp_track_file(const vector_t *);
-#ifdef _WITH_CN_PROC_
-extern void alloc_vrrp_process(const char *);
+#ifdef _WITH_TRACK_PROCESS_
+extern vrrp_tracked_process_t *alloc_vrrp_process(const char *);
 extern void free_vprocess(vrrp_tracked_process_t *);
 extern void alloc_vrrp_track_process(const vector_t *);
 #endif
@@ -88,7 +88,7 @@ extern void alloc_vrrp_track_bfd(const vector_t *);
 extern void alloc_vrrp_group_track_if(const vector_t *);
 extern void alloc_vrrp_group_track_script(const vector_t *);
 extern void alloc_vrrp_group_track_file(const vector_t *);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 extern void alloc_vrrp_group_track_process(const vector_t *);
 #endif
 #ifdef _WITH_BFD_

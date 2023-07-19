@@ -101,12 +101,16 @@ enum global_bits {
 	LOG_EXTRA_DETAIL_BIT,
 	DONT_RESPAWN_BIT,
 #ifdef _MEM_CHECK_
+	MEM_CHECK_BIT,
 #ifdef _MEM_ERR_DEBUG_
 	MEM_ERR_DETECT_BIT,
 #endif
 #ifdef _MEM_CHECK_LOG_
 	MEM_CHECK_LOG_BIT,
 #endif
+#endif
+#ifdef _OPENSSL_MEM_CHECK_
+	OPENSSL_MEM_CHECK_BIT,
 #endif
 #ifdef _WITH_LVS_
 	LOG_ADDRESS_CHANGES,

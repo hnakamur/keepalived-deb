@@ -7,11 +7,11 @@
 EXTRA_DIST		= keepalived.conf.in
 
 edit = echo "  EDIT     $@"; \
-	sed \
+	@SED@ \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g'
 
-keepalived.conf: Makefile
+keepalived.conf: $(builddir)/Makefile
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 

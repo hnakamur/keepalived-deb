@@ -22,12 +22,22 @@ IMPORTS
         FROM SNMPv2-TC;
 
 keepalived MODULE-IDENTITY
-     LAST-UPDATED "202006120001Z"
+     LAST-UPDATED "202212090001Z"
      ORGANIZATION "Keepalived"
      CONTACT-INFO "http://www.keepalived.org"
      DESCRIPTION
         "This MIB describes objects used by keepalived, both
          for VRRP and health checker."
+     REVISION "202212090001Z"
+     DESCRIPTION "add VRRPv3 checksum as VRRPv2"
+     REVISION "202109230001Z"
+     DESCRIPTION "add twos LVS scheduler"
+     REVISION "202109090001Z"
+     DESCRIPTION "correct syntax of vrrpInstanceIndex"
+     REVISION "202109040001Z"
+     DESCRIPTION "add vrrp multicast address"
+     REVISION "202106050001Z"
+     DESCRIPTION "add snmp_name for virtual and real servers"
      REVISION "202006120001Z"
      DESCRIPTION "add script_deleted"
      REVISION "202005070001Z"
@@ -417,6 +427,14 @@ lvsFlushOnStop OBJECT-TYPE
     DESCRIPTION
         "Indicate whether LVS config is flushed at shutdown."
     ::= { global 11 }
+
+v3ChecksumAsV2 OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "True if VRRPv3 IPv4 checksum excludes pseudo-header."
+    ::= { global 12 }
 
 -- ----------------------------------------------------------------------
 -- VRRP part
@@ -918,18 +936,19 @@ VrrpInstanceEntry ::= SEQUENCE {
     vrrpInstanceVrrpVersion INTEGER,
     vrrpInstanceScriptMstrRxLowerPri DisplayString,
     vrrpInstanceScriptDeleted DisplayString,
-    vrrpInstanceNotifyDeleted INTEGER
+    vrrpInstanceNotifyDeleted INTEGER,
+    vrrpInstanceMulticastAddressType InetAddressType,
+    vrrpInstanceMulticastAddress InetAddress,
+    vrrpInstanceV3ChecksumAsV2 INTEGER
 }
 
 vrrpInstanceIndex OBJECT-TYPE
-    SYNTAX INTEGER {
-        static(0)
-    }
+    SYNTAX Integer32 (0..2147483647)
     MAX-ACCESS not-accessible
     STATUS current
     DESCRIPTION
         "Index of the VRRP instance.
-         Instance 0 is for static IP and static routes."
+         Instance 0 is for static IP addresses, routes and rules."
     ::= { vrrpInstanceEntry 1 }
 
 vrrpInstanceName OBJECT-TYPE
@@ -1201,6 +1220,30 @@ vrrpInstanceNotifyDeleted OBJECT-TYPE
     DESCRIPTION
         "Send Deleted rather than Fault notifications if instance is deleted on config reload."
     ::= { vrrpInstanceEntry 33 }
+
+vrrpInstanceMulticastAddressType OBJECT-TYPE
+    SYNTAX InetAddressType
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "A value that represents a type of Internet address."
+    ::= { vrrpInstanceEntry 34 }
+
+vrrpInstanceMulticastAddress OBJECT-TYPE
+    SYNTAX InetAddress
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Multicast address for adverts"
+    ::= { vrrpInstanceEntry 35 }
+
+vrrpInstanceV3ChecksumAsV2 OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "True if VRRPv3 IPv4 checksum excludes pseudo-header."
+    ::= { vrrpInstanceEntry 36 }
 
 vrrpTrackedInterfaceTable OBJECT-TYPE
     SYNTAX SEQUENCE OF VrrpTrackedInterfaceEntry
@@ -3369,7 +3412,8 @@ VirtualServerEntry ::= SEQUENCE {
     virtualServerConnTimeoutUsec Unsigned32,
     virtualServerTunnelType INTEGER,
     virtualServerTunnelPort InetPortNumber,
-    virtualServerTunnelCsum INTEGER
+    virtualServerTunnelCsum INTEGER,
+    virtualServerName DisplayString
 }
 
 virtualServerIndex OBJECT-TYPE
@@ -3461,6 +3505,7 @@ virtualServerLoadBalancingAlgo OBJECT-TYPE
     fo(11),
     ovf(12),
     mh(13),
+    twos(14),
     unknown(99)
     }
     MAX-ACCESS read-only
@@ -4002,6 +4047,14 @@ virtualServerTunnelCsum OBJECT-TYPE
         "Default forwarding tunnel checksum type use for this virtual server."
     ::= { virtualServerEntry 70 }
 
+virtualServerName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Optional SNMP name of this virtual server."
+    ::= { virtualServerEntry 71 }
+
 
 -- real servers
 
@@ -4076,7 +4129,8 @@ RealServerEntry ::= SEQUENCE {
     realServerConnTimeoutUsec Unsigned32,
     realServerTunnelType INTEGER,
     realServerTunnelPort InetPortNumber,
-    realServerTunnelCsum INTEGER
+    realServerTunnelCsum INTEGER,
+    realServerName DisplayString
 }
 
 realServerIndex OBJECT-TYPE
@@ -4557,6 +4611,14 @@ realServerTunnelCsum OBJECT-TYPE
         "Forwarding tunnel checksum type use for this real server."
     ::= { realServerEntry 54 }
 
+realServerName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Optional SNMP name of this real server."
+    ::= { realServerEntry 55 }
+
 lvsSyncDaemon    OBJECT IDENTIFIER ::= { check 6 }
 
 lvsSyncDaemonEnabled OBJECT-TYPE
@@ -4790,7 +4852,8 @@ globalGroup OBJECT-GROUP
     netNamespace,
     dbus,
     dynamicInterfaces,
-    lvsFlushOnStop
+    lvsFlushOnStop,
+    v3ChecksumAsV2
     }
     STATUS current
     DESCRIPTION
@@ -4865,6 +4928,9 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpInstanceScriptMstrRxLowerPri,
     vrrpInstanceScriptDeleted,
     vrrpInstanceNotifyDeleted,
+    vrrpInstanceMulticastAddressType,
+    vrrpInstanceMulticastAddress,
+    vrrpInstanceV3ChecksumAsV2,
     vrrpTrackedInterfaceName,
     vrrpTrackedInterfaceWeight,
     vrrpTrackedInterfaceWgtRev,
@@ -5182,7 +5248,8 @@ virtualServerGroup OBJECT-GROUP
     virtualServerConnTimeoutUsec,
     virtualServerTunnelType,
     virtualServerTunnelPort,
-    virtualServerTunnelCsum
+    virtualServerTunnelCsum,
+    virtualServerName
     }
     STATUS current
     DESCRIPTION
@@ -5243,7 +5310,8 @@ realServerGroup OBJECT-GROUP
     realServerConnTimeoutUsec,
     realServerTunnelType,
     realServerTunnelPort,
-    realServerTunnelCsum
+    realServerTunnelCsum,
+    realServerName
     }
     STATUS current
     DESCRIPTION

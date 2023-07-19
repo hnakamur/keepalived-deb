@@ -29,36 +29,48 @@
 #endif
 #include <net/ethernet.h>
 #include <linux/if_packet.h>
+#include <linux/if_infiniband.h>
+#include <net/if_arp.h>
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <errno.h>
+#include <stdbool.h>
 
 /* local includes */
+#include "vrrp_ndisc.h"
 #include "logger.h"
 #include "utils.h"
 #include "vrrp_if_config.h"
 #include "vrrp_scheduler.h"
-#include "vrrp_ndisc.h"
-#if !HAVE_DECL_SOCK_CLOEXEC
-#include "old_socket.h"
-#endif
+#include "vrrp_arp.h"
 #include "bitops.h"
 
+
 /* static vars */
-static char *ndisc_buffer;
 static int ndisc_fd = -1;
+
+/*
+ * See RFC 4391(Section 4 ) and RFC 4392 for details
+ * This is modified by the IPoIB driver to add the P_key
+ */
+static unsigned char  ipv6_bcast_addr[] = {
+	0x00, 0xff, 0xff, 0xff,
+	0xff, 0x12, 0x60, 0x1b, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff
+};
 
 /*
  *	Neighbour Advertisement sending routine.
  */
 static void
-ndisc_send_na(ip_address_t *ipaddress)
+ndisc_send_na(ip_address_t *ipaddress, struct iovec *iov, int iovlen)
 {
-	struct sockaddr_ll sll;
+	struct sockaddr_large_ll sll;
 	ssize_t len;
 	char addr_str[INET6_ADDRSTRLEN] = "";
 	interface_t *ifp = ipaddress->ifp;
+	struct msghdr msg = { .msg_iov = iov, .msg_iovlen = iovlen };
 
 	/* Build the dst device */
 	memset(&sll, 0, sizeof (sll));
@@ -71,6 +83,9 @@ ndisc_send_na(ip_address_t *ipaddress)
 	sll.sll_protocol = htons(ETH_P_IPV6);
 	memcpy(sll.sll_addr, IF_HWADDR(ifp), ifp->hw_addr_len);
 
+	msg.msg_name = &sll;
+	msg.msg_namelen = sizeof(sll);
+
 	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
 		inet_ntop(AF_INET6, &ipaddress->u.sin6_addr, addr_str, sizeof(addr_str));
 		log_message(LOG_INFO, "Sending unsolicited Neighbour Advert on %s for %s",
@@ -78,10 +93,7 @@ ndisc_send_na(ip_address_t *ipaddress)
 	}
 
 	/* Send packet */
-	len = sendto(ndisc_fd, ndisc_buffer,
-		     ETHER_HDR_LEN + sizeof(struct ip6hdr) + sizeof(struct nd_neighbor_advert) +
-		     sizeof(struct nd_opt_hdr) + ifp->hw_addr_len, 0,
-		     (struct sockaddr *) &sll, sizeof (sll));
+	len = sendmsg(ndisc_fd, &msg, 0);
 	if (len < 0) {
 		if (!addr_str[0])
 			inet_ntop(AF_INET6, &ipaddress->u.sin6_addr, addr_str, sizeof(addr_str));
@@ -91,13 +103,15 @@ ndisc_send_na(ip_address_t *ipaddress)
 }
 
 /*
- *	ICMPv6 Checksuming.
+ *	ICMPv6 Checksumming.
  */
 static __sum16
-ndisc_icmp6_cksum(const struct ip6hdr *ip6, const struct icmp6_hdr *icp, uint32_t len)
+ndisc_icmp6_cksum(const struct ip6hdr *ip6, struct iovec *iov, int iovcnt)
 {
 	size_t i;
-	register const uint16_t *sp;
+	int j;
+	size_t len;
+	const uint16_t *sp;
 	uint32_t sum;
 	union {
 		struct {
@@ -114,20 +128,27 @@ ndisc_icmp6_cksum(const struct ip6hdr *ip6, const struct icmp6_hdr *icp, uint32_
 	memset(&phu, 0, sizeof(phu));
 	memcpy(&phu.ph.ph_src, &ip6->saddr, sizeof(struct in6_addr));
 	memcpy(&phu.ph.ph_dst, &ip6->daddr, sizeof(struct in6_addr));
-	phu.ph.ph_len = htonl(len);
+	phu.ph.ph_len = 0;
 	phu.ph.ph_nxt = IPPROTO_ICMPV6;
 
 	sum = 0;
+
+	for (j = 0; j < iovcnt; j++) {
+		sp = PTR_CAST_CONST(uint16_t, iov[j].iov_base);
+		len = iov[j].iov_len;
+
+		for (i = 1; i < len; i += 2)
+			sum += *sp++;
+
+		if (len & 1)
+			sum += htons((*PTR_CAST_CONST(uint8_t, sp)) << 8);
+
+		phu.ph.ph_len += len;
+	}
+	phu.ph.ph_len = htons(phu.ph.ph_len);
+
 	for (i = 0; i < sizeof(phu.pa) / sizeof(phu.pa[0]); i++)
 		sum += phu.pa[i];
-
-	sp = (const uint16_t *)icp;
-
-	for (i = 1; i < len; i += 2)
-		sum += *sp++;
-
-	if (len & 1)
-		sum += htons((*(const uint8_t *)sp) << 8);
 
 	while (sum > 0xffff)
 		sum = (sum & 0xffff) + (sum >> 16);
@@ -144,69 +165,97 @@ ndisc_icmp6_cksum(const struct ip6hdr *ip6, const struct icmp6_hdr *icp, uint32_
 void
 ndisc_send_unsolicited_na_immediate(interface_t *ifp, ip_address_t *ipaddress)
 {
-	struct ether_header *eth = (struct ether_header *) ndisc_buffer;
-	struct ip6hdr *ip6h = (struct ip6hdr *) ((char *)eth + ETHER_HDR_LEN);
-	struct nd_neighbor_advert *ndh = (struct nd_neighbor_advert*) ((char *)ip6h + sizeof(struct ip6hdr));
-	struct icmp6_hdr *icmp6h = &ndh->nd_na_hdr;
-	struct nd_opt_hdr *nd_opt_h = (struct nd_opt_hdr *) ((char *)ndh + sizeof(struct nd_neighbor_advert));
-	char *nd_opt_lladdr = (char *) ((char *)nd_opt_h + sizeof(struct nd_opt_hdr));
-	char *lladdr = (char *) IF_HWADDR(ipaddress->ifp);
+	struct ether_header eth = { .ether_type = htons(ETHERTYPE_IPV6) };
+	ipoib_hdr_t ipoib = { .proto = htons(ETHERTYPE_IPV6) };
+	struct ip6hdr ip6h = { .version = 6, .nexthdr = IPPROTO_ICMPV6, .hop_limit = NDISC_HOPLIMIT };
+	struct nd_neighbor_advert ndh = { .nd_na_type = ND_NEIGHBOR_ADVERT };
+	struct nd_opt_hdr nd_opt_h = { .nd_opt_type = ND_OPT_TARGET_LINKADDR };
+	uint8_t nd_opt_h_pad[2] = { 0, 0 };
+	struct iovec iov[7];
+	unsigned num_iov;
+	unsigned icmp6_iov;
 
-	/* This needs updating to support IPv6 over Infiniband
-	 * (see vrrp_arp.c) */
+	/* For Infiniband see vrrp_arp.c and RFC2461 4.4, RFC4391, RFC4392 9.3 and
+	 * https://datatracker.ietf.org/doc/html/draft-kashyap-ipoib-ipv6-over-infiniband-00 */
 
-	/* Ethernet header:
-	 * Destination ethernet address MUST use specific address Mapping
-	 * as specified in rfc2464.7 Address Mapping for
-	 */
-	memset(eth->ether_dhost, 0, ETH_ALEN);
-	eth->ether_dhost[0] = eth->ether_dhost[1] = 0x33;
-	eth->ether_dhost[5] = 1;
-	memcpy(eth->ether_shost, lladdr, ETH_ALEN);
-	eth->ether_type = htons(ETHERTYPE_IPV6);
+	if (ifp->hw_type == ARPHRD_INFINIBAND) {
+		iov[0].iov_base = &ipv6_bcast_addr;
+		iov[0].iov_len = sizeof(ipv6_bcast_addr);
+
+		iov[1].iov_base = &ipoib;
+		iov[1].iov_len = sizeof(ipoib);
+
+		num_iov = 2;
+	} else {
+		/* Ethernet header:
+		 * Destination ethernet address MUST use specific address Mapping
+		 * as specified in rfc2464.7 Address Mapping for
+		 */
+
+		eth.ether_dhost[0] = eth.ether_dhost[1] = 0x33;
+		eth.ether_dhost[5] = 1;
+		memcpy(eth.ether_shost, ipaddress->ifp->hw_addr, ETH_ALEN);
+		iov[0].iov_base = &eth;
+		iov[0].iov_len = sizeof(eth);
+
+		num_iov = 1;
+	}
 
 	/* IPv6 Header */
-	ip6h->version = 6;
-	ip6h->payload_len = htons(sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr) + ETH_ALEN);
-	ip6h->nexthdr = IPPROTO_ICMPV6;
-	ip6h->hop_limit = NDISC_HOPLIMIT;
-	memcpy(&ip6h->saddr, &ipaddress->u.sin6_addr, sizeof(struct in6_addr));
-	ip6h->daddr.s6_addr16[0] = htons(0xff02);
-	ip6h->daddr.s6_addr16[7] = htons(1);
+	memcpy(&ip6h.saddr, &ipaddress->u.sin6_addr, sizeof(struct in6_addr));
+	ip6h.daddr.s6_addr16[0] = htons(0xff02);
+	ip6h.daddr.s6_addr16[7] = htons(1);
+	iov[num_iov].iov_base = &ip6h;
+	iov[num_iov].iov_len = sizeof(ip6h);
+	num_iov++;
 
 	/* ICMPv6 Header */
-	ndh->nd_na_type = ND_NEIGHBOR_ADVERT;
 
 	/* Set the router flag if necessary. We recheck each interface if not
 	 * checked in the last 5 seconds. */
 	if (timer_cmp_now_diff(ifp->last_gna_router_check, 5 * TIMER_HZ))
 		set_ipv6_forwarding(ifp);
 	if (ifp->gna_router)
-		ndh->nd_na_flags_reserved |= ND_NA_FLAG_ROUTER;
+		ndh.nd_na_flags_reserved |= ND_NA_FLAG_ROUTER;
 
 	/* Override flag is set to indicate that the advertisement
 	 * should override an existing cache entry and update the
 	 * cached link-layer address.
 	 */
-//	icmp6h->icmp6_override = 1;
-	ndh->nd_na_flags_reserved |= ND_NA_FLAG_OVERRIDE;
-	ndh->nd_na_target = ipaddress->u.sin6_addr;
+	ndh.nd_na_flags_reserved |= ND_NA_FLAG_OVERRIDE;
+	ndh.nd_na_target = ipaddress->u.sin6_addr;
+	iov[num_iov].iov_base = &ndh;
+	iov[num_iov].iov_len = sizeof(ndh);
+	icmp6_iov = num_iov;
+	num_iov++;
 
 	/* NDISC Option header */
-	nd_opt_h->nd_opt_type = ND_OPT_TARGET_LINKADDR;
-	nd_opt_h->nd_opt_len = 1;
-	memcpy(nd_opt_lladdr, lladdr, ETH_ALEN);
+	iov[num_iov].iov_base = &nd_opt_h;
+	iov[num_iov].iov_len = sizeof(nd_opt_h);
+	num_iov++;
 
-	/* Compute checksum */
-	icmp6h->icmp6_cksum = ndisc_icmp6_cksum(ip6h, icmp6h,
-						sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr) + ETH_ALEN);
+	if (ifp->hw_type == ARPHRD_INFINIBAND) {
+		nd_opt_h.nd_opt_len = 3;
+
+		iov[num_iov].iov_base = nd_opt_h_pad;
+		iov[num_iov].iov_len = sizeof(nd_opt_h_pad);
+
+		num_iov++;
+	} else
+		nd_opt_h.nd_opt_len = 1;
+
+	/* MAC address */
+	iov[num_iov].iov_base = ipaddress->ifp->hw_addr;
+	iov[num_iov].iov_len = ipaddress->ifp->hw_addr_len;
+	num_iov++;
+
+	ip6h.payload_len = htons(sizeof(struct nd_neighbor_advert) + nd_opt_h.nd_opt_len * 8);
+
+	/* Compute checksum - ICMP6 header onwards*/
+	ndh.nd_na_hdr.icmp6_cksum = ndisc_icmp6_cksum(&ip6h, &iov[icmp6_iov], num_iov - icmp6_iov);
 
 	/* Send the neighbor advertisement message */
-	ndisc_send_na(ipaddress);
-
-	/* Cleanup room for next round */
-	memset(ndisc_buffer, 0, ETHER_HDR_LEN + sizeof(struct ip6hdr) +
-	       sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr) + ETH_ALEN);
+	ndisc_send_na(ipaddress, iov, num_iov);
 
 	/* If we have to delay between sending NAs, note the next time we can */
 	if (ifp->garp_delay && ifp->garp_delay->have_gna_interval)
@@ -257,44 +306,32 @@ ndisc_send_unsolicited_na(vrrp_t *vrrp, ip_address_t *ipaddress)
 /*
  *	Neighbour Discovery init/close
  */
-void
+bool
 ndisc_init(void)
 {
-	if (ndisc_buffer)
-		return;
+	if (ndisc_fd != -1)
+		return true;
 
 	/* Create the socket descriptor */
 	ndisc_fd = socket(PF_PACKET, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, htons(ETH_P_IPV6));
 
-	if (ndisc_fd >= 0)
-		log_message(LOG_INFO, "Registering gratuitous NDISC shared channel");
-	else {
+	if (ndisc_fd < 0) {
 		log_message(LOG_INFO, "Error %d while registering gratuitous NDISC shared channel", errno);
-		return;
+		return (errno != EAFNOSUPPORT && errno != EPERM);
 	}
 
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(ndisc_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on gratuitous NA socket");
-#endif
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(garp_fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on gratuitous NA socket");
-#endif
+	if (__test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Registering gratuitous NDISC shared channel");
 
-	/* Initalize shared buffer */
-	ndisc_buffer = (char *) MALLOC(ETHER_HDR_LEN + sizeof(struct ip6hdr) +
-				       sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr) + sizeof(((interface_t *)NULL)->hw_addr));
+	/* We don't want to receive any data on this socket */
+	if_setsockopt_no_receive(&ndisc_fd);
+
+	return true;
 }
 
 void
 ndisc_close(void)
 {
-	if (ndisc_buffer) {
-		FREE(ndisc_buffer);
-		ndisc_buffer = NULL;
-	}
-
 	if (ndisc_fd != -1) {
 		close(ndisc_fd);
 		ndisc_fd = -1;

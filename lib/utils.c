@@ -33,7 +33,10 @@
 #include <sys/stat.h>
 #include <stdint.h>
 #include <errno.h>
+#include <time.h>
+#include <stdbool.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 #include <sys/wait.h>
 #endif
@@ -50,6 +53,9 @@
 #include <execinfo.h>
 #include <memory.h>
 #endif
+#ifdef _HAVE_LIBKMOD_
+#include <libkmod.h>
+#endif
 
 /* Local includes */
 #include "utils.h"
@@ -60,10 +66,12 @@
 #include "parser.h"
 #include "logger.h"
 #include "process.h"
+#include "timer.h"
 
 /* global vars */
 unsigned long debug = 0;
 mode_t umask_val = S_IXUSR | S_IRWXG | S_IRWXO;
+const char *tmp_dir;
 
 #ifdef _EINTR_DEBUG_
 bool do_eintr_debug;
@@ -112,7 +120,7 @@ dump_buffer(const char *buff, size_t count, FILE* fp, int indent)
 	}
 }
 
-#ifdef _CHECKSUM_DEBUG_
+#if defined _CHECKSUM_DEBUG_ || defined _RECVMSG_DEBUG_
 void
 log_buffer(const char *msg, const void *buff, size_t count)
 {
@@ -148,6 +156,8 @@ write_stacktrace(const char *file_name, const char *str)
 	unsigned int nptrs;
 	unsigned int i;
 	char **strs;
+	char *cmd;
+	const char *tmp_filename = NULL;
 
 	nptrs = backtrace(buffer, 100);
 	if (file_name) {
@@ -174,6 +184,19 @@ write_stacktrace(const char *file_name, const char *str)
 			log_message(LOG_INFO, "  %s", strs[i]);
 		free(strs);	/* malloc'd by backtrace_symbols */
 	}
+
+	/* gstack() gives a more detailed stacktrace, using gdb and the bt command */
+	if (!file_name)
+		tmp_filename = make_tmp_filename("keepalived.stack");
+	else if (file_name[0] != '/')
+		tmp_filename = make_tmp_filename(file_name);
+	cmd = MALLOC(6 + 1 + PID_MAX_DIGITS + 1 + 2 + ( tmp_filename ? strlen(tmp_filename) : strlen(file_name)) + 1);
+	sprintf(cmd, "gstack %d >>%s", getpid(), tmp_filename ? tmp_filename : file_name);
+
+	i = system(cmd);	/* We don't care about return value but gcc thinks we should */
+
+	FREE(cmd);
+	FREE_CONST_PTR(tmp_filename);
 }
 #endif
 
@@ -188,7 +211,11 @@ make_file_name(const char *name, const char *prog, const char *namespace, const 
 	if (!name)
 		return NULL;
 
-	len = strlen(name);
+	if (name[0] != '/')
+		len = strlen(tmp_dir) + 1;
+	else
+		len = 0;
+	len += strlen(name);
 	if (prog)
 		len += strlen(prog) + 1;
 	if (namespace)
@@ -199,7 +226,14 @@ make_file_name(const char *name, const char *prog, const char *namespace, const 
 	file_name = MALLOC(len + 1);
 	dir_end = strrchr(name, '/');
 	extn_start = strrchr(dir_end ? dir_end : name, '.');
-	strncpy(file_name, name, extn_start ? (size_t)(extn_start - name) : len);
+
+	if (name[0] != '/') {
+		strcpy(file_name, tmp_dir);
+		strcat(file_name, "/");
+	} else
+		file_name[0] = '\0';
+
+	strncat(file_name, name, extn_start ? (size_t)(extn_start - name) : len);
 
 	if (prog) {
 		strcat(file_name, "_");
@@ -248,14 +282,7 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 			break;
 		}
 
-#ifdef IN_CLOEXEC
 		in = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-#else
-		if ((in = inotify_init()) != -1) {
-			fcntl(in, F_SETFD, FD_CLOEXEC | fcntl(n, F_GETFD));
-			fcntl(in, F_SETFL, O_NONBLOCK | fcntl(n, F_GETFL));
-		}
-#endif
 		if (in == -1) {
 			log_message(LOG_INFO, "inotify_init failed %d - %m", errno);
 			break;
@@ -283,8 +310,8 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 		}
 
 		/* Parent */
-		char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-		struct inotify_event *ie = (struct inotify_event*)buf;
+		char buf[sizeof(struct inotify_event) + NAME_MAX + 1] __attribute__((aligned(__alignof__(struct inotify_event))));
+		struct inotify_event *ie = PTR_CAST(struct inotify_event, buf);
 		struct epoll_event ee = { .events = EPOLLIN, .data.fd = in };
 
 		if ((ep = epoll_create(1)) == -1) {
@@ -338,11 +365,7 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 			/* Rename the /perf.data file */
 			strcat(orig_name, perf_name);
 			new_name = make_file_name(orig_name, process,
-#if HAVE_DECL_CLONE_NEWNET
 							network_namespace,
-#else
-							NULL,
-#endif
 							instance_name);
 
 			if (rename(orig_name, new_name))
@@ -362,13 +385,60 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 #endif
 
 /* Compute a checksum */
+#ifdef USE_MEMCPY_FOR_ALIASING
 uint16_t
-in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
+in_csum(const void *addr, size_t len, uint32_t csum, uint32_t *acc)
 {
-	register size_t nleft = len;
-	const uint16_t *w = addr;
-	register uint16_t answer;
-	register uint32_t sum = csum;
+	size_t nleft = len;
+	uint16_t w16;
+	const unsigned char *b_addr = addr;
+
+	/*
+	 *  Our algorithm is simple, using a 32 bit accumulator (sum),
+	 *  we add sequential 16 bit words to it, and at the end, fold
+	 *  back all the carry bits from the top 16 bits into the lower
+	 *  16 bits.
+	 */
+
+	/* What is not so simple is dealing with strict aliasing. We can only
+	 * access the data via a char/unsigned char pointer, since that is the
+	 * only type of pointer that can be used for aliasing.
+	 * The trick here is we use memcpy to copy the uint16_t via an unsigned
+	 * char *. The memcpy doesn't actually happen since the compiler sees
+	 * what is happening, optimizes it out and accesses the original memory,
+	 * but since the code is written to only access the original memory via
+	 * the unsigned char *, the compiler knows this might be aliasing.
+	 */
+	while (nleft > 1) {
+		memcpy(&w16, b_addr, sizeof(w16));
+		csum += w16;
+		b_addr += sizeof(w16);
+		nleft -= sizeof(w16);
+	}
+
+	/* mop up an odd byte, if necessary */
+	if (nleft == 1)
+		csum += htons(*b_addr << 8);
+
+	if (acc)
+		*acc = csum;
+
+	/*
+	 * add back carry outs from top 16 bits to low 16 bits
+	 */
+	csum = (csum >> 16) + (csum & 0xffff);	/* add hi 16 to low 16 */
+	csum += (csum >> 16);			/* add carry */
+	return ~csum & 0xffff;			/* truncate to 16 bits */
+}
+#else
+typedef uint16_t __attribute__((may_alias)) uint16_t_a;
+uint16_t
+in_csum(const void *addr, size_t len, uint32_t csum, uint32_t *acc)
+{
+	size_t nleft = len;
+	const uint16_t_a *w = addr;
+	uint16_t answer;
+	uint32_t sum = csum;
 
 	/*
 	 *  Our algorithm is simple, using a 32 bit accumulator (sum),
@@ -383,7 +453,7 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 
 	/* mop up an odd byte, if necessary */
 	if (nleft == 1)
-		sum += htons(*(const u_char *)w << 8);
+		sum += htons(*PTR_CAST_CONST(u_char, w) << 8);
 
 	if (acc)
 		*acc = sum;
@@ -396,16 +466,16 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 	answer = (~sum & 0xffff);		/* truncate to 16 bits */
 	return (answer);
 }
+#endif
 
-/* IP network to ascii representation */
+/* IP network to ascii representation - address is in network byte order */
 const char *
 inet_ntop2(uint32_t ip)
 {
 	static char buf[16];
-	const unsigned char *bytep;
+	const unsigned char (*bytep)[4] = (const unsigned char (*)[4])&ip;
 
-	bytep = (const unsigned char *)&ip;
-	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
+	sprintf(buf, "%d.%d.%d.%d", (*bytep)[0], (*bytep)[1], (*bytep)[2], (*bytep)[3]);
 	return buf;
 }
 
@@ -419,7 +489,7 @@ inet_ntoa2(uint32_t ip, char *buf)
 {
 	const unsigned char *bytep;
 
-	bytep = (const unsigned char *)&ip;
+	bytep = PTR_CAST_CONST(unsigned char, &ip);
 	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
 	return buf;
 }
@@ -470,9 +540,9 @@ inet_stor(const char *addr, uint32_t *range_end)
 #endif
 }
 
-/* Domain to sockaddr_storage */
+/* Domain to sockaddr_ka */
 int
-domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage *addr)
+domain_stosockaddr(const char *domain, const char *port, sockaddr_t *addr)
 {
 	struct addrinfo *res = NULL;
 	unsigned port_num;
@@ -491,16 +561,18 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 
 	addr->ss_family = (sa_family_t)res->ai_family;
 
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
-		*addr6 = *(struct sockaddr_in6 *)res->ai_addr;
-		if (port)
-			addr6->sin6_port = htons(port_num);
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
-		*addr4 = *(struct sockaddr_in *)res->ai_addr;
-		if (port)
-			addr4->sin_port = htons(port_num);
+	/* Tempting as it is to do something like:
+	 *	*(struct sockaddr_in6 *)addr = *(struct sockaddr_in6 *)res->ai_addr;
+	 *  the alignment of struct sockaddr (short int) is less than the alignment of
+	 *  sockaddr_t (long).
+	 */
+	memcpy(addr, res->ai_addr, res->ai_addrlen);
+
+	if (port) {
+		if (addr->ss_family == AF_INET6)
+			PTR_CAST(struct sockaddr_in6, addr)->sin6_port = htons(port_num);
+		else
+			PTR_CAST(struct sockaddr_in, addr)->sin_port = htons(port_num);
 	}
 
 	freeaddrinfo(res);
@@ -508,10 +580,10 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 	return 0;
 }
 
-/* IP string to sockaddr_storage
+/* IP string to sockaddr_ka
  *   return value is "error". */
 bool
-inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr)
+inet_stosockaddr(const char *ip, const char *port, sockaddr_t *addr)
 {
 	void *addr_ip;
 	const char *cp;
@@ -529,12 +601,12 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	}
 
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		if (port)
 			addr6->sin6_port = htons(port_num);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		if (port)
 			addr4->sin_port = htons(port_num);
 		addr_ip = &addr4->sin_addr;
@@ -558,20 +630,20 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	return false;
 }
 
-/* IPv4 to sockaddr_storage */
+/* IPv4 to sockaddr_ka */
 void
-inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr)
+inet_ip4tosockaddr(const struct in_addr *sin_addr, sockaddr_t *addr)
 {
-	struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+	struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 	addr4->sin_family = AF_INET;
 	addr4->sin_addr = *sin_addr;
 }
 
-/* IPv6 to sockaddr_storage */
+/* IPv6 to sockaddr_ka */
 void
-inet_ip6tosockaddr(const struct in6_addr *sin_addr, struct sockaddr_storage *addr)
+inet_ip6tosockaddr(const struct in6_addr *sin_addr, sockaddr_t *addr)
 {
-	struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+	struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 	addr6->sin6_family = AF_INET6;
 	addr6->sin6_addr = *sin_addr;
 }
@@ -620,15 +692,15 @@ check_valid_ipaddress(const char *str, bool allow_subnet_mask)
 
 /* IP network to string representation */
 static char *
-inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
+inet_sockaddrtos2(const sockaddr_t *addr, char *addr_str)
 {
 	const void *addr_ip;
 
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+		const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 		addr_ip = &addr4->sin_addr;
 	}
 
@@ -639,7 +711,7 @@ inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
 }
 
 const char *
-inet_sockaddrtos(const struct sockaddr_storage *addr)
+inet_sockaddrtos(const sockaddr_t *addr)
 {
 	static char addr_str[INET6_ADDRSTRLEN];
 	inet_sockaddrtos2(addr, addr_str);
@@ -647,33 +719,33 @@ inet_sockaddrtos(const struct sockaddr_storage *addr)
 }
 
 uint16_t __attribute__ ((pure))
-inet_sockaddrport(const struct sockaddr_storage *addr)
+inet_sockaddrport(const sockaddr_t *addr)
 {
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		return addr6->sin6_port;
 	}
 
 	/* Note: this might be AF_UNSPEC if it is the sequence number of
 	 * a virtual server in a virtual server group */
-	const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+	const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 	return addr4->sin_port;
 }
 
 void
-inet_set_sockaddrport(struct sockaddr_storage *addr, uint16_t port)
+inet_set_sockaddrport(sockaddr_t *addr, uint16_t port)
 {
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		addr6->sin6_port = port;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		addr4->sin_port = port;
 	}
 }
 
 const char *
-inet_sockaddrtopair(const struct sockaddr_storage *addr)
+inet_sockaddrtopair(const sockaddr_t *addr)
 {
 	char addr_str[INET6_ADDRSTRLEN];
 	static char ret[sizeof(addr_str) + 8];	/* '[' + addr_str + ']' + ':' + 'nnnnn' */
@@ -686,7 +758,7 @@ inet_sockaddrtopair(const struct sockaddr_storage *addr)
 }
 
 char *
-inet_sockaddrtotrio_r(const struct sockaddr_storage *addr, uint16_t proto, char *buf)
+inet_sockaddrtotrio_r(const sockaddr_t *addr, uint16_t proto, char *buf)
 {
 	char addr_str[INET6_ADDRSTRLEN];
 	const char *proto_str =
@@ -702,7 +774,7 @@ inet_sockaddrtotrio_r(const struct sockaddr_storage *addr, uint16_t proto, char 
 }
 
 const char *
-inet_sockaddrtotrio(const struct sockaddr_storage *addr, uint16_t proto)
+inet_sockaddrtotrio(const sockaddr_t *addr, uint16_t proto)
 {
 	static char ret[SOCKADDRTRIO_STR_LEN];
 
@@ -712,21 +784,21 @@ inet_sockaddrtotrio(const struct sockaddr_storage *addr, uint16_t proto)
 }
 
 uint32_t __attribute__ ((pure))
-inet_sockaddrip4(const struct sockaddr_storage *addr)
+inet_sockaddrip4(const sockaddr_t *addr)
 {
 	if (addr->ss_family != AF_INET)
 		return 0xffffffff;
 
-	return ((const struct sockaddr_in *) addr)->sin_addr.s_addr;
+	return PTR_CAST_CONST(struct sockaddr_in, addr)->sin_addr.s_addr;
 }
 
 int
-inet_sockaddrip6(const struct sockaddr_storage *addr, struct in6_addr *ip6)
+inet_sockaddrip6(const sockaddr_t *addr, struct in6_addr *ip6)
 {
 	if (addr->ss_family != AF_INET6)
 		return -1;
 
-	*ip6 = ((const struct sockaddr_in6 *) addr)->sin6_addr;
+	*ip6 = PTR_CAST_CONST(struct sockaddr_in6, addr)->sin6_addr;
 	return 0;
 }
 
@@ -737,7 +809,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 	int64_t addr_diff;
 
 	if (family == AF_INET) {
-		addr_diff = (int64_t)ntohl(*((const uint32_t *) a)) - (int64_t)ntohl(*((const uint32_t *) b));
+		addr_diff = (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, a)) - (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, b));
 		if (addr_diff > 0)
 			return 1;
 		if (addr_diff < 0)
@@ -749,7 +821,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 		int i;
 
 		for (i = 0; i < 4; i++ ) {
-			addr_diff = (int64_t)ntohl(((const uint32_t *) (a))[i]) - (int64_t)ntohl(((const uint32_t *) (b))[i]);
+			addr_diff = (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (a))[i]) - (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (b))[i]);
 			if (addr_diff > 0)
 				return 1;
 			if (addr_diff < 0)
@@ -761,20 +833,21 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 	return -2;
 }
 
+/* inet_sockaddcmp is similar to sockstorage_equal except the latter also compares the port */
 int  __attribute__ ((pure))
-inet_sockaddrcmp(const struct sockaddr_storage *a, const struct sockaddr_storage *b)
+inet_sockaddrcmp(const sockaddr_t *a, const sockaddr_t *b)
 {
 	if (a->ss_family != b->ss_family)
 		return -2;
 
 	if (a->ss_family == AF_INET)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in *) a)->sin_addr,
-				      &((const struct sockaddr_in *) b)->sin_addr);
+				      &PTR_CAST_CONST(struct sockaddr_in, a)->sin_addr,
+				      &PTR_CAST_CONST(struct sockaddr_in, b)->sin_addr);
 	if (a->ss_family == AF_INET6)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in6 *) a)->sin6_addr,
-				      &((const struct sockaddr_in6 *) b)->sin6_addr);
+				      &PTR_CAST_CONST(struct sockaddr_in6, a)->sin6_addr,
+				      &PTR_CAST_CONST(struct sockaddr_in6, b)->sin6_addr);
 	return 0;
 }
 
@@ -859,9 +932,12 @@ format_mac_buf(char *op, size_t op_len, const unsigned char *addr, size_t addr_l
 		return;
 	}
 
-	for (i = 0; i < addr_len; i++)
+	for (i = 0; i < addr_len; i++) {
 		op += snprintf(op, buf_end - op, "%.2x%s",
 		      addr[i], i < addr_len -1 ? ":" : "");
+		if (op >= buf_end - 1)
+			break;
+	}
 }
 
 /* Getting localhost official canonical name */
@@ -918,9 +994,25 @@ integer_to_string(const int value, char *str, size_t size)
 	return len;
 }
 
+/* Like ctime_r() but to microseconds and no terminating '\n'.
+   Buf must be at least 32 bytes */
+char *
+ctime_us_r(const timeval_t *timep, char *buf)
+{
+	struct tm tm;
+
+	localtime_r(&timep->tv_sec, &tm);
+	asctime_r(&tm, buf);
+	snprintf(buf + 19, 8, ".%6.6ld", timep->tv_usec);
+	strftime(buf + 26, 6, " %Y", &tm);
+
+	return buf;
+}
+
 /* We need to use O_NOFOLLOW if opening a file for write, so that a non privileged user can't
  * create a symbolic link from the path to a system file and cause a system file to be overwritten. */
-FILE *fopen_safe(const char *path, const char *mode)
+FILE * __attribute__((malloc))
+fopen_safe(const char *path, const char *mode)
 {
 	int fd;
 	FILE *file;
@@ -1046,8 +1138,6 @@ set_std_fd(bool force)
 		}
 	}
 
-	signal_fd_close(STDERR_FILENO+1);
-
 	/* coverity[leaked_handle] */
 }
 
@@ -1064,20 +1154,8 @@ int
 open_pipe(int pipe_arr[2])
 {
 	/* Open pipe */
-#ifdef HAVE_PIPE2
 	if (pipe2(pipe_arr, O_CLOEXEC | O_NONBLOCK) == -1)
-#else
-	if (pipe(pipe_arr) == -1)
-#endif
 		return -1;
-
-#ifndef HAVE_PIPE2
-	fcntl(pipe_arr[0], F_SETFL, O_NONBLOCK | fcntl(pipe_arr[0], F_GETFL));
-	fcntl(pipe_arr[1], F_SETFL, O_NONBLOCK | fcntl(pipe_arr[1], F_GETFL));
-
-	fcntl(pipe_arr[0], F_SETFD, FD_CLOEXEC | fcntl(pipe_arr[0], F_GETFD));
-	fcntl(pipe_arr[1], F_SETFD, FD_CLOEXEC | fcntl(pipe_arr[1], F_GETFD));
-#endif
 
 	return 0;
 }
@@ -1086,8 +1164,16 @@ open_pipe(int pipe_arr[2])
 /*
  * memcmp time constant variant.
  * Need to ensure compiler doesnt get too smart by optimizing generated asm code.
+ * So long as LTO is not in use, the loop cannot be short-circuited since the
+ * compiler doesn't know how ret is used.
+ * If LTO is in use, there is a risk that the compiler/linker will work out
+ * that the return value is only checked for non-zero, and that since the loop
+ * can only set additional bits in ret, once ret becomes non-zero it can return
+ * a non-zero value. We there need to ensure that a local copy of the function,
+ * which can then be optimised, cannot be generated. Stopping inlining and cloning
+ * should force this.
  */
-__attribute__((optimize("O0"))) int
+__attribute__((pure, noinline, ATTRIBUTE_NOCLONE)) int
 memcmp_constant_time(const void *s1, const void *s2, size_t n)
 {
 	const unsigned char *a, *b;
@@ -1105,6 +1191,57 @@ memcmp_constant_time(const void *s1, const void *s2, size_t n)
  */
 
 #if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
+
+#ifdef _HAVE_LIBKMOD_
+bool
+keepalived_modprobe(const char *mod_name)
+{
+	struct kmod_ctx *ctx;
+	struct kmod_list *list = NULL, *l;
+	int err;
+	int flags;
+	const char *null_config = NULL;
+
+	if (!(ctx = kmod_new(NULL, &null_config))) {
+		log_message(LOG_INFO, "kmod_new failed, err %d - %m", errno);
+
+		return false;
+	}
+
+	kmod_load_resources(ctx);
+
+	err = kmod_module_new_from_lookup(ctx, mod_name, &list);
+	if (list == NULL || err < 0) {
+		log_message(LOG_INFO, "kmod_module_new_from_lookup failed - err %d", -err);
+		kmod_unref(ctx);
+		return false;
+	}
+
+	flags = KMOD_PROBE_APPLY_BLACKLIST_ALIAS_ONLY; // | KMOD_PROBE_FAIL_ON_LOADED;
+	kmod_list_foreach(l, list) {
+		struct kmod_module *mod = kmod_module_get_module(l);
+		err = kmod_module_probe_insert_module(mod, flags, NULL, NULL, NULL, NULL);
+		if (err < 0) {
+			errno = -err;
+			log_message(LOG_INFO, "kmod_module_probe_insert_module %s failed - err %d - %m", kmod_module_get_name(mod), -err);
+			kmod_module_unref(mod);
+			kmod_module_unref_list(list);
+			kmod_unref(ctx);
+			return false;
+		}
+
+		kmod_module_unref(mod);
+	}
+
+	kmod_module_unref_list(list);
+
+	kmod_unref(ctx);
+
+	return true;
+}
+
+#else
+
 static char*
 get_modprobe(void)
 {
@@ -1164,36 +1301,85 @@ keepalived_modprobe(const char *mod_name)
 	sigemptyset(&act.sa_mask);
 	act.sa_flags = 0;
 
-	sigaction ( SIGCHLD, &act, &old_act);
+	sigaction(SIGCHLD, &act, &old_act);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		flush_log_file();
 #endif
 
-	if (!(child = fork())) {
-		args.args = argv;
-		/* coverity[tainted_string] */
-		execv(argv[0], args.execve_args);
-		exit(1);
-	}
+	do {
+		if (!(child = fork())) {
+			args.args = argv;
+			/* coverity[tainted_string] */
+			execv(argv[0], args.execve_args);
+			exit(1);
+		}
 
-	rc = waitpid(child, &status, 0);
+		rc = waitpid(child, &status, 0);
+		if (rc < 0)
+			log_message(LOG_INFO, "modprobe: waitpid error (%s)"
+					    , strerror(errno));
 
-	sigaction ( SIGCHLD, &old_act, NULL);
+		/* It has been reported (see issue #2040) that some modprobes
+		 * do not support the -s option, so try without if we get a
+		 * failure. */
+		if (!WIFEXITED(status) || !WEXITSTATUS(status))
+			break;
 
-	if (rc < 0) {
-		log_message(LOG_INFO, "IPVS: waitpid error (%s)"
-				    , strerror(errno));
-	}
+		if (!argv[2])
+			break;
+
+		argv[1] = mod_name;
+		argv[2] = NULL;
+	 } while (true);
+
+	sigaction(SIGCHLD, &old_act, NULL);
 
 	if (modprobe)
 		FREE(modprobe);
 
-	if (!WIFEXITED(status) || WEXITSTATUS(status)) {
-		return true;
-	}
-
-	return false;
+	return WIFEXITED(status) && !WEXITSTATUS(status);
 }
 #endif
+#endif
+
+void
+set_tmp_dir(void)
+{
+	if (!(tmp_dir = getenv("TMPDIR")) || tmp_dir[0] != '/')
+		tmp_dir = KA_TMP_DIR;
+}
+
+const char *
+make_tmp_filename(const char *file_name)
+{
+	size_t tmp_dir_len = strlen(tmp_dir);
+	char *path = MALLOC(tmp_dir_len + 1 + strlen(file_name) + 1);
+
+	strcpy(path, tmp_dir);
+	path[tmp_dir_len] = '/';
+	strcpy(path + tmp_dir_len + 1, file_name);
+
+	return path;
+}
+
+void
+log_stopping(void)
+{
+	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
+		struct rusage usage, child_usage;
+
+		getrusage(RUSAGE_SELF, &usage);
+		getrusage(RUSAGE_CHILDREN, &child_usage);
+
+		if (child_usage.ru_utime.tv_sec || child_usage.ru_utime.tv_usec)
+			log_message(LOG_INFO, "Stopped - used (self/children) %ld.%6.6ld/%ld.%6.6ld user time, %ld.%6.6ld/%ld.%6.6ld system time",
+					usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, child_usage.ru_utime.tv_sec, child_usage.ru_utime.tv_usec,
+					usage.ru_stime.tv_sec, usage.ru_stime.tv_usec, child_usage.ru_stime.tv_sec, child_usage.ru_stime.tv_usec);
+		else
+			log_message(LOG_INFO, "Stopped - used %ld.%6.6ld user time, %ld.%6.6ld system time",
+					usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	} else
+		log_message(LOG_INFO, "Stopped");
+}

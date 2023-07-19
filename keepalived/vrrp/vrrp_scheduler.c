@@ -69,13 +69,23 @@
 /* For load testing recvmsg() */
 /* #define DEBUG_RECVMSG */
 
+/* For _RECVMSG_DEBUG_ we want load testing code as well */
+#ifdef _RECVMSG_DEBUG_
+#define DEBUG_RECVMSG	1
+#endif
+
 /* global vars */
 timeval_t garp_next_time;
 thread_ref_t garp_thread;
 bool vrrp_initialised;
+timeval_t vrrp_delayed_start_time;
 
 #ifdef _TSM_DEBUG_
 bool do_tsm_debug;
+#endif
+#ifdef _RECVMSG_DEBUG_
+bool do_recvmsg_debug;
+bool do_recvmsg_debug_dump;
 #endif
 
 /* local variables */
@@ -184,9 +194,13 @@ vrrp_init_state(list_head_t *l)
 	/* Do notifications for any sync groups in fault or backup state */
 	list_for_each_entry(vgroup, &vrrp_data->vrrp_sync_group, e_list) {
 		/* Init group if needed  */
-		if (vgroup->state == VRRP_STATE_FAULT ||
-		    vgroup->state == VRRP_STATE_BACK)
+		if ((vgroup->state == VRRP_STATE_FAULT ||
+		     vgroup->state == VRRP_STATE_BACK) &&
+		    !vgroup->state_same_at_reload)
 			send_group_notifies(vgroup);
+		else if (reload && global_data->fifo_write_vrrp_states_on_reload)
+			notify_group_fifo(vgroup);
+		vgroup->state_same_at_reload = false;
 	}
 
 	list_for_each_entry(vrrp, l, e_list) {
@@ -230,10 +244,11 @@ vrrp_init_state(list_head_t *l)
 // TODO Do we need ->	vrrp_restore_interface(vrrp, false, false);
 // It removes everything, so probably if !reload
 		} else {
-			if (new_state == VRRP_STATE_BACK && vrrp->wantstate == VRRP_STATE_MAST)
+			if (new_state == VRRP_STATE_BACK && vrrp->wantstate == VRRP_STATE_MAST) {
+				/* We need to allow one adver_int to pass to ensure there is no other master */
 				vrrp->ms_down_timer = vrrp->master_adver_int + VRRP_TIMER_SKEW_MIN(vrrp);
-			else
-				vrrp->ms_down_timer = 3 * vrrp->master_adver_int + VRRP_TIMER_SKEW(vrrp);
+			} else
+				vrrp->ms_down_timer = VRRP_MS_DOWN_TIMER(vrrp);
 
 #ifdef _WITH_SNMP_RFCV3_
 			vrrp->stats->next_master_reason = VRRPV3_MASTER_REASON_MASTER_NO_RESPONSE;
@@ -252,7 +267,10 @@ vrrp_init_state(list_head_t *l)
 
 			/* Set interface state */
 			vrrp_restore_interface(vrrp, false, false);
-			if (is_up && new_state != VRRP_STATE_FAULT && !vrrp->num_script_init && (!vrrp->sync || !vrrp->sync->num_member_init)) {
+			if (is_up &&
+			    new_state != VRRP_STATE_FAULT &&
+			    !vrrp->num_script_init &&
+			    (!vrrp->sync || !vrrp->sync->num_member_init)) {
 				if (vrrp->state != VRRP_STATE_BACK) {
 					log_message(LOG_INFO, "(%s) Entering BACKUP STATE (init)", vrrp->iname);
 					vrrp->state = VRRP_STATE_BACK;
@@ -264,11 +282,13 @@ vrrp_init_state(list_head_t *l)
 					log_message(LOG_INFO, "(%s) Entering FAULT STATE (init)", vrrp->iname);
 				vrrp->state = VRRP_STATE_FAULT;
 			}
-			if (vrrp_begin_state != vrrp->state) {
-				if (vrrp->state != VRRP_STATE_FAULT || vrrp->num_script_if_fault)
-					send_instance_notifies(vrrp);
+			if (vrrp_begin_state != vrrp->state)
 				vrrp->last_transition = timer_now();
-			}
+			if (vrrp_begin_state != vrrp->state &&
+			    (vrrp->state != VRRP_STATE_FAULT || vrrp->num_script_if_fault))
+				send_instance_notifies(vrrp);
+			else if (reload && global_data->fifo_write_vrrp_states_on_reload)
+				notify_instance_fifo(vrrp);
 		}
 #ifdef _WITH_SNMP_RFC_
 		vrrp->stats->uptime = timer_now();
@@ -276,8 +296,8 @@ vrrp_init_state(list_head_t *l)
 	}
 }
 
-/* Declare vrrp_timer_cmp() rbtree compare function */
-RB_TIMER_CMP(vrrp);
+/* Declare vrrp_timer_less() rbtree compare function */
+RB_TIMER_LESS(vrrp, rb_sands);
 
 /* Compute the new instance sands */
 void
@@ -297,12 +317,15 @@ vrrp_init_instance_sands(vrrp_t *vrrp)
 		 * time_now plus the Master Down Timer, when a non-preemptable packet is
 		 * received.
 		 */
-		vrrp->sands = timer_add_long(time_now, vrrp->ms_down_timer);
+		if (vrrp_delayed_start_time.tv_sec)
+			vrrp->sands = timer_add_long(vrrp_delayed_start_time, vrrp->ms_down_timer);
+		else
+			vrrp->sands = timer_add_long(time_now, vrrp->ms_down_timer);
 	}
 	else if (vrrp->state == VRRP_STATE_FAULT || vrrp->state == VRRP_STATE_INIT)
 		vrrp->sands.tv_sec = TIMER_DISABLED;
 
-	rb_move_cached(&vrrp->sockets->rb_sands, vrrp, rb_sands, vrrp_timer_cmp);
+	rb_move_cached(&vrrp->rb_sands, &vrrp->sockets->rb_sands, vrrp_timer_less);
 }
 
 static void
@@ -312,7 +335,7 @@ vrrp_init_sands(list_head_t *l)
 
 	list_for_each_entry(vrrp, l, e_list) {
 		vrrp->sands.tv_sec = TIMER_DISABLED;
-		rb_insert_sort_cached(&vrrp->sockets->rb_sands, vrrp, rb_sands, vrrp_timer_cmp);
+		rb_add_cached(&vrrp->rb_sands, &vrrp->sockets->rb_sands, vrrp_timer_less);
 		vrrp_init_instance_sands(vrrp);
 		vrrp->reload_master = false;
 	}
@@ -324,7 +347,8 @@ vrrp_init_script(list_head_t *l)
 	vrrp_script_t *vscript;
 
 	list_for_each_entry(vscript, l, e_list) {
-		if (vscript->init_state == SCRIPT_INIT_STATE_INIT)
+		if (vscript->init_state == SCRIPT_INIT_STATE_INIT ||
+		    vscript->init_state == SCRIPT_INIT_STATE_INIT_RELOAD)
 			vscript->result = vscript->rise - 1; /* one success is enough */
 		else if (vscript->init_state == SCRIPT_INIT_STATE_FAILED)
 			vscript->result = 0; /* assume failed by config */
@@ -376,7 +400,7 @@ vrrp_register_workers(list_head_t *l)
 // TODO - should we only do this if we have track_bfd? Probably not
 		/* Init BFD tracking thread */
 		bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-					     bfd_vrrp_event_pipe[0], TIMER_NEVER, false);
+					     bfd_vrrp_event_pipe[0], TIMER_NEVER, 0);
 	}
 #endif
 
@@ -385,7 +409,7 @@ vrrp_register_workers(list_head_t *l)
 		/* Register a timer thread if interface exists */
 		if (sock->fd_in != -1)
 			sock->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
-						       sock, sock->fd_in, vrrp_compute_timer(sock), false);
+						       sock, sock->fd_in, vrrp_compute_timer(sock), 0);
 	}
 }
 
@@ -393,12 +417,16 @@ void
 vrrp_thread_add_read(vrrp_t *vrrp)
 {
 	vrrp->sockets->thread = thread_add_read_sands(master, vrrp_read_dispatcher_thread,
-						vrrp->sockets, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets), false);
+						vrrp->sockets, vrrp->sockets->fd_in, vrrp_compute_timer(vrrp->sockets), 0);
 }
 
 /* VRRP dispatcher functions */
 static sock_t * __attribute__ ((pure))
-already_exist_sock(list_head_t *l, sa_family_t family, int proto, interface_t *ifp, const struct sockaddr_storage *unicast_src)
+already_exist_sock(const list_head_t *l, sa_family_t family, int proto, const interface_t *ifp,
+#ifdef _HAVE_VRF_
+		   const interface_t *vrf_ifp,
+#endif
+		   const sockaddr_t *mcast_daddr, const sockaddr_t *unicast_src)
 {
 	sock_t *sock;
 
@@ -406,7 +434,11 @@ already_exist_sock(list_head_t *l, sa_family_t family, int proto, interface_t *i
 		if ((sock->family == family)	&&
 		    (sock->proto == proto)	&&
 		    (sock->ifp == ifp)		&&
-		    ((!unicast_src && !sock->unicast_src) ||
+#ifdef _HAVE_VRF_
+		    (sock->vrf_ifp == vrf_ifp)	&&
+#endif
+		    (!unicast_src == !sock->unicast_src) &&
+		    ((!unicast_src && !inet_sockaddrcmp(sock->mcast_daddr, mcast_daddr)) ||
 		     (unicast_src && !inet_sockaddrcmp(sock->unicast_src, unicast_src))))
 			return sock;
 	}
@@ -415,7 +447,11 @@ already_exist_sock(list_head_t *l, sa_family_t family, int proto, interface_t *i
 }
 
 static sock_t *
-alloc_sock(sa_family_t family, list_head_t *l, int proto, interface_t *ifp, const struct sockaddr_storage *unicast_src)
+alloc_sock(list_head_t *l, sa_family_t family, int proto, interface_t *ifp,
+#ifdef _HAVE_VRF_
+	   const interface_t *vrf_ifp,
+#endif
+	   const sockaddr_t *mcast_daddr, const sockaddr_t *unicast_src)
 {
 	sock_t *new;
 
@@ -425,7 +461,12 @@ alloc_sock(sa_family_t family, list_head_t *l, int proto, interface_t *ifp, cons
 	new->proto = proto;
 	if (unicast_src)
 		new->unicast_src = unicast_src;
+	else
+		new->mcast_daddr = mcast_daddr;
 	new->ifp = ifp;
+#ifdef _HAVE_VRF_
+	new->vrf_ifp = vrf_ifp;
+#endif
 	new->rb_vrid = RB_ROOT;
 	new->rb_sands = RB_ROOT_CACHED;
 
@@ -435,9 +476,15 @@ alloc_sock(sa_family_t family, list_head_t *l, int proto, interface_t *ifp, cons
 }
 
 static inline int
-vrrp_vrid_cmp(const vrrp_t *v1, const vrrp_t *v2)
+vrrp_vrid_cmp(const void *vrid, const rb_node_t *a)
 {
-	return v1->vrid - v2->vrid;
+	return less_equal_greater_than(*PTR_CAST_CONST(uint8_t, vrid), rb_entry_const(a, vrrp_t, rb_vrid)->vrid);
+}
+
+static inline bool
+vrrp_vrid_less(rb_node_t *a, const rb_node_t *b)
+{
+	return rb_entry(a, vrrp_t, rb_vrid)->vrid < rb_entry_const(b, vrrp_t, rb_vrid)->vrid;
 }
 
 static void
@@ -447,20 +494,20 @@ vrrp_create_sockpool(list_head_t *l)
 	interface_t *ifp;
 	int proto;
 	sock_t *sock;
-	struct sockaddr_storage *unicast_src;
+	sockaddr_t *unicast_src;
 
 	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
-		if (list_empty(&vrrp->unicast_peer)) {
-			ifp =
-#ifdef _HAVE_VRRP_VMAC_
-			      (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? vrrp->configured_ifp :
-#endif
-											vrrp->ifp;
+		if (!__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags))
 			unicast_src = NULL;
-		} else {
+		else
 			unicast_src = &vrrp->saddr;
-			ifp = vrrp->ifp;
-		}
+
+		ifp =
+#ifdef _HAVE_VRRP_VMAC_
+		      (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags)) ? vrrp->configured_ifp :
+#endif
+										vrrp->ifp;
+
 		proto = IPPROTO_VRRP;
 #if defined _WITH_VRRP_AUTH_
 		if (vrrp->auth_type == VRRP_AUTH_AH)
@@ -468,11 +515,19 @@ vrrp_create_sockpool(list_head_t *l)
 #endif
 
 		/* add the vrrp element if not exist */
-		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifp, unicast_src)))
-			sock = alloc_sock(vrrp->family, l, proto, ifp, unicast_src);
+		if (!(sock = already_exist_sock(l, vrrp->family, proto, ifp,
+#ifdef _HAVE_VRF_
+						vrrp->vrf_ifp,
+#endif
+						&vrrp->mcast_daddr, unicast_src)))
+			sock = alloc_sock(l, vrrp->family, proto, ifp,
+#ifdef _HAVE_VRF_
+					  vrrp->vrf_ifp,
+#endif
+					  &vrrp->mcast_daddr, unicast_src);
 
 		/* Add the vrrp_t indexed by vrid to the socket */
-		rb_insert_sort(&sock->rb_vrid, vrrp, rb_vrid, vrrp_vrid_cmp);
+		rb_add(&vrrp->rb_vrid, &sock->rb_vrid, vrrp_vrid_less);
 
 		if (vrrp->kernel_rx_buf_size)
 			sock->rx_buf_size += vrrp->kernel_rx_buf_size;
@@ -491,11 +546,17 @@ vrrp_open_sockpool(list_head_t *l)
 	sock_t *sock;
 
 	list_for_each_entry(sock, l, e_list) {
-		if (sock->ifp && !sock->ifp->ifindex) {
+		if ((sock->ifp && !sock->ifp->ifindex)
+#ifdef _HAVE_VRF_
+		    || (sock->vrf_ifp && !sock->vrf_ifp->ifindex)
+#endif
+								   )
+		{
 			sock->fd_in = sock->fd_out = -1;
 			continue;
 		}
 
+		/* coverity[var_deref_model] */
 		open_sockpool_socket(sock);
 	}
 }
@@ -547,6 +608,7 @@ vrrp_dispatcher_init(__attribute__((unused)) thread_ref_t thread)
 		dump_sock_list(NULL, &vrrp_data->vrrp_socket_pool);
 
 	vrrp_initialised = true;
+	UNSET_RELOAD;
 }
 
 #ifdef _WITH_BFD_
@@ -598,13 +660,6 @@ vrrp_lower_prio_gratuitous_arp_thread(thread_ref_t thread)
 	vrrp_send_link_update(vrrp, vrrp->garp_lower_prio_rep);
 }
 
-static void
-vrrp_master(vrrp_t * vrrp)
-{
-	/* Send the VRRP advert */
-	vrrp_state_master_tx(vrrp);
-}
-
 void
 try_up_instance(vrrp_t *vrrp, bool leaving_init)
 {
@@ -628,7 +683,6 @@ try_up_instance(vrrp_t *vrrp, bool leaving_init)
 	}
 
 	if (vrrp->wantstate == VRRP_STATE_MAST && vrrp->base_priority == VRRP_PRIO_OWNER) {
-		vrrp->wantstate = VRRP_STATE_MAST;
 #ifdef _WITH_SNMP_RFCV3_
 		vrrp->stats->next_master_reason = VRRPV3_MASTER_REASON_PREEMPTED;
 #endif
@@ -643,7 +697,7 @@ try_up_instance(vrrp_t *vrrp, bool leaving_init)
 	if (vrrp->wantstate == VRRP_STATE_MAST && vrrp->base_priority == VRRP_PRIO_OWNER)
 		vrrp->ms_down_timer = vrrp->master_adver_int + VRRP_TIMER_SKEW(vrrp);
 	else
-		vrrp->ms_down_timer = 3 * vrrp->master_adver_int + VRRP_TIMER_SKEW(vrrp);
+		vrrp->ms_down_timer = VRRP_MS_DOWN_TIMER(vrrp);
 
 	if (vrrp->sync) {
 		if (leaving_init) {
@@ -668,7 +722,7 @@ try_up_instance(vrrp_t *vrrp, bool leaving_init)
 	 * and we respond. If we don't do this, we can time out and transition to master
 	 * before the master renews its ARP entry, since the master cannot send us adverts
 	 * until it has done so. */
-	if (!list_empty(&vrrp->unicast_peer) &&
+	if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags) &&
 	    vrrp->ifp &&
 	    vrrp->saddr.ss_family != AF_UNSPEC) {
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
@@ -677,11 +731,11 @@ try_up_instance(vrrp_t *vrrp, bool leaving_init)
 		ip_addr.ifp = IF_BASE_IFP(vrrp->ifp);
 
 		if (vrrp->saddr.ss_family == AF_INET) {
-			ip_addr.u.sin.sin_addr.s_addr = ((struct sockaddr_in *)&vrrp->saddr)->sin_addr.s_addr;
+			ip_addr.u.sin.sin_addr.s_addr = PTR_CAST(struct sockaddr_in, &vrrp->saddr)->sin_addr.s_addr;
 			send_gratuitous_arp_immediate(ip_addr.ifp, &ip_addr);
 		} else {
 			/* IPv6 */
-			ip_addr.u.sin6_addr = ((struct sockaddr_in6 *)&vrrp->saddr)->sin6_addr;
+			ip_addr.u.sin6_addr = PTR_CAST(struct sockaddr_in6, &vrrp->saddr)->sin6_addr;
 			ndisc_send_unsolicited_na_immediate(ip_addr.ifp, &ip_addr);
 		}
 	}
@@ -760,8 +814,13 @@ vrrp_bfd_thread(thread_ref_t thread)
 {
 	bfd_event_t evt;
 
+	if (thread->type == THREAD_READ_ERROR) {
+		thread_close_fd(thread);
+		return;
+	}
+
 	bfd_thread = thread_add_read(master, vrrp_bfd_thread, NULL,
-				     thread->u.f.fd, TIMER_NEVER, false);
+				     thread->u.f.fd, TIMER_NEVER, 0);
 
 	if (thread->type != THREAD_READY_READ_FD)
 		return;
@@ -793,7 +852,7 @@ vrrp_dispatcher_read_timeout(sock_t *sock)
 			vrrp_goto_master(vrrp);
 		}
 		else if (vrrp->state == VRRP_STATE_MAST)
-			vrrp_master(vrrp);
+			vrrp_state_master_tx(vrrp);
 
 		/* handle instance synchronization */
 #ifdef _TSM_DEBUG_
@@ -814,15 +873,15 @@ static int
 vrrp_dispatcher_read(sock_t *sock)
 {
 	vrrp_t *vrrp;
+	rb_node_t *vrrp_node;
 	const vrrphdr_t *hd;
 	ssize_t len = 0;
 	int prev_state = 0;
-	struct sockaddr_storage src_addr = { .ss_family = AF_UNSPEC };
-	vrrp_t vrrp_lookup;
+	sockaddr_t src_addr = { .ss_family = AF_UNSPEC };
 #ifdef _NETWORK_TIMESTAMP_
-	char control_buf[128];
+	char control_buf[128] __attribute__((aligned(__alignof__(struct cmsghdr))));
 #else
-	char control_buf[64];
+	char control_buf[64] __attribute__((aligned(__alignof__(struct cmsghdr))));
 #endif
 	struct iovec iovec = { .iov_base = vrrp_buffer, .iov_len = vrrp_buffer_len };
 	struct msghdr msghdr = { .msg_name = &src_addr, .msg_namelen = sizeof(src_addr),
@@ -837,6 +896,7 @@ vrrp_dispatcher_read(sock_t *sock)
 	unsigned recv_data_count = 0;
 #endif
 	const struct iphdr *iph;
+	unicast_peer_t *unicast_peer;
 
 	/* Strategy here is to handle incoming adverts pending into socket recvq
 	 * but stop if receive 2nd advert for a VRID on socket (this applies to
@@ -849,27 +909,49 @@ vrrp_dispatcher_read(sock_t *sock)
 		       check_EINTR(errno) && eintr_count++ < 10);
 		if (len < 0) {
 #ifdef DEBUG_RECVMSG
-			if (check_EINTR(errno))
-				log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before terminating loop"
-						    , sock->fd_in, eintr_count);
+#ifdef _RECVMSG_DEBUG_
+			if (do_recvmsg_debug && (!recv_data_count || !check_EAGAIN(errno)))
+				log_message(LOG_INFO, "recvmsg(%d) returned errno %d, %u eintr", sock->fd_in, errno, eintr_count);
+#endif
+
+#ifdef _RECVMSG_DEBUG_
+			if (do_recvmsg_debug)
+#endif
+			{
+				if (check_EINTR(errno))
+					log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before terminating loop"
+							    , sock->fd_in, eintr_count);
+			}
 #endif
 
 			if (!check_EAGAIN(errno))
 				log_message(LOG_INFO, "recvmsg(%d) returned %d (%m)"
 						    , sock->fd_in, errno);
 #ifdef DEBUG_RECVMSG
-			else if (recv_data_count == 0)
+			else if (
+#ifdef _RECVMSG_DEBUG_
+				 do_recvmsg_debug &&
+#endif
+				 recv_data_count == 0)
 				log_message(LOG_INFO, "recvmsg(%d) returned EAGAIN without any data being received"
 						    , sock->fd_in);
 
-			if (recv_data_count != 1)
-				log_message(LOG_INFO, "recvmsg(%d) loop received %u packets"
-						    , sock->fd_in, recv_data_count);
+#ifdef _RECVMSG_DEBUG_
+			if (do_recvmsg_debug)
+#endif
+			{
+				if (recv_data_count != 1)
+					log_message(LOG_INFO, "recvmsg(%d) loop received %u packets"
+							    , sock->fd_in, recv_data_count);
+			}
 #endif
 			break;
 		}
-
-#ifdef DEBUG_RECVMSG
+#ifdef _RECVMSG_DEBUG_
+		else if (do_recvmsg_debug)
+			log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before returning %zd bytes from %s"
+					    , sock->fd_in, eintr_count, len, inet_sockaddrtos(&src_addr));
+#elif defined DEBUG_RECVMSG
 		if (eintr_count)
 			log_message(LOG_INFO, "recvmsg(%d) looped %u times due to EINTR before returning %ld"
 					    , sock->fd_in, eintr_count, len);
@@ -880,6 +962,12 @@ vrrp_dispatcher_read(sock_t *sock)
 			log_message(LOG_INFO, "recvmsg(%d) returned data length 0", sock->fd_in);
 			continue;
 		}
+
+#ifdef _RECVMSG_DEBUG_
+		if (do_recvmsg_debug_dump) {
+			log_buffer("Received data", vrrp_buffer, len);
+		}
+#endif
 
 #ifdef DEBUG_RECVMSG
 		recv_data_count++;
@@ -897,10 +985,24 @@ vrrp_dispatcher_read(sock_t *sock)
 			msghdr.msg_controllen = 0;
 		}
 
+		if (vrrp_delayed_start_time.tv_sec)
+			continue;
+
 		/* Check the received data includes at least the IP, possibly
 		 * the AH header and the VRRP header */
 		if (!(hd = vrrp_get_header(sock->family, vrrp_buffer, len)))
 			break;
+
+		vrrp_node = rb_find(&hd->vrid, &sock->rb_vrid, vrrp_vrid_cmp);
+
+		/* No instance found => ignore the advert */
+		if (!vrrp_node) {
+			if (global_data->log_unknown_vrids)
+				log_message(LOG_INFO, "Unknown VRID(%d) received on interface(%s). ignoring..."
+						    , hd->vrid, IF_NAME(sock->ifp));
+			continue;
+		}
+		vrrp = rb_entry(vrrp_node, vrrp_t, rb_vrid);
 
 		/* Defense strategy here is to handle no more than one advert
 		 * per VRID in order to flush socket rcvq...
@@ -908,15 +1010,47 @@ vrrp_dispatcher_read(sock_t *sock)
 		if (__test_and_set_bit_array(hd->vrid, rx_vrid_map))
 			terminate_receiving = true;
 
-		vrrp_lookup.vrid = hd->vrid;
-		vrrp = rb_search(&sock->rb_vrid, &vrrp_lookup, rb_vrid, vrrp_vrid_cmp);
+		if (__test_bit(VRRP_FLAG_UNICAST_DUPLICATE_VRID, &vrrp->flags)) {
+			rb_node_t *first = vrrp_node;	/* Save for second loop */
 
-		/* No instance found => ignore the advert */
-		if (!vrrp) {
-			if (global_data->log_unknown_vrids)
-				log_message(LOG_INFO, "Unknown VRID(%d) received on interface(%s). ignoring..."
-						    , hd->vrid, IF_NAME(sock->ifp));
-			continue;
+			/* First check the address we last received an advert from. This is
+			 * an optimisation since we are most likely to receive an advert from
+			 * the same address as last time, and it saves searching all the peers. */
+			for (; vrrp_node; vrrp_node = rb_next_match(&hd->vrid, vrrp_node, vrrp_vrid_cmp)) {
+				vrrp = rb_entry(vrrp_node, vrrp_t, rb_vrid);
+				if (!inet_sockaddrcmp(&src_addr, &vrrp->pkt_saddr))
+					break;
+			}
+
+			if (!vrrp_node) {
+				/* Loop through VRRP instances matching hd->vrid if unicast to match
+				 * src address of packet against configured peers */
+				for (vrrp_node = first; vrrp_node; vrrp_node = rb_next_match(&hd->vrid, vrrp_node, vrrp_vrid_cmp)) {
+					vrrp = rb_entry(vrrp_node, vrrp_t, rb_vrid);
+
+					list_for_each_entry(unicast_peer, &vrrp->unicast_peer, e_list) {
+						if (inet_sockaddrcmp(&src_addr, &unicast_peer->address) == 0)
+							break;
+						if (list_is_last(&unicast_peer->e_list, &vrrp->unicast_peer)) {
+							unicast_peer = NULL;
+							break;
+						}
+					}
+
+					/* We have found the matching peer */
+					if (unicast_peer)
+						break;
+				}
+
+				if (!vrrp_node) {
+					/* Do nothing and fail because we didn't match any good instance */
+					if (global_data->log_unknown_vrids)
+						log_message(LOG_INFO, "Unknown VRID(%d) received on interface(%s) from %s. ignoring..."
+								    , hd->vrid, IF_NAME(sock->ifp), inet_sockaddrtos(&src_addr));
+
+					continue;
+				}
+			}
 		}
 
 		if (vrrp->state == VRRP_STATE_FAULT || vrrp->state == VRRP_STATE_INIT) {
@@ -929,7 +1063,7 @@ vrrp_dispatcher_read(sock_t *sock)
 		vrrp->pkt_saddr = src_addr;
 		vrrp->rx_ttl_hop_limit = -1;           /* Default to not received */
 		if (sock->family == AF_INET) {
-			iph = (const struct iphdr *)vrrp_buffer;
+			iph = PTR_CAST_CONST(struct iphdr, vrrp_buffer);
 			vrrp->multicast_pkt = IN_MULTICAST(htonl(iph->daddr));
 			vrrp->rx_ttl_hop_limit = iph->ttl;
 		} else
@@ -939,18 +1073,14 @@ vrrp_dispatcher_read(sock_t *sock)
 			if (cmsg->cmsg_level == IPPROTO_IPV6) {
 				expected_cmsg = true;
 
-#ifdef IPV6_RECVHOPLIMIT
 				if (cmsg->cmsg_type == IPV6_HOPLIMIT &&
 				    cmsg->cmsg_len - sizeof(struct cmsghdr) == sizeof(unsigned int))
-					vrrp->rx_ttl_hop_limit = *(unsigned int *)CMSG_DATA(cmsg);
+					vrrp->rx_ttl_hop_limit = *PTR_CAST(unsigned int, CMSG_DATA(cmsg));
 				else
-#endif
-#ifdef IPV6_RECVPKTINFO
 				if (cmsg->cmsg_type == IPV6_PKTINFO &&
 				    cmsg->cmsg_len - sizeof(struct cmsghdr) == sizeof(struct in6_pktinfo))
-					vrrp->multicast_pkt = IN6_IS_ADDR_MULTICAST(&((struct in6_pktinfo *)CMSG_DATA(cmsg))->ipi6_addr);
+					vrrp->multicast_pkt = IN6_IS_ADDR_MULTICAST(&(PTR_CAST(struct in6_pktinfo, CMSG_DATA(cmsg)))->ipi6_addr);
 				else
-#endif
 					expected_cmsg = false;
 			}
 #ifdef _NETWORK_TIMESTAMP_
@@ -987,18 +1117,17 @@ vrrp_dispatcher_read(sock_t *sock)
 						    , cmsg->cmsg_level, cmsg->cmsg_type);
 		}
 
-#ifdef IPV6_RECVPKTINFO
 		/* For multicast, we attempt to bind the socket to ::1 to stop receiving any (non ::1)
 		 * unicast packets, but if that fails we will receive unicast packets on the multicast socket,
 		 * so just discard them here.
 		 * For unicast sockets, if any other instance on the same interface is using multicast we
 		 * will also receive the multicast packets, so also discard them here. */
-		if (sock->family == AF_INET6 && vrrp->multicast_pkt != list_empty(&vrrp->unicast_peer)) {
+		if (sock->family == AF_INET6 && vrrp->multicast_pkt == __test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
 			if (__test_bit(LOG_DETAIL_BIT, &debug))
-				log_message(LOG_INFO, "(%s) discarding %sicast packet on %sicast instance", vrrp->iname, vrrp->multicast_pkt ? "mult" : "un", list_empty(&vrrp->unicast_peer) ? "mult" : "un");
+				log_message(LOG_INFO, "(%s) discarding %sicast packet on %sicast instance", vrrp->iname,
+						vrrp->multicast_pkt ? "mult" : "un", __test_bit(VRRP_FLAG_UNICAST, &vrrp->flags) ? "un" : "mult");
 			continue;
 		}
-#endif
 
 		prev_state = vrrp->state;
 
@@ -1047,7 +1176,7 @@ vrrp_read_dispatcher_thread(thread_ref_t thread)
 	/* register next dispatcher thread */
 	if (fd != -1)
 		sock->thread = thread_add_read_sands(thread->master, vrrp_read_dispatcher_thread,
-						     sock, fd, vrrp_compute_timer(sock), false);
+						     sock, fd, vrrp_compute_timer(sock), 0);
 }
 
 static void
@@ -1230,7 +1359,8 @@ vrrp_script_child_thread(thread_ref_t thread)
 				vscript->result--;
 			} else {
 				if (vscript->result == vscript->rise ||
-				    vscript->init_state == SCRIPT_INIT_STATE_INIT) {
+				    vscript->init_state == SCRIPT_INIT_STATE_INIT ||
+				    vscript->init_state == SCRIPT_INIT_STATE_INIT_RELOAD) {
 					if (reason)
 						log_message(LOG_INFO, "VRRP_Script(%s) %s (%s %d)", vscript->sname, script_exit_type, reason, reason_code);
 					else
@@ -1339,13 +1469,9 @@ dump_threads(void)
 	vrrp_t *vrrp;
 	const char *file_name;
 
-	file_name = make_file_name("/tmp/thread_dump.dat",
+	file_name = make_file_name("thread_dump.dat",
 					"vrrp",
-#if HAVE_DECL_CLONE_NEWNET
 					global_data->network_namespace,
-#else
-					NULL,
-#endif
 					global_data->instance_name);
 	fp = fopen_safe(file_name, "a");
 	FREE_CONST(file_name);

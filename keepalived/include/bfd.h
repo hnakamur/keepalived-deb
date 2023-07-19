@@ -19,8 +19,8 @@
  *
  * Copyright (C) 2015-2017 Alexandre Cassen, <acassen@gmail.com>
  */
-#ifndef _BFD_H_
-#define _BFD_H_
+#ifndef _BFD_H
+#define _BFD_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +28,7 @@
 
 #include "scheduler.h"
 #include "timer.h"
+#include "sockaddr.h"
 
 /*
  *	RFC5881
@@ -36,6 +37,8 @@
 #define BFD_CONTROL_TTL		255
 #define BFD_CONTROL_HOPLIMIT	64
 
+#define	BFD_MULTIHOP_CONTROL_PORT "4784"	// See RFC5883
+
 #define	BFD_MIN_PORT		49152
 #define	BFD_MAX_PORT		65535
 
@@ -43,12 +46,12 @@
  *	Default parameters and limits
  */
 #define BFD_MINRX_MIN		1U
-#define BFD_MINRX_MAX_SENSIBLE	1000U
+#define BFD_MINRX_MAX_SENSIBLE	10000U
 #define BFD_MINRX_MAX		(UINT32_MAX / 1000U)
 #define BFD_MINRX_DEFAULT	10U
 
 #define BFD_MINTX_MIN		1U
-#define BFD_MINTX_MAX_SENSIBLE	1000U
+#define BFD_MINTX_MAX_SENSIBLE	10000U
 #define BFD_MINTX_MAX		(UINT32_MAX / 1000U)
 #define BFD_MINTX_DEFAULT	10U
 
@@ -77,8 +80,8 @@
 typedef struct _bfd {
 	/* Configuration parameters */
 	char			iname[BFD_INAME_MAX];	/* Instance name */
-	struct sockaddr_storage	nbr_addr;		/* Neighbor address */
-	struct sockaddr_storage	src_addr;		/* Source address */
+	sockaddr_t	nbr_addr;		/* Neighbor address */
+	sockaddr_t	src_addr;		/* Source address */
 	uint32_t		local_min_rx_intv;	/* Required min RX interval */
 	uint32_t		local_min_tx_intv;	/* Desired min TX interval */
 	uint32_t		local_idle_tx_intv;	/* Desired idle TX interval */
@@ -86,6 +89,7 @@ typedef struct _bfd {
 	uint8_t			ttl;			/* TTL/hopcount to send */
 	uint8_t			max_hops;		/* Maximum number of hops allowed to be traversed by received packet */
 	bool			passive;		/* Operate in passive mode */
+	bool			multihop;		/* Set for multihop BFD (RFC5883) */
 #ifdef _WITH_VRRP_
 	bool			vrrp;			/* Only send events to VRRP process */
 #endif
@@ -95,6 +99,7 @@ typedef struct _bfd {
 
 	/* Internal variables */
 	int			fd_out;			/* Output socket fd */
+	thread_ref_t		thread_open_fd_out;	/* Open out socket thread, used if cannot open after load/reload */
 	thread_ref_t		thread_out;		/* Output socket thread */
 	unsigned long		sands_out;		/* Output thread sands, used for suspend/resume */
 	thread_ref_t		thread_exp;		/* Expire thread */
@@ -227,8 +232,8 @@ typedef struct _bfdhdr {
  */
 typedef struct _bfdpkt {
 	bfdhdr_t *hdr;
-	struct sockaddr_storage src_addr;
-	struct sockaddr_storage dst_addr;
+	sockaddr_t src_addr;
+	sockaddr_t dst_addr;
 	unsigned int ttl;
 	unsigned int len;
 	const char *buf;
@@ -247,4 +252,4 @@ extern bool bfd_check_packet_ttl(const bfdpkt_t *, const bfd_t *);
 extern void bfd_build_packet(bfdpkt_t * pkt, bfd_t *, char *,
 			     const ssize_t);
 
-#endif				/* _BFD_H_ */
+#endif				/* _BFD_H */

@@ -31,6 +31,7 @@
 
 #include "libipvs.h"
 #include "check_data.h"
+#include "sockaddr.h"
 
 #define IPVS_ERROR	0
 #define IPVS_SUCCESS	1
@@ -53,7 +54,7 @@ struct lvs_syncd_config {
 	unsigned			syncid;		/* 0 .. 255, or PARAMETER_UNSET if not configured */
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 	uint16_t			sync_maxlen;
-	struct sockaddr_storage		mcast_group;
+	sockaddr_t			mcast_group;
 	uint16_t			mcast_port;
 	uint8_t				mcast_ttl;
 #endif
@@ -68,12 +69,17 @@ extern void ipvs_flush_cmd(void);
 extern virtual_server_group_t *ipvs_get_group_by_name(const char *, list_head_t *) __attribute__ ((pure));
 extern void ipvs_group_sync_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge);
 extern void ipvs_group_remove_entry(virtual_server_t *, virtual_server_group_entry_t *);
+extern void unset_vsge_alive(virtual_server_group_entry_t *, const virtual_server_t *);
 extern int ipvs_cmd(int, virtual_server_t *, real_server_t *);
 extern bool ipvs_syncd_changed(const struct lvs_syncd_config *, const struct lvs_syncd_config *) __attribute__((pure));
 extern void ipvs_syncd_cmd(int, const struct lvs_syncd_config *, int, bool);
 #ifdef _WITH_VRRP_
 extern void ipvs_syncd_master(const struct lvs_syncd_config *);
 extern void ipvs_syncd_backup(const struct lvs_syncd_config *);
+#endif
+#ifdef _WITH_NFTABLES_
+extern void remove_fwmark_vs(virtual_server_t *, int);
+extern void add_fwmark_vs(virtual_server_t *, int);
 #endif
 
 /* Refresh statistics at most every 5 seconds */

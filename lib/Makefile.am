@@ -20,9 +20,9 @@ liblib_a_SOURCES	= memory.c utils.c notify.c timer.c scheduler.c \
 			  list_head.c rbtree.c process.c json_writer.c \
 			  bitops.h timer.h scheduler.h vector.h parser.h \
 			  signals.h notify.h logger.h memory.h html.h utils.h \
-			  keepalived_magic.h list_head.h rbtree.h process.h \
-			  rbtree_augmented.h assert_debug.h json_writer.h \
-			  warnings.h container.h
+			  keepalived_magic.h list_head.h rbtree_ka.h rbtree.h \
+			  rbtree_types.h process.h rbtree_augmented.h assert_debug.h \
+			  json_writer.h warnings.h container.h align.h sockaddr.h
 
 liblib_a_LIBADD		=
 EXTRA_liblib_a_SOURCES	=
@@ -32,14 +32,16 @@ if WITH_VRRP
   EXTRA_liblib_a_SOURCES += rttables.c rttables.h
 endif
 
-if ! SOCK_NONBLOCK
-  liblib_a_LIBADD	+= old_socket.o
-  EXTRA_liblib_a_SOURCES += old_socket.c old_socket.h
-endif
-
 if ASSERTS
   liblib_a_LIBADD	+= assert.o
-  EXTRA_liblib_a_SOURCES += assert.c old_socket.h
+  EXTRA_liblib_a_SOURCES += assert.c
+endif
+
+if !ONE_PROCESS_DEBUG
+if WITH_SYSTEMD_NOTIFY
+  liblib_a_LIBADD      += systemd.o
+  EXTRA_liblib_a_SOURCES += systemd.c systemd.h
+endif
 endif
 
 EXTRA_DIST		= $(GIT_COMMIT_FILE)
@@ -57,23 +59,43 @@ FORCE:
 # The one file that needs to be ignored is deletion of snap/snapcraft.yaml,
 # since in a snapcraft build that file is deleted
 # (see https://bugs.launchpad.net/snapcraft/+bug/1662388).
+#
+# Note: date -d "1970-01-01 UTC" fails using Busybox date
+#
 $(GIT_COMMIT_FILE): FORCE
-	@if [ ! -f $(srcdir)/$@ -a ! -f $@ ]; then \
-		echo '#define GIT_DATE	"unknown"' >$@; \
-		echo "#define GIT_YEAR	\"`date +%Y`\"" >>$@; \
+	@if [ ! -f $(srcdir)/$@ ]; then \
+		LATEST_FILE=`ls -t \`find $(srcdir)/.. -type f -name Makefile.am -o -name configure.ac -o -name '*.[ch]' | grep -v "lib/config.h" | grep -v "lib/config_warnings.h" | grep -v "lib/git-commit.h" | grep -v "/test/"\` | head -1`; \
+		LATEST_FILE_DATE=`date -u --reference=$${LATEST_FILE} "+%m/%d,%Y"`; \
+		echo "/* Dates are UTC */" >$(abs_builddir)/$@; \
+		echo "#define GIT_DATE	\"$${LATEST_FILE_DATE}\"" >>$(abs_builddir)/$@; \
+		echo "#define GIT_YEAR	\"`echo $${LATEST_FILE_DATE} | @SED@ -e "s/.*,//"`\"" >>$(abs_builddir)/$@; \
 	fi; \
 	if [ -x `type -p git` ]; then \
 		cd $(srcdir); \
 		git rev-parse --is-inside-work-tree >/dev/null 2>&1; \
-		if [ $$? -eq 0 ]; then \
+		res=$$?; \
+		if [ $$res -eq 0 ]; then \
+			# Check the git root is our parent directory \
+			GIT_ROOT_REL=`git rev-parse --show-cdup`; \
+			if [ $$GIT_ROOT_REL != "../" ]; then \
+				res=1; \
+			fi; \
+		fi; \
+		if [ $$res -eq 0 ]; then \
 			GIT_REV=`git describe --tags`; \
 			GIT_TIMESTAMP=`git log -1 --format=%ct`; \
-			GIT_DATE=`date -d "1970-01-01 UTC $${GIT_TIMESTAMP} seconds" +"%m/%d,%Y"`; \
-			if test -n "$${GIT_DATE}"; then \
-				GIT_YEAR=`date -d "1970-01-01 UTC $${GIT_TIMESTAMP} seconds" +"%Y"`; \
+			date -d "1970-01-01 UTC" >/dev/null 2>&1 ; \
+			if test $$? -eq 0; then \
+				SECONDS_STR="UTC $${GIT_TIMESTAMP} seconds"; \
 			else \
-				GIT_DATE=`git log -1 --date=iso | grep Date: | sed -e "s/^[^ ]* *\(....\)-\(..\)-\(..\).*/\2\/\3,\1/"`; \
-				GIT_YEAR=`echo $${GIT_DATE} | sed -e "s/.*,//"`; \
+				SECONDS_STR="0:0:$${GIT_TIMESTAMP}"; \
+			fi; \
+			GIT_DATE=`date -u +"%m/%d,%Y" -d "1970-01-01 $${SECONDS_STR}"`; \
+			if test -n "$${GIT_DATE}"; then \
+				GIT_YEAR=`date -u +"%Y" -d "1970-01-01 $${SECONDS_STR}"`; \
+			else \
+				GIT_DATE=`git log -1 --date=iso | grep Date: | @SED@ -e "s/^[^ ]* *\(....\)-\(..\)-\(..\).*/\2\/\3,\1/"`; \
+				GIT_YEAR=`echo $${GIT_DATE} | @SED@ -e "s/.*,//"`; \
 			fi; \
 			if [ "`git status --porcelain | \
 			       grep -v '^??' | \
@@ -85,9 +107,10 @@ $(GIT_COMMIT_FILE): FORCE
 			else \
 				EXTRA=""; \
 			fi; \
+			echo "/* Dates are UTC */" >$(abs_builddir)/$@.new; \
 			echo $${GIT_REV} | grep -qE -- "-[1-9][0-9]*-g[0-9a-f]{7,}$$"; \
 			if [ $$? -eq 0 -o -n "$${EXTRA}" ]; then \
-				echo "#define GIT_COMMIT \"$${GIT_REV}$${EXTRA}\"" >$(abs_builddir)/$@.new; \
+				echo "#define GIT_COMMIT \"$${GIT_REV}$${EXTRA}\"" >>$(abs_builddir)/$@.new; \
 			fi; \
 			echo "#define GIT_DATE \"$${GIT_DATE}\"" >>$(abs_builddir)/$@.new; \
 			echo "#define GIT_YEAR \"$${GIT_YEAR}\"" >>$(abs_builddir)/$@.new; \

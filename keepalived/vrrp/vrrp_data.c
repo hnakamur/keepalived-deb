@@ -38,10 +38,8 @@
 #include "vrrp_vmac.h"
 #endif
 #include "vrrp_ipaddress.h"
-#ifdef _HAVE_FIB_ROUTING_
 #include "vrrp_iprule.h"
 #include "vrrp_iproute.h"
-#endif
 #include "vrrp_track.h"
 #include "vrrp_sock.h"
 #ifdef _WITH_SNMP_RFCV3_
@@ -50,11 +48,12 @@
 #include "vrrp_static_track.h"
 #include "parser.h"
 #include "track_file.h"
+#include "vrrp_parser.h"
 
 /* global vars */
 vrrp_data_t *vrrp_data = NULL;
 vrrp_data_t *old_vrrp_data = NULL;
-char *vrrp_buffer;
+void *vrrp_buffer;
 size_t vrrp_buffer_len;
 
 static const char *
@@ -86,7 +85,7 @@ dump_static_track_groups_list(FILE *fp, const list_head_t *l)
 		dump_static_track_group(fp, tgroup);
 }
 
-void
+static_track_group_t *
 alloc_static_track_group(const char *gname)
 {
 	static_track_group_t *new;
@@ -97,17 +96,19 @@ alloc_static_track_group(const char *gname)
 	INIT_LIST_HEAD(&new->vrrp_instances);
 	new->gname = STRDUP(gname);
 
-	list_add_tail(&new->e_list, &vrrp_data->static_track_groups);
+	return new;
 }
 
 /* Static addresses facility function */
 void
 alloc_saddress(const vector_t *strvec)
 {
-	alloc_ipaddress(&vrrp_data->static_addresses, strvec, true);
+	ip_address_t *new_ipaddr;
+
+	if ((new_ipaddr = alloc_ipaddress(strvec, true)))
+		list_add_tail(&new_ipaddr->e_list, &vrrp_data->static_addresses);
 }
 
-#ifdef _HAVE_FIB_ROUTING_
 /* Static routes facility function */
 void
 alloc_sroute(const vector_t *strvec)
@@ -121,7 +122,6 @@ alloc_srule(const vector_t *strvec)
 {
 	alloc_rule(&vrrp_data->static_rules, strvec, true);
 }
-#endif
 
 /* VRRP Reference list functions */
 static void
@@ -164,7 +164,7 @@ free_sync_group(vrrp_sgroup_t *sgroup)
 	free_track_if_list(&sgroup->track_ifp);
 	free_track_script_list(&sgroup->track_script);
 	free_track_file_monitor_list(&sgroup->track_file);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	free_track_process_list(&sgroup->track_process);
 #endif
 #ifdef _WITH_BFD_
@@ -208,6 +208,8 @@ dump_sync_group(FILE *fp, const vrrp_sgroup_t *sgroup)
 	if (sgroup->sgroup_tracking_weight)
 		conf_write(fp, "   sync group tracking weight set");
 	conf_write(fp, "   Using smtp notification = %s", sgroup->smtp_alert ? "yes" : "no");
+	if (sgroup->notify_priority_changes != -1)
+		conf_write(fp, "   Notify priority changes = %s", sgroup->notify_priority_changes ? "yes" : "no");
 	if (!list_empty(&sgroup->track_ifp)) {
 		conf_write(fp, "   Tracked interfaces :");
 		dump_track_if_list(fp, &sgroup->track_ifp);
@@ -220,7 +222,7 @@ dump_sync_group(FILE *fp, const vrrp_sgroup_t *sgroup)
 		conf_write(fp, "   Tracked files :");
 		dump_track_file_monitor_list(fp, &sgroup->track_file);
 	}
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	if (!list_empty(&sgroup->track_process)) {
 		conf_write(fp, "   Tracked process :");
 		dump_track_process_list(fp, &sgroup->track_process);
@@ -296,6 +298,7 @@ dump_vscript(FILE *fp, const vrrp_script_t *vscript)
 	conf_write(fp, "   Weight = %d%s", vscript->weight, vscript->weight_reverse ? " reverse" : "");
 	conf_write(fp, "   Rise = %d", vscript->rise);
 	conf_write(fp, "   Fall = %d", vscript->fall);
+	conf_write(fp, "   Result = %d", vscript->result);
 	conf_write(fp, "   Insecure = %s", vscript->insecure ? "yes" : "no");
 
 	switch (vscript->init_state) {
@@ -303,10 +306,13 @@ dump_vscript(FILE *fp, const vrrp_script_t *vscript)
 		str = "INIT"; break;
 	case SCRIPT_INIT_STATE_FAILED:
 		str = "INIT/FAILED"; break;
+	case SCRIPT_INIT_STATE_INIT_RELOAD:
+		str = "INIT/RELOAD"; break;
 	default:
-		str = (vscript->result >= vscript->rise) ? "GOOD" : "BAD";
+		str = "unknown";
 	}
-	conf_write(fp, "   Status = %s", str);
+	conf_write(fp, "   Init state = %s", str);
+	conf_write(fp, "   Status = %s", vscript->result >= vscript->rise ? "GOOD" : "BAD");
 	conf_write(fp, "   Script uid:gid = %u:%u", vscript->script.uid, vscript->script.gid);
 	conf_write(fp, "   VRRP instances :");
 	dump_tracking_obj_list(fp, &vscript->tracking_vrrp, dump_tracking_vrrp);
@@ -325,7 +331,7 @@ dump_vscript_list(FILE *fp, const list_head_t *l)
 		dump_vscript(fp, script);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 void
 free_vprocess(vrrp_tracked_process_t *vprocess)
 {
@@ -379,7 +385,6 @@ dump_vprocess(FILE *fp, const vrrp_tracked_process_t *vprocess)
 		conf_write(fp, "   Terminate delay timer %srunning", vprocess->terminate_timer_thread ? "" : "not ");
 	}
 	conf_write(fp, "   Full command = %s", vprocess->full_command ? "true" : "false");
-	conf_write(fp, "   Tracking VRRP instances :");
 	dump_tracking_obj_list(fp, &vprocess->tracking_vrrp, dump_tracking_vrrp);
 }
 static void
@@ -456,16 +461,14 @@ free_sock_list(list_head_t *l)
 static void
 dump_sock(FILE *fp, const sock_t *sock)
 {
-	conf_write(fp, "VRRP sockpool: [ifindex(%3u), family(%s), proto(%d), fd(%d,%d)%s%s%s%s]"
+	conf_write(fp, "VRRP sockpool: [ifindex(%3u), family(%s), proto(%d), fd(%d,%d) %sicast, address(%s)]"
 			    , sock->ifp ? sock->ifp->ifindex : 0
 			    , sock->family == AF_INET ? "IPv4" : sock->family == AF_INET6 ? "IPv6" : "unknown"
 			    , sock->proto
 			    , sock->fd_in
 			    , sock->fd_out
-			    , !!sock->unicast_src ? ", unicast" : ""
-			    , sock->unicast_src ? ", address(" : ""
-			    , sock->unicast_src ? inet_sockaddrtos(sock->unicast_src) : ""
-			    , sock->unicast_src ? ")" : ""
+			    , sock->unicast_src ? ", un" : "mult"
+			    , sock->unicast_src ? inet_sockaddrtos(sock->unicast_src) : inet_sockaddrtos(sock->mcast_daddr)
 			    );
 }
 void
@@ -486,6 +489,10 @@ dump_sock_pool(FILE *fp, const list_head_t *l)
 	list_for_each_entry(sock, l, e_list) {
 		conf_write(fp, " fd_in %d fd_out = %d", sock->fd_in, sock->fd_out);
 		conf_write(fp, "   Interface = %s", sock->ifp->ifname);
+#ifdef _HAVE_VRF_
+		if (sock->vrf_ifp)
+			conf_write(fp, "   VRF = %s", sock->vrf_ifp->ifname);
+#endif
 		conf_write(fp, "   Family = %s", sock->family == AF_INET ? "IPv4" : sock->family == AF_INET6 ? "IPv6" : "unknown");
 		conf_write(fp, "   Protocol = %s", sock->proto == IPPROTO_AH ? "AH" : sock->proto == IPPROTO_VRRP ? "VRRP" : "unknown");
 		conf_write(fp, "   Type = %sicast", sock->unicast_src ? "Un" : "Mult");
@@ -552,7 +559,7 @@ free_vrrp(vrrp_t *vrrp)
 	free_track_if_list(&vrrp->track_ifp);
 	free_track_script_list(&vrrp->track_script);
 	free_track_file_monitor_list(&vrrp->track_file);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	free_track_process_list(&vrrp->track_process);
 #endif
 #ifdef _WITH_BFD_
@@ -561,10 +568,8 @@ free_vrrp(vrrp_t *vrrp)
 	free_unicast_peer_list(&vrrp->unicast_peer);
 	free_ipaddress_list(&vrrp->vip);
 	free_ipaddress_list(&vrrp->evip);
-#ifdef _HAVE_FIB_ROUTING_
 	free_iproute_list(&vrrp->vroutes);
 	free_iprule_list(&vrrp->vrules);
-#endif
 	list_del_init(&vrrp->e_list);
 	FREE(vrrp);
 }
@@ -582,7 +587,7 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #ifdef _WITH_VRRP_AUTH_
 	char auth_data[sizeof(vrrp->auth_data) + 1];
 #endif
-	char time_str[26];
+	char time_str[32];	// Allow for decimal point and microseconds
 
 	/* If fp is NULL, we are writing configuration to syslog at
 	 * startup, so there is no point writing transient state information.
@@ -603,38 +608,56 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 				conf_write(fp, "   Master advert int = %.2f sec", vrrp->master_adver_int / TIMER_HZ_DOUBLE);
 		}
 	}
+	if (vrrp->flags) {
+		conf_write(fp, "   Flags:");
+		if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags))
+			conf_write(fp, "     Using unicast%s", __test_bit(VRRP_FLAG_UNICAST_DUPLICATE_VRID, &vrrp->flags) ? " with VRID duplication" : "");
+		else if (__test_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags))
+			conf_write(fp, "     Unicast config option specified but using multicast");
+		if (__test_bit(VRRP_FLAG_UNICAST_FAULT_NO_PEERS, &vrrp->flags))
+			conf_write(fp, "     If unicast go to fault state if no peers");
+	} else
+		conf_write(fp, "   Flags: none");
+
 	conf_write(fp, "   Wantstate = %s", get_state_str(vrrp->wantstate));
+	conf_write(fp, "   Number of config faults = %u", vrrp->num_config_faults);
 	if (fp) {
 		conf_write(fp, "   Number of interface and track script faults = %u", vrrp->num_script_if_fault);
 #ifdef _HAVE_VRRP_VMAC_
-		if (vrrp->duplicate_vrid_fault)
+		if (__test_bit(VRRP_FLAG_DUPLICATE_VRID_FAULT, &vrrp->flags))
 			conf_write(fp, "   Duplicate VRID");
 #endif
 		conf_write(fp, "   Number of track scripts init = %u", vrrp->num_script_init);
-		ctime_r(&vrrp->last_transition.tv_sec, time_str);
-		conf_write(fp, "   Last transition = %ld.%6.6ld (%.24s.%6.6ld)", vrrp->last_transition.tv_sec, vrrp->last_transition.tv_usec, time_str, vrrp->last_transition.tv_usec);
+		conf_write(fp, "   Last transition = %ld.%6.6ld (%s)", vrrp->last_transition.tv_sec, vrrp->last_transition.tv_usec, ctime_us_r(&vrrp->last_transition, time_str));
 		if (!ctime_r(&vrrp->sands.tv_sec, time_str))
 			strcpy(time_str, "invalid time ");
 		if (vrrp->sands.tv_sec == TIMER_DISABLED)
 			conf_write(fp, "   Read timeout = DISABLED");
 		else
-			conf_write(fp, "   Read timeout = %ld.%6.6ld (%.19s.%6.6ld)", vrrp->sands.tv_sec, vrrp->sands.tv_usec, time_str, vrrp->sands.tv_usec);
+			conf_write(fp, "   Read timeout = %ld.%6.6ld (%s)", vrrp->sands.tv_sec, vrrp->sands.tv_usec, ctime_us_r(&vrrp->sands, time_str));
 		conf_write(fp, "   Master down timer = %u usecs", vrrp->ms_down_timer);
 	}
 #ifdef _HAVE_VRRP_VMAC_
-	if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
+	if (__test_bit(VRRP_VMAC_BIT, &vrrp->flags)) {
 		conf_write(fp, "   Use VMAC, i/f name %s, is_up = %s, xmit_base = %s",
 				vrrp->vmac_ifname,
-				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
-				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? "true" : "false");
+				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->flags) ? "true" : "false",
+				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags) ? "true" : "false");
+		if (__test_bit(VRRP_VMAC_MAC_SPECIFIED, &vrrp->flags))
+			conf_write(fp, "     MAC = %2.2x:%2.2x:%2.2x:%2.2x:%2.2x:%2.2x%s",
+					vrrp->ll_addr[0], vrrp->ll_addr[1], vrrp->ll_addr[2], vrrp->ll_addr[3], vrrp->ll_addr[4], vrrp->ll_addr[5],
+					__test_bit(VRRP_VMAC_MAC_USE_VRID, &vrrp->flags) ? " (using VRID)" : "");
+	}
+	if (__test_bit(VRRP_VMAC_ADDR_BIT, &vrrp->flags))
+		conf_write(fp, "   Use VMAC for VIPs on other interfaces");
 #ifdef _HAVE_VRRP_IPVLAN_
-	else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags))
+	else if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->flags))
 		conf_write(fp, "   Use IPVLAN, i/f %s, is_up = %s%s%s, type %s",
 				vrrp->vmac_ifname,
-				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags) ? "true" : "false",
+				__test_bit(VRRP_VMAC_UP_BIT, &vrrp->flags) ? "true" : "false",
 				vrrp->ipvlan_addr ? ", i/f address = " : "",
 				vrrp->ipvlan_addr ? ipaddresstos(NULL, vrrp->ipvlan_addr) : "",
-#ifdef IPVLAN_F_VEPA	/* Since Linux v4.15 */
+#if HAVE_DECL_IFLA_IPVLAN_FLAGS	/* Since Linux v4.15 */
 				!vrrp->ipvlan_type ? "bridge" : vrrp->ipvlan_type == IPVLAN_F_PRIVATE ? "private" : vrrp->ipvlan_type == IPVLAN_F_VEPA ? "vepa" : "unknown"
 #else
 				"bridge"
@@ -643,9 +666,9 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #endif
 	if (vrrp->ifp && vrrp->ifp->is_ours) {
 		conf_write(fp, "   Interface = %s, %s on %s%s", IF_NAME(vrrp->ifp),
-				__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags) ? "vmac" : "ipvlan",
+				__test_bit(VRRP_VMAC_BIT, &vrrp->flags) ? "vmac" : "ipvlan",
 				vrrp->ifp != vrrp->ifp->base_ifp ? vrrp->ifp->base_ifp->ifname : "(unknown)",
-				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags) ? ", xmit base i/f" : "");
+				__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags) ? ", xmit base i/f" : "");
 	} else
 #endif
 		conf_write(fp, "   Interface = %s", vrrp->ifp ? IF_NAME(vrrp->ifp) : "not configured");
@@ -653,16 +676,28 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 	if (vrrp->ifp && vrrp->configured_ifp && vrrp->configured_ifp != vrrp->ifp->base_ifp && vrrp->ifp->is_ours)
 		conf_write(fp, "   Configured interface = %s", vrrp->configured_ifp->ifname);
 #endif
-	if (vrrp->dont_track_primary)
+#ifdef _HAVE_VRF_
+	if (vrrp->vrf_ifp)
+		conf_write(fp, "   VRF = %s", vrrp->vrf_ifp->ifname);
+#endif
+	if (__test_bit(VRRP_FLAG_DONT_TRACK_PRIMARY, &vrrp->flags))
 		conf_write(fp, "   VRRP interface tracking disabled");
-	if (vrrp->skip_check_adv_addr)
+	if (__test_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &vrrp->flags))
 		conf_write(fp, "   Skip checking advert IP addresses");
+	if (__test_bit(VRRP_FLAG_ALLOW_NO_VIPS, &vrrp->flags))
+		conf_write(fp, "   Suppress no VIPs warning");
 	if (vrrp->strict_mode)
 		conf_write(fp, "   Enforcing strict VRRP compliance");
 	conf_write(fp, "   Using src_ip = %s%s", vrrp->saddr.ss_family != AF_UNSPEC
 						    ? inet_sockaddrtos(&vrrp->saddr)
 						    : "(none)",
-						  vrrp->saddr_from_config ? " (from configuration)" : "");
+						  __test_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags) ? " (from configuration)" : "");
+	if (!__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
+		if (vrrp->family == AF_INET)
+			conf_write(fp, "   Multicast address %s", inet_sockaddrtos(&vrrp->mcast_daddr));
+		else
+			conf_write(fp, "   Multicast address %s, ifindex %u", inet_sockaddrtos(&vrrp->mcast_daddr), PTR_CAST_CONST(struct sockaddr_in6, &vrrp->mcast_daddr)->sin6_scope_id);
+	}
 	conf_write(fp, "   Gratuitous ARP delay = %u",
 		       vrrp->garp_delay/TIMER_HZ);
 	conf_write(fp, "   Gratuitous ARP repeat = %u", vrrp->garp_rep);
@@ -671,6 +706,14 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 	conf_write(fp, "   Gratuitous ARP refresh repeat = %u", vrrp->garp_refresh_rep);
 	conf_write(fp, "   Gratuitous ARP lower priority delay = %u", vrrp->garp_lower_prio_delay / TIMER_HZ);
 	conf_write(fp, "   Gratuitous ARP lower priority repeat = %u", vrrp->garp_lower_prio_rep);
+	conf_write(fp, "   Down timer adverts = %u", vrrp->down_timer_adverts);
+#ifdef _HAVE_VRRP_VMAC_
+	if (vrrp->vmac_garp_intvl.tv_sec) {
+		conf_write(fp, "   Gratuitous ARP for each secondary %s = %ld", __test_bit(VRRP_FLAG_VMAC_GARP_ALL_IF, &vrrp->flags) ? "i/f" : "VMAC", vrrp->vmac_garp_intvl.tv_sec);
+		ctime_r(&vrrp->vmac_garp_timer.tv_sec, time_str);
+		conf_write(fp, "   Next gratuitous ARP for such secondary = %ld.%6.6ld (%.24s.%6.6ld)", vrrp->vmac_garp_timer.tv_sec, vrrp->vmac_garp_timer.tv_usec, time_str, vrrp->vmac_garp_timer.tv_usec);
+	}
+#endif
 	conf_write(fp, "   Send advert after receive lower priority advert = %s", vrrp->lower_prio_no_advert ? "false" : "true");
 	conf_write(fp, "   Send advert after receive higher priority advert = %s", vrrp->higher_prio_send_advert ? "true" : "false");
 	conf_write(fp, "   Virtual Router ID = %d", vrrp->vrid);
@@ -679,20 +722,23 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 		conf_write(fp, "   Effective priority = %d", vrrp->effective_priority);
 		conf_write(fp, "   Total priority = %d", vrrp->total_priority);
 	}
+	if (__test_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags))
+		conf_write(fp, "   Highest other priority = %u", vrrp->highest_other_priority);
 	conf_write(fp, "   Advert interval = %u %s",
 		(vrrp->version == VRRP_VERSION_2) ? (vrrp->adver_int / TIMER_HZ) :
 		(vrrp->adver_int / (TIMER_HZ / 1000)),
 		(vrrp->version == VRRP_VERSION_2) ? "sec" : "milli-sec");
+	conf_write(fp, "   Last advert sent = %ld.%6.6ld", vrrp->last_advert_sent.tv_sec, vrrp->last_advert_sent.tv_usec);
 	if (vrrp->state == VRRP_STATE_BACK && vrrp->version == VRRP_VERSION_3)
 		conf_write(fp, "   Master advert interval = %u milli-sec", vrrp->master_adver_int / (TIMER_HZ / 1000));
 #ifdef _WITH_FIREWALL_
 	conf_write(fp, "   Accept = %s", vrrp->accept ? "enabled" : "disabled");
 #endif
-	conf_write(fp, "   Preempt = %s", vrrp->nopreempt ? "disabled" : "enabled");
+	conf_write(fp, "   Preempt = %s", __test_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags) ? "disabled" : "enabled");
 	if (vrrp->preempt_delay)
 		conf_write(fp, "   Preempt delay = %g secs",
 		       vrrp->preempt_delay / TIMER_HZ_DOUBLE);
-	conf_write(fp, "   Promote_secondaries = %s", vrrp->promote_secondaries ? "enabled" : "disabled");
+	conf_write(fp, "   Promote_secondaries = %s", __test_bit(VRRP_FLAG_PROMOTE_SECONDARIES, &vrrp->flags) ? "enabled" : "disabled");
 #if defined _WITH_VRRP_AUTH_
 	if (vrrp->auth_type) {
 		conf_write(fp, "   Authentication type = %s",
@@ -708,6 +754,10 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 	else if (vrrp->version == VRRP_VERSION_2)
 		conf_write(fp, "   Authentication type = none");
 #endif
+	if (vrrp->version == VRRP_VERSION_3 &&
+	    vrrp->family == AF_INET)
+		conf_write(fp, "   VRRPv3 uses VRRPv2 checksum = %s", __test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &vrrp->flags) ? "enabled" : "disabled");
+
 	if (vrrp->kernel_rx_buf_size)
 		conf_write(fp, "   Kernel rx buffer size = %zu", vrrp->kernel_rx_buf_size);
 
@@ -720,17 +770,17 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 #endif
 
 	if (!list_empty(&vrrp->vip)) {
-		conf_write(fp, "   Virtual IP :");
+		conf_write(fp, "   Virtual IP (%u):", vrrp->vip_cnt);
 		dump_ipaddress_list(fp, &vrrp->vip);
 	}
 	if (!list_empty(&vrrp->evip)) {
 		conf_write(fp, "   Virtual IP Excluded :");
 		dump_ipaddress_list(fp, &vrrp->evip);
 	}
-	if (!list_empty(&vrrp->unicast_peer)) {
+	if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
 		if (vrrp->ttl != -1)
 			conf_write(fp, "   Unicast TTL = %d", vrrp->ttl);
-		conf_write(fp, "   Check unicast src : %s", vrrp->check_unicast_src ? "yes" : "no");
+		conf_write(fp, "   Check unicast src : %s", __test_bit(VRRP_FLAG_CHECK_UNICAST_SRC, &vrrp->flags) ? "yes" : "no");
 		conf_write(fp, "   Unicast Peer :");
 		dump_unicast_peer_list(fp, &vrrp->unicast_peer);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
@@ -745,7 +795,6 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 		conf_write(fp, "   fd_in %d, fd_out %d", vrrp->sockets->fd_in, vrrp->sockets->fd_out);
 	else
 		conf_write(fp, "   No sockets allocated");
-#ifdef _HAVE_FIB_ROUTING_
 	if (!list_empty(&vrrp->vroutes)) {
 		conf_write(fp, "   Virtual Routes :");
 		dump_iproute_list(fp, &vrrp->vroutes);
@@ -754,7 +803,6 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 		conf_write(fp, "   Virtual Rules :");
 		dump_iprule_list(fp, &vrrp->vrules);
 	}
-#endif
 
 	if (!list_empty(&vrrp->track_ifp)) {
 		conf_write(fp, "   Tracked interfaces :");
@@ -768,7 +816,7 @@ dump_vrrp(FILE *fp, const vrrp_t *vrrp)
 		conf_write(fp, "   Tracked files :");
 		dump_track_file_monitor_list(fp, &vrrp->track_file);
 	}
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	if (!list_empty(&vrrp->track_process)) {
 		conf_write(fp, "   Tracked processes :");
 		dump_track_process_list(fp, &vrrp->track_process);
@@ -810,7 +858,7 @@ dump_vrrp_list(FILE *fp, const list_head_t *l)
 		dump_vrrp(fp, vrrp);
 }
 
-void
+vrrp_sgroup_t *
 alloc_vrrp_sync_group(const char *gname)
 {
 	vrrp_sgroup_t *new;
@@ -822,7 +870,7 @@ alloc_vrrp_sync_group(const char *gname)
 	INIT_LIST_HEAD(&new->track_ifp);
 	INIT_LIST_HEAD(&new->track_script);
 	INIT_LIST_HEAD(&new->track_file);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	INIT_LIST_HEAD(&new->track_process);
 #endif
 #ifdef _WITH_BFD_
@@ -833,8 +881,9 @@ alloc_vrrp_sync_group(const char *gname)
 	new->gname = STRDUP(gname);
 	new->sgroup_tracking_weight = false;
 	new->smtp_alert = -1;
+	new->notify_priority_changes = -1;
 
-	list_add_tail(&new->e_list, &vrrp_data->vrrp_sync_group);
+	return new;
 }
 
 static vrrp_stats *
@@ -866,7 +915,7 @@ alloc_vrrp_stats(void)
 	return new;
 }
 
-void
+vrrp_t *
 alloc_vrrp(const char *iname)
 {
 	vrrp_t *new;
@@ -879,7 +928,7 @@ alloc_vrrp(const char *iname)
 	INIT_LIST_HEAD(&new->track_script);
 	INIT_LIST_HEAD(&new->track_file);
 	INIT_LIST_HEAD(&new->unicast_peer);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	INIT_LIST_HEAD(&new->track_process);
 #endif
 #ifdef _WITH_BFD_
@@ -887,10 +936,8 @@ alloc_vrrp(const char *iname)
 #endif
 	INIT_LIST_HEAD(&new->vip);
 	INIT_LIST_HEAD(&new->evip);
-#ifdef _HAVE_FIB_ROUTING_
 	INIT_LIST_HEAD(&new->vroutes);
 	INIT_LIST_HEAD(&new->vrules);
-#endif
 
 	/* Set default values */
 	new->family = AF_UNSPEC;
@@ -912,24 +959,31 @@ alloc_vrrp(const char *iname)
 	new->garp_delay = global_data->vrrp_garp_delay;
 	new->garp_lower_prio_delay = PARAMETER_UNSET;
 	new->garp_lower_prio_rep = PARAMETER_UNSET;
+	new->down_timer_adverts = global_data->vrrp_down_timer_adverts;
+#ifdef _HAVE_VRRP_VMAC_
+	new->vmac_garp_intvl.tv_sec = TIME_T_PARAMETER_UNSET;
+#endif
 	new->lower_prio_no_advert = PARAMETER_UNSET;
 	new->higher_prio_send_advert = PARAMETER_UNSET;
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	new->unicast_chksum_compat = CHKSUM_COMPATIBILITY_NONE;
 #endif
+	if (global_data->v3_checksum_as_v2)
+	        __set_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &new->flags);
 	new->smtp_alert = -1;
 	new->notify_priority_changes = -1;
 
-	new->skip_check_adv_addr = global_data->vrrp_skip_check_adv_addr;
+	if (global_data->vrrp_skip_check_adv_addr)
+		__set_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &new->flags);
+
 	new->strict_mode = PARAMETER_UNSET;
 
-	list_add_tail(&new->e_list, &vrrp_data->vrrp);
+	return new;
 }
 
 void
 alloc_vrrp_unicast_peer(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unicast_peer_t *peer;
 	unsigned ttl;
 	unsigned i;
@@ -942,24 +996,24 @@ alloc_vrrp_unicast_peer(const vector_t *strvec)
 	if (inet_stosockaddr(strvec_slot(strvec, 0), NULL, &peer->address)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: VRRP instance[%s] malformed unicast"
 				     " peer address[%s]. Skipping..."
-				   , vrrp->iname, strvec_slot(strvec, 0));
+				   , current_vrrp->iname, strvec_slot(strvec, 0));
 		FREE(peer);
 		return;
 	}
 
-	if (!vrrp->family)
-		vrrp->family = peer->address.ss_family;
-	else if (peer->address.ss_family != vrrp->family) {
+	if (!current_vrrp->family)
+		current_vrrp->family = peer->address.ss_family;
+	else if (peer->address.ss_family != current_vrrp->family) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: VRRP instance[%s] and unicast peer address"
 				     "[%s] MUST be of the same family !!! Skipping..."
-				   , vrrp->iname, strvec_slot(strvec, 0));
+				   , current_vrrp->iname, strvec_slot(strvec, 0));
 		FREE(peer);
 		return;
 	}
 
 	for (i = 1; i < vector_size(strvec); i += 2) {
 		if (i + 1 >= vector_size(strvec)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s) %s is missing a value", vrrp->iname, strvec_slot(strvec, i));
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) %s is missing a value", current_vrrp->iname, strvec_slot(strvec, i));
 			break;
 		}
 		if (read_unsigned(strvec_slot(strvec, i + 1), &ttl, 0, 255, false)) {
@@ -968,50 +1022,42 @@ alloc_vrrp_unicast_peer(const vector_t *strvec)
 			else if (!strcmp(strvec_slot(strvec, i), "max_ttl"))
 				peer->max_ttl = ttl;
 			else {
-				report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown unicast_peer option %s", vrrp->iname, strvec_slot(strvec, i));
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) unknown unicast_peer option %s", current_vrrp->iname, strvec_slot(strvec, i));
 				break;
 			}
-			vrrp->check_unicast_src = true;
+			__set_bit(VRRP_FLAG_CHECK_UNICAST_SRC, &current_vrrp->flags);
 		}
 	}
 
 	if (peer->min_ttl > peer->max_ttl)
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) min_ttl %u > max_ttl %u - all packets will be discarded", vrrp->iname, peer->min_ttl, peer->max_ttl);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) min_ttl %u > max_ttl %u - all packets will be discarded", current_vrrp->iname, peer->min_ttl, peer->max_ttl);
 
-	list_add_tail(&peer->e_list, &vrrp->unicast_peer);
+	list_add_tail(&peer->e_list, &current_vrrp->unicast_peer);
 }
 
 void
 alloc_vrrp_track_if(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_track_if(vrrp->iname, &vrrp->track_ifp, strvec);
+	alloc_track_if(current_vrrp->iname, &current_vrrp->track_ifp, strvec);
 }
 
 void
 alloc_vrrp_track_script(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_track_script(vrrp->iname, &vrrp->track_script, strvec);
+	alloc_track_script(current_vrrp->iname, &current_vrrp->track_script, strvec);
 }
 
 void
 alloc_vrrp_track_file(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	vrrp_alloc_track_file(vrrp->iname, &vrrp_data->vrrp_track_files, &vrrp->track_file, strvec);
+	vrrp_alloc_track_file(current_vrrp->iname, &vrrp_data->vrrp_track_files, &current_vrrp->track_file, strvec);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 void
 alloc_vrrp_track_process(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_track_process(vrrp->iname, &vrrp->track_process, strvec);
+	alloc_track_process(current_vrrp->iname, &current_vrrp->track_process, strvec);
 }
 #endif
 
@@ -1019,43 +1065,33 @@ alloc_vrrp_track_process(const vector_t *strvec)
 void
 alloc_vrrp_track_bfd(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_track_bfd(vrrp->iname, &vrrp->track_bfd, strvec);
+	alloc_track_bfd(current_vrrp->iname, &current_vrrp->track_bfd, strvec);
 }
 #endif
 
 void
 alloc_vrrp_group_track_if(const vector_t *strvec)
 {
-	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
-
-	alloc_track_if(sgroup->gname, &sgroup->track_ifp, strvec);
+	alloc_track_if(current_vsyncg->gname, &current_vsyncg->track_ifp, strvec);
 }
 
 void
 alloc_vrrp_group_track_script(const vector_t *strvec)
 {
-	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
-
-	alloc_track_script(sgroup->gname, &sgroup->track_script, strvec);
+	alloc_track_script(current_vsyncg->gname, &current_vsyncg->track_script, strvec);
 }
 
 void
 alloc_vrrp_group_track_file(const vector_t *strvec)
 {
-	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
-
-	vrrp_alloc_track_file(sgroup->gname, &vrrp_data->vrrp_track_files, &sgroup->track_file, strvec);
+	vrrp_alloc_track_file(current_vsyncg->gname, &vrrp_data->vrrp_track_files, &current_vsyncg->track_file, strvec);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 void
 alloc_vrrp_group_track_process(const vector_t *strvec)
 {
-	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
-
-	alloc_track_process(sgroup->gname, &sgroup->track_process, strvec);
+	alloc_track_process(current_vsyncg->gname, &current_vsyncg->track_process, strvec);
 }
 #endif
 
@@ -1063,71 +1099,61 @@ alloc_vrrp_group_track_process(const vector_t *strvec)
 void
 alloc_vrrp_group_track_bfd(const vector_t *strvec)
 {
-	vrrp_sgroup_t *sgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
-
-	alloc_track_bfd(sgroup->gname, &sgroup->track_bfd, strvec);
+	alloc_track_bfd(current_vsyncg->gname, &current_vsyncg->track_bfd, strvec);
 }
 #endif
 
 void
 alloc_vrrp_vip(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	ip_address_t *last_ipaddr = NULL, *tail_ipaddr;
+	ip_address_t *new_ipaddr;
 	sa_family_t address_family;
 
-	if (!list_empty(&vrrp->vip))
-		last_ipaddr = list_last_entry(&vrrp->vip, ip_address_t, e_list);
+	if (!(new_ipaddr = alloc_ipaddress(strvec, false)))
+		return;
 
-	alloc_ipaddress(&vrrp->vip, strvec, false);
-	vrrp->vip_cnt++;
+	address_family = IP_FAMILY(new_ipaddr);
 
-	tail_ipaddr = list_last_entry(&vrrp->vip, ip_address_t, e_list);
-	if (!list_empty(&vrrp->vip) && tail_ipaddr != last_ipaddr) {
-		address_family = IP_FAMILY(tail_ipaddr);
-
-		if (vrrp->family == AF_UNSPEC)
-			vrrp->family = address_family;
-		else if (address_family != vrrp->family) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s): address family must match VRRP instance [%s] - ignoring", vrrp->iname, strvec_slot(strvec, 0));
-			free_ipaddress(tail_ipaddr);
-		}
+	if (current_vrrp->family == AF_UNSPEC)
+		current_vrrp->family = address_family;
+	else if (address_family != current_vrrp->family) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): address family must match VRRP instance [%s] - ignoring", current_vrrp->iname, strvec_slot(strvec, 0));
+		free_ipaddress(new_ipaddr);
+		return;
 	}
+
+	list_add_tail(&new_ipaddr->e_list, &current_vrrp->vip);
+	current_vrrp->vip_cnt++;
 }
 
 void
 alloc_vrrp_evip(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	ip_address_t *new_ipaddr;
 
-	alloc_ipaddress(&vrrp->evip, strvec, false);
+	if ((new_ipaddr = alloc_ipaddress(strvec, false)))
+		list_add_tail(&new_ipaddr->e_list, &current_vrrp->evip);
 }
 
-#ifdef _HAVE_FIB_ROUTING_
 void
 alloc_vrrp_vroute(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_route(&vrrp->vroutes, strvec, false);
+	alloc_route(&current_vrrp->vroutes, strvec, false);
 }
 
 void
 alloc_vrrp_vrule(const vector_t *strvec)
 {
-	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-
-	alloc_rule(&vrrp->vrules, strvec, false);
+	alloc_rule(&current_vrrp->vrules, strvec, false);
 }
-#endif
 
-void
+vrrp_script_t *
 alloc_vrrp_script(const char *sname)
 {
 	vrrp_script_t *new;
 
 	/* Allocate new VRRP script structure */
-	new = (vrrp_script_t *) MALLOC(sizeof(vrrp_script_t));
+	PMALLOC(new);
 	INIT_LIST_HEAD(&new->e_list);
 	INIT_LIST_HEAD(&new->tracking_vrrp);
 	new->sname = STRDUP(sname);
@@ -1135,15 +1161,16 @@ alloc_vrrp_script(const char *sname)
 	new->timeout = VRRP_SCRIPT_DT * TIMER_HZ;
 	new->weight = VRRP_SCRIPT_DW;
 //	new->last_status = VRRP_SCRIPT_STATUS_NOT_SET;
-	new->init_state = SCRIPT_INIT_STATE_INIT;
+	new->init_state = reload ? SCRIPT_INIT_STATE_INIT_RELOAD : SCRIPT_INIT_STATE_INIT;
 	new->state = SCRIPT_STATE_IDLE;
 	new->rise = 1;
 	new->fall = 1;
-	list_add_tail(&new->e_list, &vrrp_data->vrrp_script);
+
+	return new;
 }
 
-#ifdef _WITH_CN_PROC_
-void
+#ifdef _WITH_TRACK_PROCESS_
+vrrp_tracked_process_t *
 alloc_vrrp_process(const char *pname)
 {
 	vrrp_tracked_process_t *new;
@@ -1155,7 +1182,8 @@ alloc_vrrp_process(const char *pname)
 	new->quorum = 1;
 	new->quorum_max = UINT_MAX;
 	INIT_LIST_HEAD(&new->tracking_vrrp);
-	list_add_tail(&new->e_list, &vrrp_data->vrrp_track_processes);
+
+	return new;
 }
 #endif
 
@@ -1169,7 +1197,7 @@ alloc_vrrp_buffer(size_t len)
 	if (vrrp_buffer)
 		FREE(vrrp_buffer);
 
-	vrrp_buffer = (char *) MALLOC(len);
+	vrrp_buffer = MALLOC(len);
 	vrrp_buffer_len = (vrrp_buffer) ? len : 0;
 }
 
@@ -1191,18 +1219,16 @@ alloc_vrrp_data(void)
 {
 	vrrp_data_t *new;
 
-	new = (vrrp_data_t *) MALLOC(sizeof(vrrp_data_t));
+	PMALLOC(new);
 	INIT_LIST_HEAD(&new->static_track_groups);
 	INIT_LIST_HEAD(&new->static_addresses);
-#ifdef _HAVE_FIB_ROUTING_
 	INIT_LIST_HEAD(&new->static_routes);
 	INIT_LIST_HEAD(&new->static_rules);
-#endif
 	INIT_LIST_HEAD(&new->vrrp_sync_group);
 	INIT_LIST_HEAD(&new->vrrp);
 	INIT_LIST_HEAD(&new->vrrp_script);
 	INIT_LIST_HEAD(&new->vrrp_track_files);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	INIT_LIST_HEAD(&new->vrrp_track_processes);
 #endif
 #ifdef _WITH_BFD_
@@ -1217,21 +1243,19 @@ void
 free_vrrp_data(vrrp_data_t * data)
 {
 	free_ipaddress_list(&data->static_addresses);
-#ifdef _HAVE_FIB_ROUTING_
 	free_iproute_list(&data->static_routes);
 	free_iprule_list(&data->static_rules);
-#endif
 	free_static_track_groups_list(&data->static_track_groups);
-	free_vrrp_list(&data->vrrp);
 	free_sync_group_list(&data->vrrp_sync_group);
 	free_vscript_list(&data->vrrp_script);
 	free_track_file_list(&data->vrrp_track_files);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	free_vprocess_list(&data->vrrp_track_processes);
 #endif
 #ifdef _WITH_BFD_
 	free_vrrp_tracked_bfd_list(&data->vrrp_track_bfds);
 #endif
+	free_vrrp_list(&data->vrrp);
 	FREE(data);
 }
 
@@ -1242,7 +1266,6 @@ dump_vrrp_data(FILE *fp, const vrrp_data_t * data)
 		conf_write(fp, "------< Static Addresses >------");
 		dump_ipaddress_list(fp, &data->static_addresses);
 	}
-#ifdef _HAVE_FIB_ROUTING_
 	if (!list_empty(&data->static_routes)) {
 		conf_write(fp, "------< Static Routes >------");
 		dump_iproute_list(fp, &data->static_routes);
@@ -1251,7 +1274,6 @@ dump_vrrp_data(FILE *fp, const vrrp_data_t * data)
 		conf_write(fp, "------< Static Rules >------");
 		dump_iprule_list(fp, &data->static_rules);
 	}
-#endif
 	if (!list_empty(&data->static_track_groups)) {
 		conf_write(fp, "------< Static Track groups >------");
 		dump_static_track_groups_list(fp, &data->static_track_groups);
@@ -1276,7 +1298,7 @@ dump_vrrp_data(FILE *fp, const vrrp_data_t * data)
 		conf_write(fp, "------< VRRP Track files >------");
 		dump_track_file_list(fp, &data->vrrp_track_files);
 	}
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	if (!list_empty(&data->vrrp_track_processes)) {
 		conf_write(fp, "------< VRRP Track processes >------");
 		dump_vprocess_list(fp, &data->vrrp_track_processes);
@@ -1309,6 +1331,4 @@ dump_data_vrrp(FILE *fp)
 		conf_write(fp, "------< Interfaces >------");
 		dump_interface_queue(fp, ifq);
 	}
-
-	clear_rt_names();
 }

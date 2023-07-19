@@ -42,10 +42,11 @@
 #ifdef THREAD_DUMP
 #include "scheduler.h"
 #endif
+#include "check_parser.h"
+
 
 /* local data */
 static thread_ref_t bfd_thread;
-static checker_t *new_checker;
 
 static void bfd_check_thread(thread_ref_t);
 
@@ -105,7 +106,7 @@ dump_bfds_rs_list(FILE *fp, const list_head_t *l)
 }
 
 static bool
-bfd_check_compare(const checker_t *old_c, checker_t *new_c)
+compare_bfd_check(const checker_t *old_c, checker_t *new_c)
 {
 	const bfd_checker_t *old = old_c->data;
 	const bfd_checker_t *new = new_c->data;
@@ -129,6 +130,8 @@ find_checker_tracked_bfd_by_name(char *name)
 	return NULL;
 }
 
+static const checker_funcs_t bfd_checker_funcs = { CHECKER_BFD, free_bfd_check, dump_bfd_check, compare_bfd_check, NULL };
+
 static void
 bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
@@ -138,8 +141,7 @@ bfd_check_handler(__attribute__((unused)) const vector_t *strvec)
 	INIT_LIST_HEAD(&new_bfd_checker->e_list);
 
 	/* queue new checker */
-	new_checker = queue_checker(free_bfd_check, dump_bfd_check, NULL, bfd_check_compare, new_bfd_checker,
-				    NULL, false);
+	queue_checker(&bfd_checker_funcs, NULL, new_bfd_checker, NULL, false);
 }
 
 static void
@@ -151,10 +153,7 @@ bfd_name_handler(const vector_t *strvec)
 	bool config_error = true;
 	char *name;
 
-	if (!new_checker)
-		return;
-
-	bfdc = CHECKER_DATA(new_checker);
+	bfdc = current_checker->data;
 
 	if (vector_size(strvec) >= 2)
 		name = vector_slot(strvec, 1);
@@ -162,29 +161,29 @@ bfd_name_handler(const vector_t *strvec)
 	if (vector_size(strvec) != 2)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - No or too many names specified"
 							  " - skipping checker"
-							, FMT_RS(new_checker->rs, new_checker->vs));
+							, FMT_RS(current_checker->rs, current_checker->vs));
 	else if (!(ctbfd = find_checker_tracked_bfd_by_name(name)))
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s not configured"
-							, FMT_RS(new_checker->rs, new_checker->vs)
+							, FMT_RS(current_checker->rs, current_checker->vs)
 							, name);
 	else if (bfdc->bfd)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD %s already specified as %s"
-							, FMT_RS(new_checker->rs, new_checker->vs)
+							, FMT_RS(current_checker->rs, current_checker->vs)
 							, name
 							, bfdc->bfd->bname);
 	else if (strlen(name) >= BFD_INAME_MAX)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - BFD name %s too long"
-							, FMT_RS(new_checker->rs, new_checker->vs)
+							, FMT_RS(current_checker->rs, current_checker->vs)
 							, name);
 	else
 		config_error = false;
 
 	/* Now check we are not already monitoring it */
 	if (!config_error) {
-		list_for_each_entry(tbfd, &new_checker->rs->tracked_bfds, e_list) {
+		list_for_each_entry(tbfd, &current_checker->rs->tracked_bfds, e_list) {
 			if (ctbfd == tbfd->bfd) {
 				report_config_error(CONFIG_GENERAL_ERROR, "(%s) BFD_CHECK - RS already monitoring %s"
-									, FMT_RS(new_checker->rs, new_checker->vs)
+									, FMT_RS(current_checker->rs, current_checker->vs)
 									, strvec_slot(strvec, 1));
 				config_error = true;
 				break;
@@ -194,7 +193,6 @@ bfd_name_handler(const vector_t *strvec)
 
 	if (config_error) {
 		dequeue_new_checker();
-		new_checker = NULL;
 		return;
 	}
 
@@ -206,9 +204,6 @@ bfd_alpha_handler(const vector_t *strvec)
 {
 	int res;
 
-	if (!new_checker)
-		return;
-
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res == -1) {
@@ -219,7 +214,7 @@ bfd_alpha_handler(const vector_t *strvec)
 	else
 		res = true;
 
-	new_checker->alpha = res;
+	current_checker->alpha = res;
 }
 
 static void
@@ -229,16 +224,12 @@ bfd_end_handler(void)
 	tracking_obj_t *top;
 	cref_tracked_bfd_t *tbfd;
 
-	if (!new_checker)
-		return;
-
-	bfdc = CHECKER_DATA(new_checker);
+	bfdc = current_checker->data;
 
 	if (!bfdc->bfd) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) No name has been specified for BFD_CHECKER - skipping"
-							, FMT_RS(new_checker->rs, new_checker->vs));
+							, FMT_RS(current_checker->rs, current_checker->vs));
 		dequeue_new_checker();
-		new_checker = NULL;
 		return;
 	}
 
@@ -246,27 +237,30 @@ bfd_end_handler(void)
 	PMALLOC(tbfd);
 	INIT_LIST_HEAD(&tbfd->e_list);
 	tbfd->bfd = bfdc->bfd;
-	list_add_tail(&tbfd->e_list, &new_checker->rs->tracked_bfds);
+	list_add_tail(&tbfd->e_list, &current_checker->rs->tracked_bfds);
 
 	/* Add the checker to the BFD */
 	PMALLOC(top);
 	INIT_LIST_HEAD(&top->e_list);
 	top->type = TRACK_CHECKER;
-	top->obj.checker = new_checker;
+	top->obj.checker = current_checker;
 	list_add_tail(&top->e_list, &bfdc->bfd->tracking_rs);
 
-	new_checker = NULL;
+	/* queue the checker */
+	list_add_tail(&current_checker->e_list, &checkers_queue);
 }
 
 void
 install_bfd_check_keyword(void)
 {
+	vpp_t check_ptr;
+
 	install_keyword("BFD_CHECK", &bfd_check_handler);
-	install_sublevel();
+	check_ptr = install_sublevel(VPP &current_checker);
 	install_keyword("name", &bfd_name_handler);
 	install_keyword("alpha", &bfd_alpha_handler);
-	install_sublevel_end_handler(&bfd_end_handler);
-	install_sublevel_end();
+	install_level_end_handler(&bfd_end_handler);
+	install_sublevel_end(check_ptr);
 }
 
 static void
@@ -326,8 +320,13 @@ bfd_check_thread(thread_ref_t thread)
 {
 	bfd_event_t evt;
 
+	if (thread->type == THREAD_READ_ERROR) {
+		thread_close_fd(thread);
+		return;
+	}
+
 	bfd_thread = thread_add_read(master, bfd_check_thread, NULL,
-				     thread->u.f.fd, TIMER_NEVER, false);
+				     thread->u.f.fd, TIMER_NEVER, 0);
 
 	if (thread->type != THREAD_READY_READ_FD)
 		return;
@@ -339,7 +338,7 @@ bfd_check_thread(thread_ref_t thread)
 void
 start_bfd_monitoring(thread_master_t *thread_master)
 {
-	thread_add_read(thread_master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER, false);
+	thread_add_read(thread_master, bfd_check_thread, NULL, bfd_checker_event_pipe[0], TIMER_NEVER, 0);
 }
 
 void

@@ -37,26 +37,20 @@
 #include "vrrp.h"
 #include "vrrp_if.h"
 
-/* Defines */
-enum vrrp_vmac_bits {
-	VRRP_VMAC_BIT = 0,
-	VRRP_VMAC_UP_BIT = 1,
-	VRRP_VMAC_XMITBASE_BIT = 2,
-#ifdef _HAVE_VRRP_IPVLAN_
-	VRRP_IPVLAN_BIT = 3,
-#endif
-};
 
 extern const char * const macvlan_ll_kind;
-extern u_char ll_addr[ETH_ALEN];
+extern const u_char ll_addr[ETH_ALEN];
 
 /* prototypes */
 extern bool add_link_local_address(interface_t *, struct in6_addr*);
+extern bool del_link_local_address(interface_t *);
 extern bool replace_link_local_address(interface_t *);
+extern bool reset_link_local_address(struct in6_addr*, vrrp_t *);
 #if !HAVE_DECL_IFLA_INET6_ADDR_GEN_MODE
 extern void remove_vmac_auto_gen_addr(interface_t *, struct in6_addr *);
 #endif
-extern bool netlink_link_add_vmac(vrrp_t *);
+extern bool set_link_local_address(const vrrp_t *);
+extern bool netlink_link_add_vmac(vrrp_t *, const interface_t *);
 extern void netlink_link_del_vmac(vrrp_t *);
 #ifdef _HAVE_VRRP_IPVLAN_
 extern bool netlink_link_add_ipvlan(vrrp_t *);

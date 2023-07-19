@@ -37,7 +37,7 @@
 static int
 snmp_keepalived_log(__attribute__((unused)) int major, __attribute__((unused)) int minor, void *serverarg, __attribute__((unused)) void *clientarg)
 {
-	struct snmp_log_message *slm = (struct snmp_log_message*)serverarg;
+	struct snmp_log_message *slm = PTR_CAST(struct snmp_log_message, serverarg);
 	int slm_len = strlen(slm->msg);
 
 	if (slm_len && slm->msg[slm_len-1] == '\n')
@@ -141,7 +141,7 @@ snmp_find_element(struct variable *vp, oid *name, size_t *length,
 		}
 
 		/* Find the list head of the inner list in the outer entry */
-		l1 = (list_head_t *) ((char *)e - offset_outer + offset_inner);
+		l1 = PTR_CAST(list_head_t, ((char *)e - offset_outer + offset_inner));
 
 		current[1] = 0;
 		list_for_each(e1, l1) {
@@ -192,6 +192,7 @@ enum snmp_global_magic {
 	SNMP_LINKBEAT,
 	SNMP_LVSFLUSH,
 	SNMP_LVSFLUSH_ONSTOP,
+	SNMP_V3_CHECKSUM_AS_V2,
 	SNMP_IPVS_64BIT_STATS,
 	SNMP_NET_NAMESPACE,
 	SNMP_DBUS,
@@ -222,25 +223,25 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 		ret.cp = global_data->router_id;
 		return ret.p;
 	case SNMP_MAIL_SMTPSERVERADDRESSTYPE:
-		long_ret = (global_data->smtp_server.ss_family == AF_INET6)?2:1;
-		return (u_char *)&long_ret;
+		long_ret = SNMP_InetAddressType(global_data->smtp_server.ss_family);
+		return PTR_CAST(u_char, &long_ret);
 	case SNMP_MAIL_SMTPSERVERADDRESS:
 		if (global_data->smtp_server.ss_family == AF_INET6) {
-			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&global_data->smtp_server;
+			struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, &global_data->smtp_server);
 			*var_len = 16;
-			return (u_char *)&addr6->sin6_addr;
+			return PTR_CAST(u_char, &addr6->sin6_addr);
 		} else {
-			struct sockaddr_in *addr4 = (struct sockaddr_in *)&global_data->smtp_server;
+			struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, &global_data->smtp_server);
 			*var_len = 4;
-			return (u_char *)&addr4->sin_addr;
+			return PTR_CAST(u_char, &addr4->sin_addr);
 		}
 		return NULL;
 	case SNMP_MAIL_SMTPSERVERPORT:
 		long_ret = ntohs(inet_sockaddrport(&global_data->smtp_server));
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 	case SNMP_MAIL_SMTPSERVERTIMEOUT:
 		long_ret = global_data->smtp_connection_to / TIMER_HZ;
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 	case SNMP_MAIL_EMAILFROM:
 		if (!global_data->email_from) return NULL;
 		*var_len = strlen(global_data->email_from);
@@ -248,25 +249,30 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 		return ret.p;
 #ifdef _WITH_VRRP_
 	case SNMP_MAIL_EMAILFAULTS:
-		long_ret = global_data->no_email_faults?2:1;
-		return (u_char *)&long_ret;
+		long_ret = SNMP_TruthValue(!global_data->no_email_faults);
+		return PTR_CAST(u_char, &long_ret);
 #endif
 	case SNMP_TRAPS:
-		long_ret = global_data->enable_traps?1:2;
-		return (u_char *)&long_ret;
+		long_ret = SNMP_TruthValue(global_data->enable_traps);
+		return PTR_CAST(u_char, &long_ret);
 #ifdef _WITH_LINKBEAT_
 	case SNMP_LINKBEAT:
-		long_ret = global_data->linkbeat_use_polling?2:1;
-		return (u_char *)&long_ret;
+		long_ret = global_data->linkbeat_use_polling ? 2 : 1;
+		return PTR_CAST(u_char, &long_ret);
 #endif
 #ifdef _WITH_LVS_
 	case SNMP_LVSFLUSH:
-		long_ret = global_data->lvs_flush?1:2;
-		return (u_char *)&long_ret;
+		long_ret = SNMP_TruthValue(global_data->lvs_flush);
+		return PTR_CAST(u_char, &long_ret);
 	case SNMP_LVSFLUSH_ONSTOP:
-		long_ret = global_data->lvs_flush_onstop == LVS_FLUSH_FULL ? 1 :
-			   global_data->lvs_flush_onstop == LVS_FLUSH_VS ? 3 : 2;
-		return (u_char *)&long_ret;
+		long_ret = global_data->lvs_flush_on_stop == LVS_FLUSH_FULL ? 1 :
+			   global_data->lvs_flush_on_stop == LVS_FLUSH_VS ? 3 : 2;
+		return PTR_CAST(u_char, &long_ret);
+#endif
+#ifdef _WITH_VRRP_
+	case SNMP_V3_CHECKSUM_AS_V2:
+		long_ret = SNMP_TruthValue(global_data->v3_checksum_as_v2);
+		return PTR_CAST(u_char, &long_ret);
 #endif
 	case SNMP_IPVS_64BIT_STATS:
 #ifdef _WITH_LVS_64BIT_STATS_
@@ -274,15 +280,13 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 #else
 		long_ret = 2;
 #endif
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 	case SNMP_NET_NAMESPACE:
-#if HAVE_DECL_CLONE_NEWNET
 		if (global_data->network_namespace) {
 			*var_len = strlen(global_data->network_namespace);
 			ret.cp = global_data->network_namespace;
 			return ret.p;
 		}
-#endif
 		*var_len = 0;
 		ret.cp = "";
 		return ret.p;
@@ -293,24 +297,24 @@ snmp_scalar(struct variable *vp, oid *name, size_t *length,
 		else
 #endif
 			long_ret = 2;
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 #ifdef _WITH_VRRP_
 	case SNMP_DYNAMIC_INTERFACES:
-		long_ret = global_data->dynamic_interfaces ? 1 : 2;
-		return (u_char *)&long_ret;
+		long_ret = SNMP_TruthValue(global_data->dynamic_interfaces);
+		return PTR_CAST(u_char, &long_ret);
 #endif
 	case SNMP_SMTP_ALERT:
 		long_ret = global_data->smtp_alert == -1 ? 3 : global_data->smtp_alert ? 1 : 2;
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 #ifdef _WITH_VRRP_
 	case SNMP_SMTP_ALERT_VRRP:
 		long_ret = global_data->smtp_alert_vrrp == -1 ? 3 : global_data->smtp_alert_vrrp ? 1 : 2;
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 #endif
 #ifdef _WITH_LVS_
 	case SNMP_SMTP_ALERT_CHECKER:
 		long_ret = global_data->smtp_alert_checker == -1 ? 3 : global_data->smtp_alert_checker ? 1 : 2;
-		return (u_char *)&long_ret;
+		return PTR_CAST(u_char, &long_ret);
 #endif
 	default:
 		break;
@@ -335,7 +339,7 @@ snmp_mail(struct variable *vp, oid *name, size_t *length,
 	switch (vp->magic) {
 	case SNMP_MAIL_EMAILADDRESS:
 		*var_len = strlen(email->addr);
-		return (u_char *)email->addr;
+		return PTR_CAST(u_char, email->addr);
 	default:
 		break;
 	}
@@ -390,6 +394,9 @@ static struct variable8 global_vars[] = {
 	/* lvsFlushOnStop */
 	{SNMP_LVSFLUSH_ONSTOP, ASN_INTEGER, RONLY, snmp_scalar, 1, {11}},
 #endif
+#ifdef _WITH_VRRP_
+	{SNMP_V3_CHECKSUM_AS_V2, ASN_INTEGER, RONLY, snmp_scalar, 1, {12}},
+#endif
 };
 
 static int
@@ -414,7 +421,7 @@ void snmp_register_mib(oid *myoid, size_t len, const char *name,
 {
 	char name_buf[80];
 
-	if (register_mib(name, (struct variable *) variables, varsize,
+	if (register_mib(name, PTR_CAST(struct variable, variables), varsize,
 			 varlen, myoid, len) != MIB_REGISTERED_OK)
 		log_message(LOG_WARNING, "Unable to register %s MIB", name);
 
@@ -474,7 +481,7 @@ snmp_agent_init(const char *snmp_socket_name, bool base_mib)
 	init_agent(global_name);
 	if (base_mib)
 		snmp_register_mib(global_oid, OID_LENGTH(global_oid), global_name,
-				  (struct variable *)global_vars,
+				  PTR_CAST(struct variable, global_vars),
 				  sizeof(struct variable8),
 				  sizeof(global_vars)/sizeof(struct variable8));
 	init_snmp(global_name);
@@ -498,6 +505,7 @@ snmp_agent_close(bool base_mib)
 	if (base_mib)
 		snmp_unregister_mib(global_oid, OID_LENGTH(global_oid));
 	snmp_shutdown(global_name);
+	shutdown_agent();
 
 	snmp_running = false;
 }

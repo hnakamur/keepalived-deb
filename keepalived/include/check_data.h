@@ -35,6 +35,7 @@
 
 
 /* local includes */
+#include "logger.h"
 #include "ip_vs.h"
 #include "list_head.h"
 #include "vector.h"
@@ -43,9 +44,23 @@
 #ifdef _WITH_BFD_
 #include "check_bfd.h"
 #endif
+#ifdef _WITH_NFTABLES_
+#include "logger.h"
+#include "sockaddr.h"
+#endif
 
 /* Daemon dynamic data structure definition */
 #define KEEPALIVED_DEFAULT_DELAY	(60 * TIMER_HZ)
+
+#ifdef _WITH_NFTABLES_
+/* Used for arrays of protocol entries */
+typedef enum {
+	TCP_INDEX,
+	UDP_INDEX,
+	SCTP_INDEX,
+	PROTO_INDEX_MAX
+} proto_index_t;
+#endif
 
 /* SSL specific data */
 typedef struct _ssl_data {
@@ -61,12 +76,11 @@ typedef struct _ssl_data {
 
 /* Real Server definition */
 typedef struct _real_server {
-	struct sockaddr_storage		addr;
-	int				weight;
-	int				effective_weight;
+	sockaddr_t			addr;
+	int64_t				effective_weight;
+	int64_t				peffective_weight; /* previous weight
+							    * used for reloading */
 	int				iweight;	/* Initial weight */
-	int				pweight;	/* previous weight
-							 * used for reloading */
 	unsigned			forwarding_method; /* NAT/TUN/DR */
 #ifdef _HAVE_IPVS_TUN_TYPE_
 	int				tun_type;	/* tunnel type */
@@ -74,6 +88,9 @@ typedef struct _real_server {
 #ifdef _HAVE_IPVS_TUN_CSUM_
 	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
 #endif
+#endif
+#ifdef _WITH_SNMP_CHECKER_
+	const char			*snmp_name;
 #endif
 	uint32_t			u_threshold;	/* Upper connection limit. */
 	uint32_t			l_threshold;	/* Lower connection limit. */
@@ -119,8 +136,8 @@ typedef struct _virtual_server_group_entry {
 	bool				is_fwmark;
 	union {
 		struct {
-			struct sockaddr_storage	addr;
-			uint32_t	range;
+			sockaddr_t	addr;
+			sockaddr_t	addr_end;
 			unsigned	tcp_alive;
 			unsigned	udp_alive;
 			unsigned	sctp_alive;
@@ -145,6 +162,9 @@ typedef struct _virtual_server_group {
 	bool				have_ipv4;
 	bool				have_ipv6;
 	bool				fwmark_no_family;
+#ifdef _WITH_NFTABLES_
+	unsigned			auto_fwmark[PROTO_INDEX_MAX];
+#endif
 
 	/* Linked list member */
 	list_head_t			e_list;
@@ -154,7 +174,7 @@ typedef struct _virtual_server_group {
 typedef struct _virtual_server {
 	const char			*vsgname;
 	virtual_server_group_t		*vsg;
-	struct sockaddr_storage		addr;
+	sockaddr_t			addr;
 	uint32_t			vfwmark;
 	real_server_t			*s_svr;
 	bool				s_svr_duplicates_rs;
@@ -165,9 +185,7 @@ typedef struct _virtual_server {
 	char				sched[IP_VS_SCHEDNAME_MAXLEN];
 	uint32_t			flags;
 	uint32_t			persistence_timeout;
-#ifdef _HAVE_PE_NAME_
 	char				pe_name[IP_VS_PENAME_MAXLEN + 1];
-#endif
 	unsigned			forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
 	int				tun_type;	/* tunnel type */
@@ -175,6 +193,9 @@ typedef struct _virtual_server {
 #ifdef _HAVE_IPVS_TUN_CSUM_
 	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
 #endif
+#endif
+#ifdef _WITH_SNMP_CHECKER_
+	const char			*snmp_name;
 #endif
 	uint32_t			persistence_granularity;
 	const char			*virtualhost;	/* Default virtualhost for HTTP and SSL healthcheckers
@@ -240,6 +261,33 @@ typedef struct _check_data {
 #define IP_VS_SVC_F_SCHED_MH_FALLBACK IP_VS_SVC_F_SCHED_SH_FALLBACK
 #endif
 
+static inline int
+real_weight(int64_t effective_weight)
+{
+	if (effective_weight < 0)
+		return 0;
+	if (effective_weight > IPVS_WEIGHT_LIMIT)
+		return IPVS_WEIGHT_LIMIT;
+	return effective_weight;
+}
+
+#ifdef _WITH_NFTABLES_
+static inline proto_index_t
+protocol_to_index(int proto)
+{
+	if (proto == IPPROTO_TCP)
+		return TCP_INDEX;
+	if (proto == IPPROTO_UDP)
+		return UDP_INDEX;
+	if (proto == IPPROTO_SCTP)
+		return SCTP_INDEX;
+
+	log_message(LOG_INFO, "Unknown protocol %d at %s:%d in %s", proto, __func__, __LINE__, __FILE__);
+
+	return UDP_INDEX;
+}
+#endif
+
 /* Global vars exported */
 extern check_data_t *check_data;
 extern check_data_t *old_check_data;
@@ -247,12 +295,12 @@ extern check_data_t *old_check_data;
 /* prototypes */
 extern ssl_data_t *alloc_ssl(void) __attribute((malloc));
 extern void free_ssl(void);
-extern void alloc_vsg(const char *);
+extern virtual_server_group_t *alloc_vsg(const char *);
 extern void free_vsg(virtual_server_group_t *);
 extern void alloc_vsg_entry(const vector_t *);
-extern void alloc_rs(const char *, const char *);
+extern real_server_t *alloc_rs(const char *, const char *);
 extern void free_rs(real_server_t *);
-extern void alloc_vs(const char *, const char *);
+extern virtual_server_t *alloc_vs(const char *, const char *);
 extern void free_vs(virtual_server_t *);
 extern void dump_tracking_rs(FILE *, const void *);
 extern void alloc_ssvr(const char *, const char *);

@@ -26,25 +26,24 @@
 #include <string.h>
 
 #include "logger.h"
+#include "global_data.h"
 
 #include "check_print.h"
 #include "check_data.h"
 #include "utils.h"
 
-static const char *dump_file = "/tmp/keepalived_check.data";
 
 void
 check_print_data(void)
 {
-	FILE *file = fopen_safe(dump_file, "w");
+	FILE *fp;
 
-	if (!file) {
-		log_message(LOG_INFO, "Can't open %s (%d: %s)",
-			dump_file, errno, strerror(errno));
+	fp = open_dump_file("keepalived_check.data");
+
+	if (!fp)
 		return;
-	}
 
-	dump_data_check(file);
+	dump_data_check(fp);
 
-	fclose(file);
+	fclose(fp);
 }

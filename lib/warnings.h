@@ -29,7 +29,6 @@
 
 #include "config.h"
 
-
 /* musl does not define __GNUC_PREREQ, so create a dummy definition */
 #ifndef __GNUC_PREREQ
 #define __GNUC_PREREQ(maj, min) 0
@@ -41,22 +40,30 @@
  * See https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html for GCC warnings
 */
 
+#ifdef _HAVE_FUNCTION_WARN_UNUSED_RESULTS_
+#define WARN_UNUSED_RESULT __attribute__((warn_unused_result))
+#else
+#define WARN_UNUSED_RESULT
+#endif
+
 #ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
+#define RELAX_END \
+_Pragma("GCC diagnostic pop")
+#else
+#define RELAX_END
+#endif
+
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_STACK_PROTECTOR_
 #define RELAX_STACK_PROTECTOR_START \
 _Pragma("GCC diagnostic push") \
 _Pragma("GCC diagnostic ignored \"-Wstack-protector\"")
+#define RELAX_STACK_PROTECTOR_END RELAX_END
 #else
 #define RELAX_STACK_PROTECTOR_START
-#endif
-
-#ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
-#define RELAX_STACK_PROTECTOR_END \
-_Pragma("GCC diagnostic pop")
-#else
 #define RELAX_STACK_PROTECTOR_END
 #endif
 
-#if __GNUC__ && !__GNUC_PREREQ(8,0) && defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
+#if __GNUC__ && !__GNUC_PREREQ(8,0) && defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_STRICT_OVERFLOW_
 #ifdef _HAVE_PRAGMA_WARN_STRICT_OVERFLOW_1_
 #define RELAX_STRICT_OVERFLOW_START \
 _Pragma("GCC diagnostic push") \
@@ -66,45 +73,70 @@ _Pragma("GCC diagnostic warning \"-Wstrict-overflow=1\"")
 _Pragma("GCC diagnostic push") \
 _Pragma("GCC diagnostic warning \"-Wstrict-overflow\"")
 #endif
+#define RELAX_STRICT_OVERFLOW_END RELAX_END
 #else
 #define RELAX_STRICT_OVERFLOW_START
-#endif
-
-#if __GNUC__ && !__GNUC_PREREQ(8,0) && defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
-#define RELAX_STRICT_OVERFLOW_END \
-_Pragma("GCC diagnostic pop")
-#else
 #define RELAX_STRICT_OVERFLOW_END
 #endif
 
-#ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_CAST_QUAL_
 #define RELAX_CAST_QUAL_START \
 _Pragma("GCC diagnostic push") \
 _Pragma("GCC diagnostic ignored \"-Wcast-qual\"")
+#define RELAX_CAST_QUAL_END RELAX_END
 #else
 #define RELAX_CAST_QUAL_START
-#endif
-
-#ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
-#define RELAX_CAST_QUAL_END \
-_Pragma("GCC diagnostic pop")
-#else
 #define RELAX_CAST_QUAL_END
 #endif
 
-#ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_SUGGEST_ATTRIBUTE_CONST_START_
 #define RELAX_SUGGEST_ATTRIBUTE_CONST_START \
 _Pragma("GCC diagnostic push") \
 _Pragma("GCC diagnostic ignored \"-Wsuggest-attribute=const\"")
+#define RELAX_SUGGEST_ATTRIBUTE_CONST_END RELAX_END
 #else
 #define RELAX_SUGGEST_ATTRIBUTE_CONST_START
+#define RELAX_SUGGEST_ATTRIBUTE_CONST_END
 #endif
 
-#ifdef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
-#define RELAX_SUGGEST_ATTRIBUTE_CONST_END \
-_Pragma("GCC diagnostic pop")
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_STRINGOP_OVERFLOW_
+#define RELAX_STRINGOP_OVERFLOW \
+_Pragma("GCC diagnostic push") \
+_Pragma("GCC diagnostic ignored \"-Wstringop-overflow\"")
+#define RELAX_STRINGOP_OVERFLOW_END RELAX_END
 #else
-#define RELAX_SUGGEST_ATTRIBUTE_CONST_END
+#define RELAX_STRINGOP_OVERFLOW
+#define RELAX_STRINGOP_OVERFLOW_END
+#endif
+
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_NESTED_EXTERNS_
+# define RELAX_NESTED_EXTERNS_START \
+_Pragma("GCC diagnostic push") \
+_Pragma("GCC diagnostic ignored \"-Wnested-externs\"")
+#define RELAX_NESTED_EXTERNS_END RELAX_END
+#else
+#define RELAX_NESTED_EXTERNS_START
+#define RELAX_NESTED_EXTERNS_END
+#endif
+
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_REDUNDANT_DECLS_
+#define RELAX_REDUNDANT_DECLS_START \
+_Pragma("GCC diagnostic push") \
+_Pragma("GCC diagnostic ignored \"-Wredundant-decls\"")
+#define RELAX_REDUNDANT_DECLS_END RELAX_END
+#else
+#define RELAX_REDUNDANT_DECLS_START
+#define RELAX_REDUNDANT_DECLS_END
+#endif
+
+#if defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_ && defined _HAVE_WARNING_INLINE_
+#define RELAX_INLINE_START \
+_Pragma("GCC diagnostic push") \
+_Pragma("GCC diagnostic ignored \"-Winline\"")
+#define RELAX_INLINE_END RELAX_END
+#else
+#define RELAX_INLINE_START
+#define RELAX_INLINE_END
 #endif
 
 #endif
