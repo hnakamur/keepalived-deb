@@ -1,3 +1,10 @@
+keepalived (1:2.2.8-1ppa1ubuntu20.04) focal; urgency=medium
+
+  * New upstream version 2.2.8
+  * Copy patch for reproducible build from debian
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Wed, 19 Jul 2023 17:29:25 +0900
+
 keepalived (1:2.1.5-1ubuntu1ppa1~focal) focal; urgency=medium
 
   * New upstream version 2.1.5
