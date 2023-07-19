@@ -1,3 +1,10 @@
+keepalived (1:2.2.8-1ppa1ubuntu18.04) bionic; urgency=medium
+
+  * New upstream version 2.2.8
+  * Copy patch for reproducible build from debian
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Wed, 19 Jul 2023 17:20:20 +0900
+
 keepalived (1:2.1.5-1ubuntu1ppa1~bionic) bionic; urgency=medium
 
   * New upstream version 2.1.5
