@@ -55,8 +55,8 @@ AC_DEFUN([add_pkg_config_without_libs],
     else
       KA_PKG_PFX=KA
     fi
-    add_to_var_ind_unique([${KA_PKG_PFX}_CPPFLAGS], [$($PKG_CONFIG --cflags-only-I $1)])
-    add_to_var_ind_unique([${KA_PKG_PFX}_CFLAGS], [$($PKG_CONFIG --cflags-only-other $1)])
+    add_to_var_ind_unique([${KA_PKG_PFX}_CPPFLAGS], [`$PKG_CONFIG --cflags-only-I $1`])
+    add_to_var_ind_unique([${KA_PKG_PFX}_CFLAGS], [`$PKG_CONFIG --cflags-only-other $1`])
   ])
 
 AC_DEFUN([add_config_opt], [add_to_var([CONFIG_OPTIONS], [$1])])
@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.2.7], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.2.8], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
@@ -179,6 +179,8 @@ AC_ARG_ENABLE(regex,
   [AS_HELP_STRING([--enable-regex], [build with HTTP_GET regex checking])])
 AC_ARG_ENABLE(vmac,
   [AS_HELP_STRING([--disable-vmac], [build without VMAC support])])
+AC_ARG_ENABLE(nm,
+  [AS_HELP_STRING([--enable-nm], [enable setting VMACs unmanaged by NetworkManager (for pre 1.18 NM)])])
 AC_ARG_ENABLE(regex-timers,
   [AS_HELP_STRING([--enable-regex-timers], [build with HTTP_GET regex timers])])
 AC_ARG_ENABLE(json,
@@ -240,9 +242,13 @@ AC_ARG_ENABLE(warnings,
 AC_ARG_ENABLE(extra-warnings,
   [AS_HELP_STRING([--enable-extra-warnings], [extra compiler warnings that will probably produce many warnings])])
 AC_ARG_ENABLE(mem-check,
-  [AS_HELP_STRING([--enable-mem-check], [compile with memory alloc checking])])
+  [AS_HELP_STRING([--enable-mem-check], [compile with memory alloc checking - e.g. no writes before or after buffer, everything allocated is freed])])
 AC_ARG_ENABLE(mem-check-log,
   [AS_HELP_STRING([--enable-mem-check-log], [compile with memory alloc checking writing to syslog])])
+AC_ARG_ENABLE(openssl-mem-check,
+  [AS_HELP_STRING([--enable-openssl-mem-check], [compile with OpenSSL memory alloc checking - e.g. no writes before or after buffer, everything allocated is freed])])
+AC_ARG_ENABLE(malloc-check,
+  [AS_HELP_STRING([--enable-malloc-check], [compile with malloc checking - i.e. malloc etc returning NULL])])
 AC_ARG_ENABLE(timer-check,
   [AS_HELP_STRING([--enable-timer-check], [compile with set time logging])])
 AC_ARG_ENABLE(debug,
@@ -319,7 +325,8 @@ AC_ARG_ENABLE(force-conversion-checks,
 AC_ARG_ENABLE(Werror,
   [AS_HELP_STRING([--enable-Werror], [compile with warnings being errors])])
 AC_ARG_WITH([systemdsystemunitdir],
-  [AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files])])
+  [AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files])],,
+  [with_systemdsystemunitdir=auto])
 AC_ARG_WITH([dbus-data-dir],
   [AS_HELP_STRING([--with-dbus-data-dir=DIR], [Directory for Dbus interface files])])
 
@@ -341,6 +348,8 @@ elif test ! -d /usr/include/linux -a \
 else
   kernelinc=
 fi
+
+SRC_DIR=`AS_DIRNAME([$0])`
 
 AS_IF([test -n "$with_samples_dir"],
   [
@@ -399,6 +408,13 @@ KA_CFLAGS="-g $CFLAGS"
 KA_LDFLAGS=$LDFLAGS
 KA_LIBS=$LDLIBS
 
+# For reporting GCC bugs, uncomment the next two lines
+#KA_CPPFLAGS="$KA_CPPFLAGS -v -save-temps"
+#KA_CFLAGS="$KA_CFLAGS -v -save-temps"
+
+# To produce mixed source and assembly
+#KA_CFLAGS="$KA_CFLAGS -Wa,adhln"
+
 NEED_LIBDL=No
 #KA_LIBTOOLFLAGS =
 
@@ -437,8 +453,8 @@ AS_IF([test .$enable_vrrp = .no],
     AS_IF([test .$enable_routes != .], [AC_MSG_ERROR([disable-routes requires vrrp])])
     AS_IF([test .$enable_linkbeat != .], [AC_MSG_ERROR([disable-linkbeat requires vrrp])])
     AS_IF([test .$enable_bfd != .], [AC_MSG_ERROR([enable-bfd requires vrrp])])
-    AS_IF([test .$enable_iptables != .no], [AC_MSG_ERROR([enable-iptables requires vrrp])])
-    AS_IF([test .$enable_track_process != .], [AC_MSG_ERROR([enable-track-process requires vrrp])])
+    AS_IF([test .$enable_iptables != .no], [AC_MSG_ERROR([disable-iptables requires vrrp])])
+    AS_IF([test .$enable_track_process != .], [AC_MSG_ERROR([disable-track-process requires vrrp])])
     AS_IF([test .$enable_network_timestamp != .], [AC_MSG_ERROR([enable-network-timestamp requires vrrp])])
     AS_IF([test .$enable_netlink_timers != .], [AC_MSG_ERROR([enable-netlink-timers requires vrrp])])
   )
@@ -449,7 +465,7 @@ AS_IF([test .$enable_libipset = .no],
     AS_IF([test .$enable_libipset_dynamic != .], [AC_MSG_ERROR([disable-libipset-dynamic requires ipsets])])
   )
 AS_IF([test .$enable_snmp_rfc != .yes -a .$enable_snmp_rfcv3 != yes],
-    AS_IF([test .$enable_snmp_reply_v3_for_v2 != .], [AC_MSG_ERROR([enable-snmp-reply-v3-for-v2 requires enable-snmp-rfcv3 or enable-snmp-rfc])])
+    AS_IF([test .$enable_snmp_reply_v3_for_v2 != .], [AC_MSG_ERROR([disable-snmp-reply-v3-for-v2 requires enable-snmp-rfcv3 or enable-snmp-rfc])])
   )
 AS_IF([test .$enable_dbus != .yes],
     AS_IF([test .$enable_dbus_create_instance != .], [AC_MSG_ERROR([enable-dbus-create-instance requires enable-dbus])])
@@ -459,8 +475,9 @@ AS_IF([test .$enable_lvs = .no],
     AS_IF([test .$enable_libnl != .], [AC_MSG_ERROR([disable-libnl requires lvs])])
     AS_IF([test .$enable_lvs_syncd != .], [AC_MSG_ERROR([disable-lvs-syncd requires lvs])])
     AS_IF([test .$enable_lvs_64bit_stats != .], [AC_MSG_ERROR([disable-lvs-64bit-stats requires lvs])])
-    AS_IF([test .$enable_fwmark != .], [AC_MSG_ERROR([enable-fwmark requires lvs])])
+    AS_IF([test .$enable_fwmark != .], [AC_MSG_ERROR([disable-fwmark requires lvs])])
     AS_IF([test .$enable_checker_debug != .], [AC_MSG_ERROR([enable-checker-debug requires lvs])])
+    AS_IF([test .$enable_openssl_mem_check != .], [AC_MSG_ERROR([enable-openssl-mem-check requires lvs])])
   )
 AS_IF([test .$enable_libnl = .no],
     AS_IF([test .$enable_libnl_dynamic != .], [AC_MSG_ERROR([enable-libnl-dynamic requires lvs and libnl])])
@@ -525,7 +542,7 @@ AS_IF([test .$with_run_dir != .], [AC_MSG_ERROR([--with-run-dir is deprecated, u
 
 dnl -- Do we want -Wcast-align=strict?
 AS_IF([test .$enable_strict_cast_align = .yes],
-      [WARNINGS_STD=$(echo $WARNINGS_STD | sed -e "s/cast-align /cast-align=strict /")])
+      [WARNINGS_STD=`echo $WARNINGS_STD | sed -e "s/cast-align /cast-align=strict /"`])
 
 #### find the actual value for $datadir that we'll end up with
 ##   (I know this is broken and should be done in the Makefile, but
@@ -572,8 +589,8 @@ AS_IF([test $CC = gcc],
     ])
   ])
 AS_IF([test $GCC_LTO = yes],
-  [AC_DEFINE([LTO_NOINLINE], [ __attribute__((noinline)) ], [Define to not inline if using GCC LTO])],
-  [AC_DEFINE([LTO_NOINLINE], [], [Define to not inline if using GCC LTO])])
+  [AC_DEFINE([GCC_LTO_NOINLINE], [ __attribute__((noinline)) ], [Define to not inline if using GCC LTO])],
+  [AC_DEFINE([GCC_LTO_NOINLINE], [], [Define to not inline if using GCC LTO])])
 
 dnl -- ulibc/glibc differences
 AC_MSG_CHECKING([msghdr.msg_controllen is size_t])
@@ -709,7 +726,7 @@ if test "$enable_Werror" = yes; then
   add_to_var([WARNINGS_ENABLED], [error])
 fi
 
-CONFIG_WARNINGS=lib/config_warnings.h.in
+CONFIG_WARNINGS=$SRC_DIR/lib/config_warnings.h.in
 
 SAV_CFLAGS="$CFLAGS"
 for WARN in $WARNINGS_ENABLED
@@ -784,7 +801,10 @@ AS_IF([test .$HAVE_WARNING_STRICT_OVERFLOW = .yes],
      )
 CFLAGS="$SAV_CFLAGS"
 
-dnl ---- [ Is function __attribute__((error(msg)) supported? ] ----
+# keepalived is not suitable for assuming strict aliasing (it does a lot of type casting)
+add_to_var([KA_CFLAGS], [-fno-strict-aliasing])
+
+dnl ---- [ Is function __attribute__((error(msg))) supported? ] ----
 AC_MSG_CHECKING([for function __attribute__((error(msg))) support])
 AC_COMPILE_IFELSE(
   [
@@ -792,7 +812,9 @@ AC_COMPILE_IFELSE(
       [[
         #include <stdio.h>
 
-        static int func(int i) __attribute__((error("deliberate error")))
+        static int func(int i) __attribute__((error("deliberate-error")));
+
+        static int func(int i)
 	{
 	  return i * 2;
 	}
@@ -812,6 +834,38 @@ AC_COMPILE_IFELSE(
     AC_MSG_RESULT([yes])
     AC_DEFINE([_HAVE_FUNCTION_ATTRIBUTE_ERROR_], [ 1 ], [Define to 1 if function __attribute__((error(msg))) supported])
   ])
+
+SAV_CFLAGS="$CFLAGS"
+CFLAGS="$SAV_CFLAGS -Werror=attributes"
+dnl ---- [ Is function __attribute__((warn_unused_result)) supported? ] ----
+AC_MSG_CHECKING([for function __attribute__((warn_unused_result)) support])
+AC_COMPILE_IFELSE(
+  [
+    AC_LANG_PROGRAM(
+      [[
+        #include <stdio.h>
+
+        static int func(int i) __attribute__((warn_unused_result));
+
+        static int func(int i)
+	{
+	  return i * 2;
+	}
+      ]],
+      [[
+	func(2);
+	printf("%d", 2);
+      ]]
+    )
+  ],
+  [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([_HAVE_FUNCTION_WARN_UNUSED_RESULTS_], [ 1 ], [Define to 1 if function __attribute__((warn_unused_results)) supported])
+  ],
+  [
+    AC_MSG_RESULT([no])
+  ])
+CFLAGS="$SAV_CFLAGS"
 
 dnl ---- [ Do we want stricter configuration checking? ] ----
 STRICT_CONFIG=No
@@ -919,6 +973,45 @@ AC_SUBST(KA_LDFLAGS)
 AC_SUBST(KA_LIBS)
 # AC_SUBST(KA_LIBTOOLFLAGS)
 
+# Check for fallthrough attribute
+echo CFLAGS=$KA_CFLAGS
+SAV_CFLAGS=$CFLAGS
+CFLAGS="$KA_CFLAGS -Werror"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+  int main(int argc, char **argv)
+  {
+    switch(argc) {
+    case 1:
+      argv[0][0] = argv[0][1];
+      [[fallthrough]];
+    case 2:
+      argv[1][0] = argv[1][1];
+      break;
+    }
+  }
+  ]])],
+  [
+    AC_DEFINE([__fallthrough], [ [[[fallthrough]]] ], [Define fallthrough attribute])
+  ],
+  [
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+      int main(int argc, char **argv)
+      {
+	switch(argc) {
+	case 1:
+	  argv[0][0] = argv[0][1];
+	  __attribute__((fallthrough));
+	case 2:
+	  argv[1][0] = argv[1][1];
+	  break;
+	}
+      }
+      ]])],
+      [AC_DEFINE([__fallthrough], [ __attribute__((fallthrough)) ], [Define fallthrough attribute])],
+      [AC_DEFINE([__fallthrough], [ ], [Define fallthrough attribute])])
+  ])
+CFLAGS=$SAV_CFLAGS
+
 # Check if unaligned memory access is supported (for ARM not supported prior to ARMv6 processors)
 AC_MSG_CHECKING([for unaligned memory access])
 AC_RUN_IFELSE(
@@ -974,7 +1067,7 @@ AC_RUN_IFELSE(
 AC_MSG_CHECKING([for unaligned memory access causes warnings])
 UNALIGNED_ACCESS_WARNED=0
 SAV_CFLAGS="$CFLAGS"
-CFLAGS=$(echo $KA_CFLAGS | sed -e "s/.*\(-Wcast-align[[^ ]]*\) .*/\1/")
+CFLAGS=`echo $KA_CFLAGS | sed -e "s/.*\(-Wcast-align[[^ ]]*\) .*/\1/"`
 CFLAGS="$CFLAGS -Werror"
 AC_COMPILE_IFELSE(
   [
@@ -998,7 +1091,7 @@ AC_COMPILE_IFELSE(
  )
 CFLAGS="$SAV_CFLAGS"
 
-dnl - Do we want/need to cat via a void *?
+dnl - Do we want/need to cast via a void *?
 AS_IF([test .$enable_cast_via_void = .no],
   [],
   [
@@ -1253,8 +1346,6 @@ AC_CHECK_HEADERS([openssl/ssl.h openssl/err.h], [],
   !!! OpenSSL is not properly installed on your system. !!!
   !!! Can not include OpenSSL headers files.            !!!])
     fi
-    NEED_SSL=no
-    break
   ])
 AC_CHECK_HEADERS([openssl/md5.h openssl/evp.h], [],
   [
@@ -1263,8 +1354,6 @@ AC_CHECK_HEADERS([openssl/md5.h openssl/evp.h], [],
   !!! OpenSSL is not properly installed on your system. !!!
   !!! Can not include OpenSSL EVP headers files.        !!!])
     fi
-    NEED_EVP=no
-    break
   ])
 unset LIBS
 
@@ -1274,6 +1363,18 @@ if test $? -eq 0; then
 else
   OPENSSL_LIBS="-lssl -lcrypto"
 fi
+
+EXTRA_LIBS=`echo $OPENSSL_LIBS | sed -e "s/-lssl//"`
+AC_CHECK_LIB(ssl, SSL_CTX_new, [],
+  [
+    if test $NEED_SSL = yes; then
+      AC_MSG_ERROR([OpenSSL libraries are required])
+    fi
+  ], [$EXTRA_LIBS])
+if test $NEED_SSL = yes; then
+  add_to_var([KA_LIBS], [$LIBS])
+fi
+unset LIBS
 
 EXTRA_LIBS=`echo $OPENSSL_LIBS | sed -e "s/-lcrypto//"`
 AC_CHECK_LIB(crypto, EVP_DigestInit_ex, [],
@@ -1291,18 +1392,6 @@ if test $NEED_EVP = yes; then
       AC_DEFINE([EVP_MD_CTX_reset(ctx)], [EVP_MD_CTX_init(ctx)], [Named changed in OpenSSL v1.1.0])
     ],
     [$EXTRA_LIBS])
-fi
-unset LIBS
-
-EXTRA_LIBS=`echo $OPENSSL_LIBS | sed -e "s/-lssl//"`
-AC_CHECK_LIB(ssl, SSL_CTX_new, [],
-  [
-    if test $NEED_SSL = yes; then
-      AC_MSG_ERROR([OpenSSL libraries are required])
-    fi
-  ], [$EXTRA_LIBS])
-if test $NEED_SSL = yes; then
-  add_to_var([KA_LIBS], [$LIBS])
 fi
 unset LIBS
 
@@ -1327,7 +1416,10 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
 AC_CHECK_FUNCS([SSL_CTX_set_verify_depth])
 
 # SSL_set0_rbio(), SSL_set0_wbio() OPENSSL_init_crypto() and TLS_method() introduced OpenSSL v1.1.0
-AC_CHECK_FUNCS([SSL_set0_rbio OPENSSL_init_crypto TLS_method])
+AC_CHECK_FUNCS([SSL_set0_rbio SSL_set0_wbio OPENSSL_init_crypto TLS_method])
+
+# ERR_get_error_all introduced in OpenSSL v3.0
+AC_CHECK_FUNCS([ERR_get_error_all])
 
 # In OpenSSL v1.1.1 the call to SSL_CTX_new() fails if OPENSSL_init_crypto() has been called with
 # OPENSSL_INIT_NO_LOAD_CONFIG. It does not fail in v1.1.0h and v1.1.1b.
@@ -1754,6 +1846,11 @@ if test .${enable_nftables} != .no; then
 	],[
 	  AC_MSG_RESULT(no)
 	])
+
+      # nft l4proto from Linux 3.14
+      AC_CHECK_DECLS([NFT_META_L4PROTO], [], [],
+        [#include <linux/netfilter/nf_tables.h>])
+
       # nft dup from Linux 4.3
       AC_CHECK_DECLS([NFTA_DUP_MAX], [], [],
         [#include <linux/netfilter/nf_tables.h>])
@@ -2186,6 +2283,24 @@ if test ${MACVLAN_SUPPORT} = Yes; then
   CPPFLAGS="$SAV_CPPFLAGS"
 fi
 
+LIBNM_SUPPORT=No
+AS_IF([test \( ${MACVLAN_SUPPORT} = Yes -a .$enable_nm = .yes \)],
+  [
+    dnl ----[ Check if libnm available ]----
+    $PKG_CONFIG --exists libnm
+    AS_IF([ test $? -eq 0 ],
+      [
+	AC_DEFINE([_HAVE_LIBNM_], [ 1 ], [Define to 1 to use libnm])
+	add_pkg_config([libnm])
+	add_system_opt([LIBNM])
+	LIBNM_SUPPORT=Yes
+      ],
+      [
+        AC_MSG_ERROR([--enable-nm requires NetworkManager libnm development package to be installed])
+      ])
+  ])
+AM_CONDITIONAL([NETWORK_MANAGER], [test $LIBNM_SUPPORT = Yes])
+
 dnl ----[ Checks for SNMP support ]----
 SNMP_SUPPORT=No
 SNMP_KEEPALIVED_SUPPORT=No
@@ -2432,9 +2547,9 @@ if test "$enable_dbus" = yes; then
 
       dnl -- g_type_init() not needed and deprecated since glib 2.36
       SAV_CFLAGS=$CFLAGS
-      CFLAGS="$($PKG_CONFIG --cflags gio-2.0)"
+      CFLAGS=`$PKG_CONFIG --cflags gio-2.0`
       SAV_LIBS=$LIBS
-      LIBS="$($PKG_CONFIG --libs gio-2.0)"
+      LIBS=`$PKG_CONFIG --libs gio-2.0`
       AC_RUN_IFELSE(
 	[
 	  AC_LANG_PROGRAM(
@@ -2551,6 +2666,23 @@ if test "${enable_mem_check}" = "yes"; then
     AC_DEFINE([_MEM_CHECK_LOG_], [ 1 ], [Define to 1 to log malloc/free checks to syslog])
     add_config_opt([MEM_CHECK_LOG])
   fi
+fi
+
+dnl ----[ Malloc check or not ? ]----
+MALLOC_CHECK=No
+AS_IF([test ."${enable_malloc_check}" = ."yes"],
+  [
+    MALLOC_CHECK=Yes
+    AC_DEFINE([_MALLOC_CHECK_], [ 1 ], [Define to 1 to build with malloc failure checks])
+    add_config_opt([MALLOC_CHECK])
+  ])
+
+dnl ----[ OpenSSL memory alloc check or not ? ]----
+OPENSSL_MEM_CHECK=No
+if test "${enable_openssl_mem_check}" = "yes"; then
+  OPENSSL_MEM_CHECK=Yes
+  AC_DEFINE([_OPENSSL_MEM_CHECK_], [ 1 ], [Define to 1 to build with malloc/free checks])
+  add_config_opt([OPENSSL_MEM_CHECK])
 fi
 
 dnl ----[ Log calls to set_time or not ? ]----
@@ -2869,8 +3001,27 @@ AS_IF(
 	  ])
       ])
   ])
-AS_IF([test \( .$INIT_TYPE = .systemd -a -z "$with_systemdsystemunitdir" \)], [with_systemdsystemunitdir=$($PKG_CONFIG --variable=systemdsystemunitdir systemd)])
 AS_IF([test .$INIT_TYPE != .], [add_config_opt([INIT=$INIT_TYPE])])
+
+AS_IF([test .$INIT_TYPE = .systemd],
+  [
+    AS_IF([test -z "$with_systemdsystemunitdir" -o \
+		.$with_systemdsystemunitdir = .yes -o \
+		.$with_systemdsystemunitdir = .auto], 
+      [
+	def_systemdsystemunitdir=`$PKG_CONFIG --variable=systemdsystemunitdir systemd`
+
+	AS_IF([test -z "$def_systemdsystemunitdir"],
+          [
+            AS_IF([test .$with_systemdsystemunitdir = .yes],
+              [AC_MSG_ERROR([systemd support requested but pkg-config unable to query systemd package])])
+            with_systemdsystemunitdir=no
+          ],
+          [with_systemdsystemunitdir="$def_systemdsystemunitdir"])
+      ])
+    AS_IF([test .$with_systemdsystemunitdir != .no],
+      [AC_SUBST([systemdsystemunitdir], [$with_systemdsystemunitdir])])
+  ])
 
 USE_SYSTEMD_NOTIFY=No
 SYSTEMD_SERVICE_TYPE=forking
@@ -2887,8 +3038,20 @@ AS_IF([test .$INIT_TYPE = .systemd],
 	add_pkg_config([libsystemd])
 	AC_DEFINE([_USE_SYSTEMD_NOTIFY_], [ 1 ], [Define to 1 if want systemd notify support])
 	add_config_opt([SYSTEMD_NOTIFY])
-	SYSTEMD_SERVICE_TYPE="notify\\nNotifyAccess=all"
+	SYSTEMD_SERVICE_TYPE="notify"
 	SYSTEMD_EXEC_START_OPTIONS+="--dont-fork"
+	SAV_CFLAGS=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+	  #include <systemd/sd-daemon.h>
+
+	  int main(void)
+	  {
+	    sd_pid_notify(0, 1, "");
+	  }
+	  ]])],
+	  [AC_DEFINE([HAVE_SD_PID_NOTIFY], [ 1 ], [Define to 1 if you have the `sd_pid_notify` function])])
+	CFLAGS=$SAV_CFLAGS
        ],
        [
 	AS_IF([test .${enable_systemd} = .yes], [AC_MSG_WARN([libsystemd missing])])
@@ -2903,13 +3066,26 @@ dnl ----[Default runtime options (in /etc/sysconfig/keepalived)]----
 AC_SUBST([KEEPALIVED_RUNTIME_OPTIONS], ["$default_runtime_options"])
 
 dnl ----[Default keepalived configuration file]----
+echo $default_config_file | grep -q '${'
+AS_IF([test $? -eq 0],
+  [
+    PARAM=`echo $default_config_file | sed -e 's:.*\(${.*}\).*:\1:'`
+    PARAM_BRACKETS=`echo $PARAM | sed -e "s:{:(:" -e "s:}:):"`
+    AC_MSG_WARN([--with-default-config-file specified with $PARAM - please use $PARAM_BRACKETS])
+    default_config_file=`echo $default_config_file | sed -e "s:{:(:" -e "s:}:):"`
+  ])
+WANT_PREFIX=0
+FOUND_PREFIX=0
 AS_IF([test -n "$default_config_file"],
   [
     AS_IF([test $default_config_file = yes -o $default_config_file = no],
 	  [AC_MSG_ERROR([A filename must be specified for default-config-file])])
     FIRST_CHAR=`echo $default_config_file | $SED -e "s/\(.\).*/\1/"`
     AS_IF([test $FIRST_CHAR = / -o $FIRST_CHAR = '$' ],
-      [CONFIG_FILE=$default_config_file],
+      [
+	CONFIG_FILE="$default_config_file"
+	WANT_PREFIX=1
+      ],
       [CONFIG_FILE="\$(sysconfdir)/$PACKAGE/$default_config_file"])
     add_config_opt([DEFAULT_CONFIG_FILE=$CONFIG_FILE])
     default_config_file=$CONFIG_FILE
@@ -2923,12 +3099,22 @@ AC_SUBST([DEFAULT_CONFIG_FILENAME], [${name}])
 # Change any make $(...) variable to the matching shell variable and substitute
 default_config_file=`echo $default_config_file | $SED -e "s|\\\$(\([[^)]]*\))|\\\${\1}|g"`
 dcf=$default_config_file
-dcf_prev=x$dcf
+dcf_prev=x$dcf		# to force at least 1 iteration
 while [[ $dcf != $dcf_prev ]]; do
+  echo $dcf | grep -q "^\\\${prefix}"
+  AS_IF(
+    [test $? -eq 0], [FOUND_PREFIX=1],
+    [test -n "${prefix}"],
+    [
+      echo $dcf | grep -q "^${prefix}/"
+      AS_IF([test $? -eq 0], [FOUND_PREFIX=1])
+    ])
   dcf_prev=$dcf
-  dcf=`echo $dcf | $SED -e "s|^\\\${prefix}|${ac_default_prefix}|"`
   dcf=`eval echo $dcf`
 done
+AS_IF([test $WANT_PREFIX -eq 1 -a $FOUND_PREFIX -eq 0],
+      [dcf=${prefix}$dcf])
+dcf=`echo $dcf | $SED -e "s://*:/:g"`
 AC_DEFINE_UNQUOTED([DEFAULT_CONFIG_FILE], ["$dcf"], [The default configuration file])
 
 # Remove a leading ${prefix} since that is not part of the old file name
@@ -2999,14 +3185,16 @@ if test ${IPVS_SUPPORT} = Yes; then
   echo "IPVS syncd attributes    : ${IPVS_SYNCD_ATTRIBUTES}"
   echo "IPVS 64 bit stats        : ${IPVS_64BIT_STATS}"
   echo "HTTP_GET regex support   : ${WITH_REGEX}"
+  echo "fwmark socket support    : ${SO_MARK_SUPPORT}"
 fi
-echo "fwmark socket support    : ${SO_MARK_SUPPORT}"
 echo "Use VRRP Framework       : ${VRRP_SUPPORT}"
 if test ${VRRP_SUPPORT} = Yes; then
   echo "Use VRRP VMAC            : ${MACVLAN_SUPPORT}"
   echo "Use VRRP authentication  : ${VRRP_AUTH_SUPPORT}"
   echo "With track_process       : ${WITH_TRACK_PROCESS}"
   echo "With linkbeat            : ${LINKBEAT_SUPPORT}"
+  AS_IF([test ${MACVLAN_SUPPORT} = Yes],
+    [echo "Use NetworkManager       : ${LIBNM_SUPPORT}"])
 fi
 echo "Use BFD Framework        : ${BFD_SUPPORT}"
 echo "SNMP vrrp support        : ${SNMP_VRRP_SUPPORT}"
@@ -3042,6 +3230,10 @@ if test ${MEM_CHECK} = Yes; then
   echo "Memory alloc check       : Yes"
   echo "Memory alloc check log   : ${MEM_CHECK_LOG}"
 fi
+AS_IF([test ${MALLOC_CHECK} = Yes],
+  [echo "Malloc check             : Yes"])
+AS_IF([test ${OPENSSL_MEM_CHECK} = Yes],
+  [echo "OpenSSL mem alloc check  : Yes"])
 if test ${TIMER_CHECK} = Yes; then
   echo "Set time logging         : Yes"
 fi

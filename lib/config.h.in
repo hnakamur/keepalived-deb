@@ -47,6 +47,9 @@
 /* Named changed in OpenSSL v1.1.0 */
 #undef EVP_MD_CTX_reset
 
+/* Define to not inline if using GCC LTO */
+#undef GCC_LTO_NOINLINE
+
 /* set to enforce GNU standard paths, for .pid files etc */
 #undef GNU_STD_PATHS
 
@@ -224,6 +227,10 @@
    if you don't. */
 #undef HAVE_DECL_NFTNL_UDATA_PUT_U32
 
+/* Define to 1 if you have the declaration of `NFT_META_L4PROTO', and to 0 if
+   you don't. */
+#undef HAVE_DECL_NFT_META_L4PROTO
+
 /* Define to 1 if you have the declaration of `NFT_META_OIFKIND', and to 0 if
    you don't. */
 #undef HAVE_DECL_NFT_META_OIFKIND
@@ -293,6 +300,9 @@
 
 /* Define to 1 if you have the `dup3' function. */
 #undef HAVE_DUP3
+
+/* Define to 1 if you have the `ERR_get_error_all' function. */
+#undef HAVE_ERR_GET_ERROR_ALL
 
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
@@ -387,9 +397,6 @@
 /* Define to 1 if you have the `memmove' function. */
 #undef HAVE_MEMMOVE
 
-/* Define to 1 if you have the <memory.h> header file. */
-#undef HAVE_MEMORY_H
-
 /* Define to 1 if you have the `memset' function. */
 #undef HAVE_MEMSET
 
@@ -448,6 +455,9 @@
 /* Define to 1 if you have the `realloc' function. */
 #undef HAVE_REALLOC
 
+/* Define to 1 if you have the `sd_pid_notify` function */
+#undef HAVE_SD_PID_NOTIFY
+
 /* Define to 1 if you have the `select' function. */
 #undef HAVE_SELECT
 
@@ -463,11 +473,17 @@
 /* Define to 1 if you have the `SSL_set0_rbio' function. */
 #undef HAVE_SSL_SET0_RBIO
 
+/* Define to 1 if you have the `SSL_set0_wbio' function. */
+#undef HAVE_SSL_SET0_WBIO
+
 /* Define to 1 if stdbool.h conforms to C99. */
 #undef HAVE_STDBOOL_H
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#undef HAVE_STDIO_H
 
 /* Define to 1 if you have the <stdlib.h> header file. */
 #undef HAVE_STDLIB_H
@@ -589,9 +605,6 @@
 /* The type of parameter __line passed to __assert_fail() */
 #undef LINE_type
 
-/* Define to not inline if using GCC LTO */
-#undef LTO_NOINLINE
-
 /* Define if using VERY old (i.e. pre 2.19 - 2014) glibc */
 #undef NEED_FAVOR_BSD
 
@@ -640,7 +653,9 @@
 /* Directory for runtime state files */
 #undef RUNSTATEDIR
 
-/* Define to 1 if you have the ANSI C header files. */
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
 /* The system options from which the package is built */
@@ -695,6 +710,9 @@
 /* Define to 1 if can have _Pragma GCC diagnostic in functions */
 #undef _HAVE_FUNCTION_DIAGNOSTIC_PRAGMAS_
 
+/* Define to 1 if function __attribute__((warn_unused_results)) supported */
+#undef _HAVE_FUNCTION_WARN_UNUSED_RESULTS_
+
 /* Define to 1 if have IPv4 netlink device configuration */
 #undef _HAVE_IPV4_DEVCONF_
 
@@ -728,6 +746,9 @@
 
 /* Define to 1 if using libnl-3 */
 #undef _HAVE_LIBNL3_
+
+/* Define to 1 to use libnm */
+#undef _HAVE_LIBNM_
 
 /* Define to 1 if have linux/if_ether.h then netinet/in.h then linux/in.h
    namespace collision */
@@ -765,6 +786,9 @@
 /* Define to 1 if building with libnl dynamic linking */
 #undef _LIBNL_DYNAMIC_
 
+/* Define to 1 to build with malloc failure checks */
+#undef _MALLOC_CHECK_
+
 /* Define to 1 to build with malloc/free checks */
 #undef _MEM_CHECK_
 
@@ -785,6 +809,9 @@
 
 /* Define to 1 to build with debugging support */
 #undef _ONE_PROCESS_DEBUG_
+
+/* Define to 1 to build with malloc/free checks */
+#undef _OPENSSL_MEM_CHECK_
 
 /* Define to enable parser debugging */
 #undef _PARSER_DEBUG_
@@ -929,6 +956,9 @@
 /* Define __always_inline if libc does not define it */
 #undef __always_inline
 
+/* Define fallthrough attribute */
+#undef __fallthrough
+
 /* Define to empty if `const' does not conform to ANSI C. */
 #undef const
 
@@ -942,7 +972,7 @@
    such a type exists and the standard includes do not define it. */
 #undef int64_t
 
-/* Define to `int' if <sys/types.h> does not define. */
+/* Define as a signed integer type capable of holding a process identifier. */
 #undef pid_t
 
 /* Define to `unsigned int' if <sys/types.h> does not define. */

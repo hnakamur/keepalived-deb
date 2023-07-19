@@ -1,3 +1,4 @@
 /* Dates are UTC */
-#define GIT_DATE "01/16,2022"
-#define GIT_YEAR "2022"
+#define GIT_COMMIT "v2.2.7-154-g292b299e+"
+#define GIT_DATE "04/04,2023"
+#define GIT_YEAR "2023"

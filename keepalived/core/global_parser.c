@@ -19,7 +19,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2023 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -65,6 +65,9 @@
 #endif
 #endif
 #include "namespaces.h"
+#ifdef _WITH_JSON_
+#include "global_json.h"
+#endif
 
 /* Defined in kernel source file include/linux/sched.h but
  * not currently (Linux v5.10.12) exposed to userspace.
@@ -471,6 +474,11 @@ disable_local_igmp_handler(__attribute__((unused)) const vector_t *strvec)
 
 	global_data->disable_local_igmp = true;
 }
+static void
+v3_checksum_as_v2(__attribute__((unused)) const vector_t *strvec)
+{
+	global_data->v3_checksum_as_v2 = true;
+}
 #endif
 #ifdef _WITH_LVS_
 static void
@@ -783,7 +791,7 @@ vrrp_mcast_group4_handler(const vector_t *strvec)
 {
 	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &mcast)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group4 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
 		return;
@@ -809,7 +817,7 @@ vrrp_mcast_group6_handler(const vector_t *strvec)
 {
 	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &mcast)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group6 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
 		return;
@@ -2035,12 +2043,15 @@ umask_handler(const vector_t *strvec)
 				if      (!strncmp(p, "IRUSR", 5)) umask_bits |= S_IRUSR;
 				else if (!strncmp(p, "IWUSR", 5)) umask_bits |= S_IWUSR;
 				else if (!strncmp(p, "IXUSR", 5)) umask_bits |= S_IXUSR;
+				else if (!strncmp(p, "IRWXU", 5)) umask_bits |= S_IRWXU;
 				else if (!strncmp(p, "IRGRP", 5)) umask_bits |= S_IRGRP;
 				else if (!strncmp(p, "IWGRP", 5)) umask_bits |= S_IWGRP;
 				else if (!strncmp(p, "IXGRP", 5)) umask_bits |= S_IXGRP;
+				else if (!strncmp(p, "IRWXG", 5)) umask_bits |= S_IRWXG;
 				else if (!strncmp(p, "IROTH", 5)) umask_bits |= S_IROTH;
 				else if (!strncmp(p, "IWOTH", 5)) umask_bits |= S_IWOTH;
 				else if (!strncmp(p, "IXOTH", 5)) umask_bits |= S_IXOTH;
+				else if (!strncmp(p, "IRWXO", 5)) umask_bits |= S_IRWXO;
 				else {
 					report_config_error(CONFIG_GENERAL_ERROR, "Unknown umask bit %s", p);
 					return;
@@ -2262,20 +2273,41 @@ data_use_instance_handler(const vector_t *strvec)
 
 	global_data->data_use_instance = res;
 }
+
+#ifdef _WITH_JSON_
+static void
+json_version_handler(const vector_t *strvec)
+{
+	unsigned version = true;
+
+	if (vector_size(strvec) < 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "%s requires version", strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (!read_unsigned_strvec(strvec, 1, &version, JSON_VERSION_V1, JSON_VERSION_V2, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid JSON version");
+		return;
+	}
+
+	global_data->json_version = version;
+}
+#endif
+
 void
 init_global_keywords(bool global_active)
 {
 	/* global definitions mapping */
 #ifdef _WITH_LINKBEAT_
-	install_keyword_root("linkbeat_use_polling", use_polling_handler, global_active);
+	install_keyword_root("linkbeat_use_polling", use_polling_handler, global_active, NULL);
 #endif
-	install_keyword_root("net_namespace", &net_namespace_handler, global_active);
-	install_keyword_root("net_namespace_ipvs", &net_namespace_ipvs_handler, global_active);
-	install_keyword_root("namespace_with_ipsets", &namespace_ipsets_handler, global_active);
-	install_keyword_root("use_pid_dir", &use_pid_dir_handler, global_active);
-	install_keyword_root("instance", &instance_handler, global_active);
-	install_keyword_root("child_wait_time", &child_wait_handler, global_active);
-	install_keyword_root("global_defs", NULL, global_active);
+	install_keyword_root("net_namespace", &net_namespace_handler, global_active, NULL);
+	install_keyword_root("net_namespace_ipvs", &net_namespace_ipvs_handler, global_active, NULL);
+	install_keyword_root("namespace_with_ipsets", &namespace_ipsets_handler, global_active, NULL);
+	install_keyword_root("use_pid_dir", &use_pid_dir_handler, global_active, NULL);
+	install_keyword_root("instance", &instance_handler, global_active, NULL);
+	install_keyword_root("child_wait_time", &child_wait_handler, global_active, NULL);
+	install_keyword_root("global_defs", NULL, global_active, VPP &global_data);
 	install_keyword("process_names", &process_names_handler);
 	install_keyword("process_name", &process_name_handler);
 #ifdef _WITH_VRRP_
@@ -2313,6 +2345,7 @@ init_global_keywords(bool global_active)
 	install_keyword("no_email_faults", &no_email_faults_handler);
 	install_keyword("default_interface", &default_interface_handler);
 	install_keyword("disable_local_igmp", &disable_local_igmp_handler);
+	install_keyword("v3_checksum_as_v2", &v3_checksum_as_v2);
 #endif
 #ifdef _WITH_LVS_
 	install_keyword("lvs_timeouts", &lvs_timeouts);
@@ -2442,8 +2475,6 @@ init_global_keywords(bool global_active)
 	install_keyword("lvs_netlink_cmd_rcv_bufs_force", &lvs_netlink_cmd_rcv_bufs_force_handler);
 	install_keyword("lvs_netlink_monitor_rcv_bufs", &lvs_netlink_monitor_rcv_bufs_handler);
 	install_keyword("lvs_netlink_monitor_rcv_bufs_force", &lvs_netlink_monitor_rcv_bufs_force_handler);
-#endif
-#ifdef _WITH_LVS_
 	install_keyword("rs_init_notifies", &rs_init_notifies_handler);
 	install_keyword("no_checker_emails", &no_checker_emails_handler);
 #endif
@@ -2469,4 +2500,7 @@ init_global_keywords(bool global_active)
 #endif
 	install_keyword("tmp_config_directory", &config_copy_directory_handler);
 	install_keyword("data_use_instance", &data_use_instance_handler);
+#ifdef _WITH_JSON_
+	install_keyword("json_version", &json_version_handler);
+#endif
 }

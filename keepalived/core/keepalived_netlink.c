@@ -318,7 +318,10 @@ route_is_ours(struct rtmsg* rt, struct rtattr *tb[RTA_MAX + 1], vrrp_t** ret_vrr
 		    tos != route->tos)
 			continue;
 
-		if (compare_addr(family, RTA_DATA(tb[RTA_DST]), route->dst))
+		if (!tb[RTA_DST])
+			memset(&default_addr, 0, sizeof(default_addr));
+
+		if (compare_addr(family, tb[RTA_DST] ? RTA_DATA(tb[RTA_DST]) : &default_addr, route->dst))
 			continue;
 
 		return route;
@@ -676,7 +679,7 @@ netlink_close(nl_handle_t *nl)
  * and produces warnings when doing the LTO link of vrrp_vmac.o and vrrp_ipaddress.o.
  * This should be tested periodically to see if specifying noinline can be removed.
  */
-int LTO_NOINLINE
+int GCC_LTO_NOINLINE
 addattr_l(struct nlmsghdr *n, size_t maxlen, unsigned short type, const void *data, size_t alen)
 {
 	size_t len = RTA_LENGTH(alen);
@@ -939,6 +942,13 @@ netlink_if_address_filter(__attribute__((unused)) struct sockaddr_nl *snl, struc
 // link local address.
 		if (h->nlmsg_type == RTM_NEWADDR) {
 			if (!ignore_address_if_ours_or_link_local(ifa, addr.addr, ifp)) {
+/* The following code doesn't seem right.
+ * 1. If using unicast, and the peers and not link local, then we need a non link-local address
+ * 2. There is an argument that we should process this if vrrp->base_priority == VRRP_PRIO_OWNER
+ * 3. We should ignore loopback addresses.
+ * 4. If VRRP_PRIO_OWNER, should we check we have the VIP/eVIPs configured?
+ * 5. In ignore_address...() is tracking_vrrp set if the VIP is no_track?
+ */
 				/* If no address is set on interface then set the first time */
 // TODO if saddr from config && track saddr, addresses must match
 				if (ifa->ifa_family == AF_INET) {
@@ -1079,7 +1089,11 @@ netlink_if_address_filter(__attribute__((unused)) struct sockaddr_nl *snl, struc
 
 						list_for_each_entry(top, &ifp->tracking_vrrp, e_list) {
 							vrrp = top->obj.vrrp;
-							if (vrrp->ifp != ifp && ifp != vrrp->ifp->base_ifp)
+							if (vrrp->ifp != ifp
+#ifdef _HAVE_VRRP_VMAC_
+									     && ifp != vrrp->ifp->base_ifp
+#endif
+													  )
 								continue;
 							if (vrrp->family != AF_INET6 || __test_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags))
 								continue;
@@ -1162,6 +1176,10 @@ netlink_if_address_filter(__attribute__((unused)) struct sockaddr_nl *snl, struc
 							 vrrp->ifp) &&
 						 vrrp->family == ifa->ifa_family &&
 						 vrrp->saddr.ss_family != AF_UNSPEC &&
+						 (vrrp->family != AF_INET6 ||	/* For an IPv6 VMAC if down removes the link local address */
+						  !__test_bit(VRRP_VMAC_BIT, &vrrp->flags) ||
+						  __test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags) ||
+						  IF_ISUP(ifp)) &&
 						 (!__test_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags) || is_tracking_saddr)) {
 						down_instance(vrrp);
 						vrrp->saddr.ss_family = AF_UNSPEC;
@@ -1576,12 +1594,31 @@ static void
 process_interface_flags_change(interface_t *ifp, unsigned ifi_flags)
 {
 	bool now_up = FLAGS_UP(ifi_flags);
+#ifdef _HAVE_VRRP_VMAC_
+	tracking_obj_t *top;
+	vrrp_t *vrrp;
+#endif
 
 	ifp->ifi_flags = ifi_flags;
 
 	if (!list_empty(&ifp->tracking_vrrp)) {
 		log_message(LOG_INFO, "Netlink reports %s %s", ifp->ifname, now_up ? "up" : "down");
 
+#ifdef _HAVE_VRRP_VMAC_
+		if (ifp->vmac_type &&
+		    ifp->is_ours &&
+		    ifp->hw_addr[sizeof(ll_addr) - 2] == 0x02 &&   /* Is it an IPv6 vmac? */
+		    now_up &&
+		    IN6_IS_ADDR_UNSPECIFIED(&ifp->sin6_addr)) {
+			list_for_each_entry(top, &ifp->tracking_vrrp, e_list) {
+				vrrp = top->obj.vrrp;
+				if (!__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags)) {
+					set_link_local_address(vrrp);
+					break;
+				}
+			}
+		}
+#endif
 		process_if_status_change(ifp);
 	}
 

@@ -638,19 +638,23 @@ check_tx_checksum(vrrp_t *vrrp, unicast_peer_t *peer)
 	vrrppkt_len = sizeof(vrrphdr_t) + hd->naddr * sizeof(struct in_addr);
 
 	if (vrrp->version == VRRP_VERSION_3) {
-		/* Create IPv4 pseudo-header */
-		ipv4_phdr.src   = ip->saddr;
+		if (__test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &vrrp->flags))
+			acc_csum = 0;
+		else {
+			/* Create IPv4 pseudo-header */
+			ipv4_phdr.src   = ip->saddr;
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
-		ipv4_phdr.dst   = vrrp->unicast_chksum_compat <= CHKSUM_COMPATIBILITY_MIN_COMPAT
-				  ? ip->daddr : global_data->vrrp_mcast_group4.sin_addr.s_addr;
+			ipv4_phdr.dst   = vrrp->unicast_chksum_compat <= CHKSUM_COMPATIBILITY_MIN_COMPAT
+					  ? ip->daddr : global_data->vrrp_mcast_group4.sin_addr.s_addr;
 #else
-		ipv4_phdr.dst   = ip->daddr;
+			ipv4_phdr.dst   = ip->daddr;
 #endif
-		ipv4_phdr.zero  = 0;
-		ipv4_phdr.proto = IPPROTO_VRRP;
-		ipv4_phdr.len   = htons(vrrppkt_len);
+			ipv4_phdr.zero  = 0;
+			ipv4_phdr.proto = IPPROTO_VRRP;
+			ipv4_phdr.len   = htons(vrrppkt_len);
 
-		in_csum(PTR_CAST(uint16_t, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
+			in_csum(PTR_CAST_CONST(void, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
+		}
 	} else {
 		vrrppkt_len += VRRP_AUTH_LEN;
 		acc_csum = 0;
@@ -658,7 +662,7 @@ check_tx_checksum(vrrp_t *vrrp, unicast_peer_t *peer)
 
 	pkt_chksum = hd->chksum;
 	hd->chksum = 0;
-	calc_chksum = in_csum(PTR_CAST(uint16_t, hd), vrrppkt_len, acc_csum, &acc_csum);
+	calc_chksum = in_csum(PTR_CAST_CONST(void, hd), vrrppkt_len, acc_csum, &acc_csum);
 	hd->chksum = pkt_chksum;
 
 	if (calc_chksum != pkt_chksum ||
@@ -981,28 +985,35 @@ vrrp_check_packet(vrrp_t *vrrp, const vrrphdr_t *hd, const char *buffer, ssize_t
 	if (vrrp->family == AF_INET) {
 		vrrppkt_len = sizeof(vrrphdr_t) + hd->naddr * sizeof(struct in_addr);
 		if (vrrp->version == VRRP_VERSION_3) {
-			/* Create IPv4 pseudo-header */
-			ipv4_phdr.src   = ip->saddr;
+			if (__test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &vrrp->flags))
+				acc_csum = 0;
+			else {
+				/* Create IPv4 pseudo-header */
+				ipv4_phdr.src   = ip->saddr;
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
-			ipv4_phdr.dst   = vrrp->unicast_chksum_compat <= CHKSUM_COMPATIBILITY_MIN_COMPAT
-					  ? ip->daddr : global_data->vrrp_mcast_group4.sin_addr.s_addr;
+				ipv4_phdr.dst   = vrrp->unicast_chksum_compat <= CHKSUM_COMPATIBILITY_MIN_COMPAT
+						  ? ip->daddr : global_data->vrrp_mcast_group4.sin_addr.s_addr;
 #else
-			ipv4_phdr.dst	= ip->daddr;
+				ipv4_phdr.dst	= ip->daddr;
 #endif
-			ipv4_phdr.zero  = 0;
-			ipv4_phdr.proto = IPPROTO_VRRP;
-			ipv4_phdr.len   = htons(vrrppkt_len);
+				ipv4_phdr.zero  = 0;
+				ipv4_phdr.proto = IPPROTO_VRRP;
+				ipv4_phdr.len   = htons(vrrppkt_len);
 
-			in_csum(PTR_CAST(uint16_t, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
-			if ((csum_calc = in_csum(PTR_CAST_CONST(uint16_t, hd), vrrppkt_len, acc_csum, &acc_csum))) {
+				in_csum(PTR_CAST_CONST(void, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
+			}
+
+			if ((csum_calc = in_csum(PTR_CAST_CONST(void, hd), vrrppkt_len, acc_csum, &acc_csum)) &&
+			     !__test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &vrrp->flags)) {
+
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 				chksum_error = true;
 				if (__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags) &&
 				    vrrp->unicast_chksum_compat == CHKSUM_COMPATIBILITY_NONE &&
 				    ipv4_phdr.dst != global_data->vrrp_mcast_group4.sin_addr.s_addr) {
 					ipv4_phdr.dst = global_data->vrrp_mcast_group4.sin_addr.s_addr;
-					in_csum(PTR_CAST(uint16_t, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
-					if (!(csum_calc = in_csum(PTR_CAST_CONST(uint16_t, hd), vrrppkt_len, acc_csum, &acc_csum))) {
+					in_csum(PTR_CAST_CONST(void, &ipv4_phdr), sizeof(ipv4_phdr), 0, &acc_csum);
+					if (!(csum_calc = in_csum(PTR_CAST_CONST(void, hd), vrrppkt_len, acc_csum, &acc_csum))) {
 						/* Update the checksum for the pseudo header IP address */
 						vrrp_csum_mcast(vrrp);
 
@@ -1035,7 +1046,7 @@ vrrp_check_packet(vrrp_t *vrrp, const vrrphdr_t *hd, const char *buffer, ssize_t
 #endif
 		} else {
 			vrrppkt_len += VRRP_AUTH_LEN;
-			csum_calc = in_csum(PTR_CAST_CONST(uint16_t, hd), vrrppkt_len, 0, &acc_csum);
+			csum_calc = in_csum(PTR_CAST_CONST(void, hd), vrrppkt_len, 0, &acc_csum);
 
 #ifdef _CHECKSUM_DEBUG_
 			if (do_checksum_debug)
@@ -1275,7 +1286,7 @@ vrrp_build_vrrp_v2(vrrp_t *vrrp, char *buffer)
 
 		/* finally compute vrrp checksum */
 		hd->chksum = 0;
-		hd->chksum = in_csum(PTR_CAST(uint16_t, hd), vrrp_pkt_len(vrrp), 0, NULL);
+		hd->chksum = in_csum(PTR_CAST_CONST(void, hd), vrrp_pkt_len(vrrp), 0, NULL);
 	} else if (vrrp->family == AF_INET6) {
 		ip6arr = PTR_CAST(struct in6_addr, ((char *)hd + sizeof(*hd)));
 		list_for_each_entry(ip_addr, &vrrp->vip, e_list)
@@ -1315,22 +1326,26 @@ vrrp_build_vrrp_v3(vrrp_t *vrrp, char *buffer, struct iphdr *ip)
 		list_for_each_entry(ip_addr, &vrrp->vip, e_list)
 			iparr[i++] = ip_addr->u.sin.sin_addr;
 
-		/* Create IPv4 pseudo-header */
-		ipv4_phdr.src   = VRRP_PKT_SADDR(vrrp);
+		if (__test_bit(VRRP_FLAG_V3_CHECKSUM_AS_V2, &vrrp->flags))
+			vrrp->ipv4_csum = 0;
+		else {
+			/* Create IPv4 pseudo-header */
+			ipv4_phdr.src   = VRRP_PKT_SADDR(vrrp);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
-		if (vrrp->unicast_chksum_compat >= CHKSUM_COMPATIBILITY_MIN_COMPAT)
-			ipv4_phdr.dst = global_data->vrrp_mcast_group4.sin_addr.s_addr;
-		else
+			if (vrrp->unicast_chksum_compat >= CHKSUM_COMPATIBILITY_MIN_COMPAT)
+				ipv4_phdr.dst = global_data->vrrp_mcast_group4.sin_addr.s_addr;
+			else
 #endif
-			ipv4_phdr.dst = ip->daddr;
-		ipv4_phdr.zero  = 0;
-		ipv4_phdr.proto = IPPROTO_VRRP;
-		ipv4_phdr.len   = htons(vrrp_pkt_len(vrrp));
+				ipv4_phdr.dst = ip->daddr;
+			ipv4_phdr.zero  = 0;
+			ipv4_phdr.proto = IPPROTO_VRRP;
+			ipv4_phdr.len   = htons(vrrp_pkt_len(vrrp));
 
-		/* finally compute vrrp checksum */
-		/* coverity[callee_ptr_arith] */
-		in_csum(PTR_CAST(uint16_t, &ipv4_phdr), sizeof(ipv4_phdr), 0, &vrrp->ipv4_csum);
-		hd->chksum = in_csum(PTR_CAST(uint16_t, hd), vrrp_pkt_len(vrrp), vrrp->ipv4_csum, NULL);
+			/* finally compute vrrp checksum */
+			/* coverity[callee_ptr_arith] */
+			in_csum(PTR_CAST_CONST(void, &ipv4_phdr), sizeof(ipv4_phdr), 0, &vrrp->ipv4_csum);
+		}
+		hd->chksum = in_csum(PTR_CAST_CONST(void, hd), vrrp_pkt_len(vrrp), vrrp->ipv4_csum, NULL);
 	} else if (vrrp->family == AF_INET6) {
 		ip6arr = PTR_CAST(struct in6_addr, ((char *)hd + sizeof(*hd)));
 		list_for_each_entry(ip_addr, &vrrp->vip, e_list)
@@ -1511,13 +1526,13 @@ vrrp_send_adv(vrrp_t * vrrp, uint8_t prio)
 
 	/* Send the packet, but don't log an error if it is a prio 0 message
 	 * and the interface is down. */
+	vrrp->last_advert_sent = time_now;
 	if (!__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
 // What if mcast_src_ip is configured?
 		if (vrrp_send_pkt(vrrp, NULL) == -1 &&
 		    (prio != VRRP_PRIO_STOP || errno != ENETUNREACH || (vrrp->ifp && IF_FLAGS_UP(vrrp->ifp))))
 			log_message(LOG_INFO, "(%s): send advert error %d (%m)", vrrp->iname, errno);
-	}
-	else {
+	} else {
 		list_for_each_entry(peer, &vrrp->unicast_peer, e_list) {
 			if (vrrp->family == AF_INET)
 				vrrp_update_pkt(vrrp, prio, &peer->address);
@@ -2223,6 +2238,43 @@ vrrp_state_master_rx(vrrp_t * vrrp, const vrrphdr_t *hd, const char *buf, ssize_
 	return false;
 }
 
+static void
+vrrp_thread_timeout_handler(unsigned timeout)
+{
+	vrrp_t *vrrp;
+	timeval_t advert_expires_time;
+	bool logged_timeout_action = false;
+
+	list_for_each_entry(vrrp, &vrrp_data->vrrp, e_list) {
+		if (vrrp->state != VRRP_STATE_MAST ||
+		    !vrrp->highest_other_priority)
+			continue;
+
+		advert_expires_time.tv_sec = 0;
+		advert_expires_time.tv_usec = vrrp->adver_int * 3 +
+				     (vrrp->version == VRRP_VERSION_2
+					 ? (256U - vrrp->highest_other_priority) * 1000000 / 256
+					 : (256U - vrrp->highest_other_priority) * vrrp->adver_int / 256);
+
+		if (advert_expires_time.tv_usec >= 1000000) {
+			advert_expires_time.tv_sec += advert_expires_time.tv_usec / 1000000;
+			advert_expires_time.tv_usec = advert_expires_time.tv_usec % 1000000;
+		}
+
+		timeradd(&vrrp->last_advert_sent, &advert_expires_time, &advert_expires_time);
+
+		if (timercmp(&advert_expires_time, &time_now, <=)) {
+			if (!logged_timeout_action) {
+				log_message(LOG_INFO, "VRRP thread timer expired %u.%6.6u seconds ago", timeout / 1000000, timeout % 1000000);
+				logged_timeout_action = true;
+			}
+
+			vrrp->wantstate = VRRP_STATE_BACK;
+			vrrp_state_leave_master(vrrp, false);
+		}
+	}
+}
+
 void
 add_vrrp_to_interface(vrrp_t *vrrp, interface_t *ifp, int weight, bool reverse, bool log_addr, track_t type)
 {
@@ -2314,7 +2366,7 @@ chk_min_cfg(vrrp_t *vrrp)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) the virtual router id must be set", vrrp->iname);
 		return false;
 	}
-	if (!vrrp->ifp && !__test_bit(VRRP_FLAG_UNICAST, &vrrp->flags)) {
+	if (!vrrp->ifp && !__test_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Unknown interface!", vrrp->iname);
 		return false;
 	}
@@ -2892,15 +2944,6 @@ vrrp_complete_instance(vrrp_t * vrrp)
 	if (vrrp->family == AF_INET && vrrp->ttl == -1)
 		vrrp->ttl = VRRP_IP_TTL;
 
-	if (list_empty(&vrrp->vip)) {
-		if (vrrp->version == VRRP_VERSION_3 || vrrp->strict_mode) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s) No VIP specified; at least one is required"
-								, vrrp->iname);
-			return false;
-		}
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s) No VIP specified; at least one is sensible", vrrp->iname);
-	}
-
 	/* If no priority has been set, derive it from the initial state */
 	if (vrrp->base_priority == 0) {
 		if (vrrp->wantstate == VRRP_STATE_MAST)
@@ -3141,6 +3184,13 @@ vrrp_complete_instance(vrrp_t * vrrp)
 							  " strict mode - resetting"
 							, vrrp->iname);
 		vrrp->down_timer_adverts = VRRP_DOWN_TIMER_ADVERTS;
+	}
+
+	if (!__test_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags) &&
+	    vrrp->highest_other_priority) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) expired_timer_backup requires nopreempt - resetting"
+							, vrrp->iname);
+		vrrp->highest_other_priority = 0;
 	}
 
 	vrrp->state = VRRP_STATE_INIT;
@@ -3813,8 +3863,15 @@ vrrp_complete_instance(vrrp_t * vrrp)
 	}
 #endif
 
-	if (list_empty(&vrrp->vip)) {
-		if (vrrp->version == VRRP_VERSION_3 || vrrp->family == AF_INET6 || vrrp->strict_mode) {
+
+	if (__test_bit(VRRP_FLAG_ALLOW_NO_VIPS, &vrrp->flags) && vrrp->strict_mode) {
+		report_config_error(CONFIG_WARNING, "(%s) no_virtual_ipaddress and strict mode incompatible, clearing no_virtual_ipaddress", vrrp->iname);
+		__clear_bit(VRRP_FLAG_ALLOW_NO_VIPS, &vrrp->flags);
+	}
+
+	if (!__test_bit(VRRP_FLAG_ALLOW_NO_VIPS, &vrrp->flags) &&
+	    list_empty(&vrrp->vip)) {
+		if (vrrp->version == VRRP_VERSION_3 || vrrp->strict_mode) {
 			report_config_error(CONFIG_GENERAL_ERROR, "(%s) No VIP specified; at least one is required", vrrp->iname);
 			return false;
 		}
@@ -4501,6 +4558,8 @@ vrrp_complete_init(void)
 	size_t max_mtu_len = 0;
 	bool have_master, have_backup;
 	vrrp_script_t *scr, *scr_tmp;
+	unsigned quickest_takeover;
+	unsigned vrrp_timeout_min = UINT_MAX;
 
 	/* Set defaults if not specified, depending on strict mode */
 	if (global_data->vrrp_garp_lower_prio_rep == PARAMETER_UNSET)
@@ -4591,7 +4650,20 @@ vrrp_complete_init(void)
 
 		if (vrrp->ifp && vrrp->ifp->mtu > max_mtu_len)
 			max_mtu_len = vrrp->ifp->mtu;
+
+		if (vrrp->highest_other_priority) {
+			quickest_takeover =
+			  vrrp->adver_int * 2 +
+			     (vrrp->version == VRRP_VERSION_2
+			         ? (256U - vrrp->highest_other_priority) * 1000000 / 256
+			         : (256U - vrrp->highest_other_priority) * vrrp->adver_int / 256);
+			if (quickest_takeover < vrrp_timeout_min)
+				vrrp_timeout_min = quickest_takeover;
+		}
 	}
+
+	if (vrrp_timeout_min != UINT_MAX)
+		register_thread_timeout_handler(vrrp_thread_timeout_handler, vrrp_timeout_min);
 
 	/* Make sure we don't have duplicate VRIDs */
 	if (check_vrid_conflicts())
