@@ -1,13 +1,12 @@
 .\"
 .\" genhash(1)
 .\"
-.\" Copyright (C) 2004 Andres Salomon
-.\" Copyright (C) 2010-2013 Alexandre Cassen, <acassen@gmail.com>
-.TH genhash 1 "Feb 2004"
+.\" Copyright (C) 2010-2021 Alexandre Cassen, <acassen@gmail.com>
+.TH genhash 1 "2021-07-05"
 .SH NAME
 genhash \- md5 hash generation tool for remote web pages
 .SH SYNOPSIS
-.B "genhash [options] [-s server-address] [-p port] [-u url]"
+.B "keepalived --genhash [options] [-s server-address] [-p port] [-u url]"
 .SH DESCRIPTION
 .B genhash
 is a tool used for generating md5sum hashes of remote web pages.
@@ -34,11 +33,6 @@ Specify the path to the file you want to generate the hash of.
 .B --use-virtualhost <host>, -V
 Specify the virtual host to send along with the HTTP headers.
 .TP
-.B --hash <alg>, -H
-Specify the hash algorithm to make a digest of the target page.
-Consult the help screen for list of available ones with a mark
-of the default one.
-.TP
 .B --protocol <protocol_version>, -P
 Specify the HTTP protocol version to use. protocol_version can
 be 1.0, 1.1 or 1.0c. 1.0c means protocol version 1.0 but with
@@ -48,14 +42,14 @@ default.
 .B --timeout <timeout>, -t
 Specify the connection timeout in seconds.
 .TP
+.B --fwmark <mark>, -m
+Set the specified firewall mark on the socket
+.TP
 .B --verbose, -v
 Be verbose with the output.
 .TP
 .B --help, -h
 Display the program help screen and exit.
-.TP
-.B --release, -r
-Display the release number (version) and exit.
 .TP
 .BR
 .SH SEE ALSO

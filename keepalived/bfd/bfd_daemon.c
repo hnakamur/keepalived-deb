@@ -28,7 +28,6 @@
 #include <sys/prctl.h>
 #include <fcntl.h>
 #include <sys/time.h>
-#include <sys/resource.h>
 
 #include "bfd.h"
 #include "bfd_daemon.h"
@@ -48,9 +47,16 @@
 #include "scheduler.h"
 #include "process.h"
 #include "utils.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
+#ifdef _USE_SYSTEMD_NOTIFY_
+#include "systemd.h"
+#endif
+#ifndef _ONE_PROCESS_DEBUG_
+#include "config_notify.h"
+#endif
+
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
@@ -69,8 +75,6 @@ static unsigned bfd_next_restart_delay;
 static void
 stop_bfd(int status)
 {
-	struct rusage usage;
-
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
 
@@ -89,12 +93,7 @@ stop_bfd(int status)
 	 * Reached when terminate signal catched.
 	 * finally return to parent process.
 	 */
-	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
-		getrusage(RUSAGE_SELF, &usage);
-		log_message(LOG_INFO, "Stopped - used %ld.%6.6ld user time, %ld.%6.6ld system time", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
-	}
-	else
-		log_message(LOG_INFO, "Stopped");
+	log_stopping();
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
@@ -151,7 +150,8 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	alloc_bfd_buffer();
 
-	init_data(conf_file, bfd_init_keywords);
+	init_data(conf_file, bfd_init_keywords, false);
+
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -165,11 +165,18 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* If we are just testing the configuration, then we terminate now */
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
+
 	bfd_complete_init();
 
-	/* Post initializations */
-#ifdef _MEM_CHECK_
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+#ifndef _ONE_PROCESS_DEBUG_
+	if (global_data->reload_check_config && get_config_status() != CONFIG_OK) {
+		stop_bfd(KEEPALIVED_EXIT_CONFIG);
+		return;
+	}
+
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
 #endif
 
 	if (__test_bit(DUMP_CONF_BIT, &debug))
@@ -181,10 +188,7 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 // TODO - measure max stack usage
 	set_process_priorities(
 			global_data->bfd_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-			global_data->bfd_rlimit_rt,
-#endif
-			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
+			global_data->bfd_rlimit_rt, global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
 
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->bfd_cpu_mask, "bfd");
@@ -254,18 +258,24 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 	/* Use standard scheduling while reloading */
 	reset_process_priorities();
 
+#ifndef _ONE_PROCESS_DEBUG_
+	save_config(false, "bfd", dump_bfd_data_global);
+#endif
+
 	/* set the reloading flag */
 	SET_RELOAD;
 
 	/* Destroy master thread */
 	bfd_dispatcher_release(bfd_data);
-	thread_cleanup_master(master);
+	thread_cleanup_master(master, true);
 	thread_add_base_threads(master, false);
 
 	old_bfd_data = bfd_data;
 	bfd_data = NULL;
 	old_global_data = global_data;
 	global_data = NULL;
+
+	reinitialise_global_vars();
 
 	/* Reload the conf */
 	signal_set(SIGCHLD, thread_child_handler, master);
@@ -274,10 +284,19 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 	free_bfd_data(old_bfd_data);
 	free_global_data(old_global_data);
 
+#ifndef _ONE_PROCESS_DEBUG_
+	save_config(true, "bfd", dump_bfd_data_global);
+#endif
+
 	UNSET_RELOAD;
 
 	set_time_now();
 	log_message(LOG_INFO, "Reload finished in %lu usec", -timer_long(timer_sub_now(timer)));
+
+	/* Post initializations */
+#ifdef _MEM_CHECK_
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
+#endif
 }
 
 /* This function runs in the parent process. */
@@ -292,14 +311,16 @@ static void
 bfd_respawn_thread(thread_ref_t thread)
 {
 	unsigned restart_delay;
+	int ret;
 
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
 
-	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
-		thread_add_terminate_event(thread->master);
+	if ((ret = report_child_status(thread->u.c.status, thread->u.c.pid, NULL)))
+		thread_add_parent_terminate_event(thread->master, ret);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
+		log_child_died("BFD", thread->u.c.pid);
+
 		restart_delay = calc_restart_delay(&bfd_start_time, &bfd_next_restart_delay, "BFD");
 		if (!restart_delay)
 			start_bfd_child();
@@ -315,9 +336,6 @@ bfd_respawn_thread(thread_ref_t thread)
 static void
 register_bfd_thread_addresses(void)
 {
-	/* Remove anything we might have inherited from parent */
-	deregister_thread_addresses();
-
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 
@@ -331,6 +349,9 @@ register_bfd_thread_addresses(void)
 	register_signal_handler_address("sigdump_bfd", sigdump_bfd);
 	register_signal_handler_address("sigend_bfd", sigend_bfd);
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
+#ifdef THREAD_DUMP
+	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
+#endif
 }
 #endif
 #endif
@@ -369,12 +390,16 @@ start_bfd_child(void)
 
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Check our parent hasn't already changed since the fork */
+	if (main_pid != getppid())
+		kill(getpid(), SIGTERM);
+
 	prog_type = PROG_TYPE_BFD;
 
 	/* Close the read end of the event notification pipes, and the track_process fd */
 #ifdef _WITH_VRRP_
 	close(bfd_vrrp_event_pipe[0]);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	close_track_processes();
 #endif
 #endif
@@ -382,13 +407,14 @@ start_bfd_child(void)
 	close(bfd_checker_event_pipe[0]);
 #endif
 
+#ifdef THREAD_DUMP
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+#endif
+
 	initialise_debug_options();
 
-	if ((global_data->instance_name
-#if HAVE_DECL_CLONE_NEWNET
-			   || global_data->network_namespace
-#endif
-					       ) &&
+	if ((global_data->instance_name || global_data->network_namespace) &&
 	     (bfd_syslog_ident = make_syslog_ident(PROG_BFD)))
 		syslog_ident = bfd_syslog_ident;
 	else
@@ -396,18 +422,13 @@ start_bfd_child(void)
 
 	/* Opening local BFD syslog channel */
 	if (!__test_bit(NO_SYSLOG_BIT, &debug))
-		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+		open_syslog(syslog_ident);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"bfd",
-#if HAVE_DECL_CLONE_NEWNET
 				global_data->network_namespace,
-#else
-				NULL,
-#endif
 				global_data->instance_name);
 #endif
 
@@ -420,6 +441,9 @@ start_bfd_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(bfd_pidfile, getpid())) {
 		/* Fatal error */
@@ -427,6 +451,10 @@ start_bfd_child(void)
 			    "BFD child process: cannot write pidfile");
 		exit(0);
 	}
+
+#ifdef _USE_SYSTEMD_NOTIFY_
+	systemd_unset_notify();
+#endif
 
 	/* Create the new master thread */
 	thread_destroy_master(master);
@@ -447,6 +475,9 @@ start_bfd_child(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	bfd_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_bfd);
 #endif
 
 	/* Start BFD daemon */
@@ -458,6 +489,11 @@ start_bfd_child(void)
 
 #ifdef THREAD_DUMP
 	register_bfd_thread_addresses();
+#endif
+
+	/* Post initializations */
+#ifdef _MEM_CHECK_
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", get_keepalived_cur_mem_allocated());
 #endif
 
 	/* Launch the scheduling I/O multiplexer */

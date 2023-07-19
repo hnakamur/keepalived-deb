@@ -37,6 +37,7 @@
 #include "parser.h"
 #include "smtp.h"
 #include "ipwrapper.h"
+#include "check_parser.h"
 
 #define ICMP_BUFSIZE 128
 #define SOCK_RECV_BUFF 128*1024
@@ -128,17 +129,18 @@ free_ping_check(checker_t *checker)
 }
 
 static void
-dump_ping_check(FILE *fp, const checker_t *checker)
+dump_ping_check(FILE *fp, __attribute__((unused)) const checker_t *checker)
 {
 	conf_write(fp, "   Keepalive method = PING_CHECK");
-	dump_checker_opts(fp, checker);
 }
 
 static bool
-ping_check_compare(const checker_t *a, checker_t *b)
+compare_ping_check(const checker_t *a, checker_t *b)
 {
 	return compare_conn_opts(a->co, b->co);
 }
+
+static const checker_funcs_t ping_checker_funcs = { CHECKER_PING, free_ping_check, dump_ping_check, compare_ping_check, NULL };
 
 static void
 ping_check_handler(__attribute__((unused)) const vector_t *strvec)
@@ -146,8 +148,7 @@ ping_check_handler(__attribute__((unused)) const vector_t *strvec)
 	ping_check_t *ping_check = sizeof(ping_check_t) ? MALLOC(sizeof (ping_check_t)) : NULL;
 
 	/* queue new checker */
-	queue_checker(free_ping_check, dump_ping_check, icmp_connect_thread,
-		      ping_check_compare, ping_check, CHECKER_NEW_CO(), true);
+	queue_checker(&ping_checker_funcs, icmp_connect_thread, ping_check, CHECKER_NEW_CO(), true);
 
 	if (!checked_ping_group_range)
 		set_ping_group_range(true);
@@ -156,36 +157,43 @@ ping_check_handler(__attribute__((unused)) const vector_t *strvec)
 static void
 ping_check_end_handler(void)
 {
-	if (!check_conn_opts(CHECKER_GET_CO()))
+	if (!check_conn_opts(current_checker->co)) {
 		dequeue_new_checker();
+		return;
+	}
+
+	/* queue the checker */
+	list_add_tail(&current_checker->e_list, &checkers_queue);
 }
 
 void
 install_ping_check_keyword(void)
 {
+	vpp_t check_ptr;
+
 	/* We don't want some common keywords */
 	install_keyword("PING_CHECK", &ping_check_handler);
-	install_sublevel();
+	check_ptr = install_sublevel(VPP &current_checker);
 	install_checker_common_keywords(true);
-	install_sublevel_end_handler(ping_check_end_handler);
-	install_sublevel_end();
+	install_level_end_handler(ping_check_end_handler);
+	install_sublevel_end(check_ptr);
 }
 
 static enum connect_result
 ping_it(int fd, conn_opts_t* co)
 {
 	struct icmphdr *icmp_hdr;
-	char send_buf[sizeof(*icmp_hdr) + ICMP_BUFSIZE];
+	char send_buf[sizeof(*icmp_hdr) + ICMP_BUFSIZE] __attribute__((aligned(__alignof__(struct icmphdr))));
 
 	set_buf(send_buf + sizeof(*icmp_hdr), ICMP_BUFSIZE);
 
-	icmp_hdr = (struct icmphdr *)send_buf;
+	icmp_hdr = PTR_CAST(struct icmphdr, send_buf);
 
 	memset(icmp_hdr, 0, sizeof(*icmp_hdr));
 	icmp_hdr->type = ICMP_ECHO;
 	icmp_hdr->un.echo.sequence = seq_no++;
 
-	if (sendto(fd, send_buf, sizeof(send_buf), 0, (struct sockaddr*)&co->dst, sizeof(struct sockaddr)) < 0) {
+	if (sendto(fd, send_buf, sizeof(send_buf), 0, PTR_CAST(struct sockaddr, &co->dst), sizeof(struct sockaddr)) < 0) {
 		log_message(LOG_INFO, "send ICMP packet fail");
 		return connect_error;
 	}
@@ -197,7 +205,7 @@ recv_it(int fd)
 {
 	ssize_t len;
 	const struct icmphdr *icmp_hdr;
-	char recv_buf[sizeof(*icmp_hdr) + ICMP_BUFSIZE];
+	char recv_buf[sizeof(*icmp_hdr) + ICMP_BUFSIZE] __attribute__((aligned(__alignof__(struct icmphdr))));
 
 	len = recv(fd, recv_buf, sizeof(recv_buf), 0);
 
@@ -211,7 +219,7 @@ recv_it(int fd)
 		return connect_error;
 	}
 
-	icmp_hdr = (const struct icmphdr *)recv_buf;
+	icmp_hdr = PTR_CAST_CONST(struct icmphdr, recv_buf);
 	if (icmp_hdr->type != ICMP_ECHOREPLY) {
 		log_message(LOG_INFO, "Got ICMP packet with type 0x%x", icmp_hdr->type);
 		return connect_error;
@@ -224,17 +232,17 @@ static enum connect_result
 ping6_it(int fd, conn_opts_t* co)
 {
 	struct icmp6_hdr* icmp6_hdr;
-	char send_buf[sizeof(*icmp6_hdr) + ICMP_BUFSIZE];
+	char send_buf[sizeof(*icmp6_hdr) + ICMP_BUFSIZE] __attribute__((aligned(__alignof__(struct icmp6_hdr))));
 
 	set_buf(send_buf + sizeof(*icmp6_hdr), ICMP_BUFSIZE);
 
-	icmp6_hdr = (struct icmp6_hdr *)&send_buf;
+	icmp6_hdr = PTR_CAST(struct icmp6_hdr, &send_buf);
 
 	memset(icmp6_hdr, 0, sizeof(*icmp6_hdr));
 	icmp6_hdr->icmp6_type = ICMP6_ECHO_REQUEST;
 	icmp6_hdr->icmp6_seq = seq_no++;
 
-	if (sendto(fd, send_buf, sizeof(send_buf), 0, (struct sockaddr_in6 *)&co->dst, sizeof(struct sockaddr_in6)) < 0) {
+	if (sendto(fd, send_buf, sizeof(send_buf), 0, PTR_CAST(struct sockaddr, &co->dst), sizeof(struct sockaddr_in6)) < 0) {
 		log_message(LOG_INFO, "send ICMPv6 packet fail - errno %d", errno);
 		return connect_error;
 	}
@@ -247,7 +255,7 @@ recv6_it(int fd)
 {
 	ssize_t len;
 	const struct icmp6_hdr* icmp6_hdr;
-	char recv_buf[sizeof (*icmp6_hdr) + ICMP_BUFSIZE];
+	char recv_buf[sizeof (*icmp6_hdr) + ICMP_BUFSIZE] __attribute__((aligned(__alignof__(struct icmp6_hdr))));
 
 	len = recv(fd, recv_buf, sizeof(recv_buf), 0);
 
@@ -261,7 +269,7 @@ recv6_it(int fd)
 		return connect_error;
 	}
 
-	icmp6_hdr = (const struct icmp6_hdr*)recv_buf;
+	icmp6_hdr = PTR_CAST_CONST(struct icmp6_hdr, recv_buf);
 	if (icmp6_hdr->icmp6_type != ICMP6_ECHO_REPLY) {
 		log_message(LOG_INFO, "Got ICMPv6 packet with type 0x%x", icmp6_hdr->icmp6_type);
 		return connect_error;
@@ -386,16 +394,6 @@ icmp_connect_thread(thread_ref_t thread)
 				checker->delay_loop);
 		return;
 	}
-
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on icmp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on icmp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
 
 	if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)))
 		log_message(LOG_INFO, "setsockopt SO_RCVBUF for socket %d failed (%d) - %m", fd, errno);

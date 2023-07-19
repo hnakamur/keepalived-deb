@@ -35,19 +35,44 @@
 #include "check_data.h"
 #include "vector.h"
 #include "layer4.h"
+#include "sockaddr.h"
+
+typedef enum _checker_type {
+	CHECKER_MISC,
+	CHECKER_TCP,
+	CHECKER_UDP,
+	CHECKER_DNS,
+	CHECKER_HTTP,
+	CHECKER_SSL,
+	CHECKER_SMTP,
+	CHECKER_BFD,
+	CHECKER_PING,
+	CHECKER_FILE
+} checker_type_t;
+
+
+/* Forward reference */
+struct _checker;
+
+typedef struct _checker_funcs {
+	checker_type_t			type;
+	void				(*free_func) (struct _checker *);
+	void				(*dump_func) (FILE *, const struct _checker *);
+	bool				(*compare) (const struct _checker *, struct _checker *);
+	void				(*migrate) (struct _checker *, const struct _checker *);
+} checker_funcs_t;
 
 /* Checkers structure definition */
 typedef struct _checker {
-	void				(*free_func) (struct _checker *);
-	void				(*dump_func) (FILE *, const struct _checker *);
+	const checker_funcs_t		*checker_funcs;
 	thread_func_t			launch;
-	bool				(*compare) (const struct _checker *, struct _checker *);
 	virtual_server_t		*vs;			/* pointer to the checker thread virtualserver */
 	real_server_t			*rs;			/* pointer to the checker thread realserver */
-	void				*data;
+	void				*data;			/* Details for the specific checker type */
 	bool				enabled;		/* Activation flag */
 	bool				is_up;			/* Set if checker is up */
 	bool				has_run;		/* Set if the checker has completed at least once */
+	int				cur_weight;		/* Current weight of checker */
 	conn_opts_t			*co;			/* connection options */
 	int				alpha;			/* Alpha mode enabled */
 	unsigned long			delay_loop;		/* Interval between running checker */
@@ -73,14 +98,10 @@ typedef struct _checker_ref {
 /* Checkers queue */
 extern list_head_t checkers_queue;
 
+extern checker_t *current_checker;
+
 /* utility macro */
 #define CHECKER_ARG(X) ((X)->data)
-#define CHECKER_CO(X) (((checker_t *)X)->co)
-#define CHECKER_DATA(X) (((checker_t *)X)->data)
-#define CHECKER_GET_CURRENT() (list_last_entry(&checkers_queue, checker_t, e_list))
-#define CHECKER_GET() (CHECKER_DATA(CHECKER_GET_CURRENT()))
-#define CHECKER_GET_CO() (((checker_t *)CHECKER_GET_CURRENT())->co)
-#define CHECKER_HA_SUSPEND(C) ((C)->vs->ha_suspend)
 #define CHECKER_NEW_CO() ((conn_opts_t *) MALLOC(sizeof (conn_opts_t)))
 #define FMT_CHK(C) FMT_RS((C)->rs, (C)->vs)
 
@@ -95,10 +116,8 @@ extern void init_checkers_queue(void);
 extern void free_vs_checkers(const virtual_server_t *);
 extern void free_rs_checkers(const real_server_t *);
 extern void dump_connection_opts(FILE *, const void *);
-extern void dump_checker_opts(FILE *, const void *);
-extern checker_t *queue_checker(void (*) (checker_t *), void (*) (FILE *, const checker_t *)
+extern void queue_checker(const checker_funcs_t *
 			  , thread_func_t
-			  , bool (*) (const checker_t *, checker_t *)
 			  , void *
 			  , conn_opts_t *
 			  , bool);
@@ -109,7 +128,7 @@ extern void dump_checkers_queue(FILE *);
 extern void free_checkers_queue(void);
 extern void register_checkers_thread(void);
 extern void install_checkers_keyword(void);
-extern void checker_set_dst_port(struct sockaddr_storage *, uint16_t);
+extern void checker_set_dst_port(sockaddr_t *, uint16_t);
 extern void install_checker_common_keywords(bool);
 extern void update_checker_activity(sa_family_t, void *, bool);
 

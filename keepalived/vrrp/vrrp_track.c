@@ -45,7 +45,8 @@
 #include "vrrp_notify.h"
 #include "bitops.h"
 #include "track_file.h"
-#ifdef _WITH_CN_PROC_
+#include "main.h"
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 
@@ -71,6 +72,7 @@ free_track_if(tracked_if_t *tip)
 	list_del_init(&tip->e_list);
 	FREE(tip);
 }
+
 void
 free_track_if_list(list_head_t *l)
 {
@@ -144,7 +146,7 @@ alloc_track_if(const char *name, list_head_t *l, const vector_t *strvec)
 		}
 	}
 
-	tip	    = (tracked_if_t *) MALLOC(sizeof(tracked_if_t));
+	PMALLOC(tip);
 	INIT_LIST_HEAD(&tip->e_list);
 	tip->ifp    = ifp;
 	tip->weight = weight;
@@ -267,16 +269,16 @@ alloc_track_script(const char *name, list_head_t *l, const vector_t *strvec)
 		}
 	}
 
-	tsc	    = (tracked_sc_t *) MALLOC(sizeof(tracked_sc_t));
+	PMALLOC(tsc);
 	INIT_LIST_HEAD(&tsc->e_list);
 	tsc->scr    = vsc;
 	tsc->weight = weight;
 	tsc->weight_reverse = reverse;
-	vsc->init_state = SCRIPT_INIT_STATE_INIT;
+	vsc->init_state = reload ? SCRIPT_INIT_STATE_INIT_RELOAD : SCRIPT_INIT_STATE_INIT;
 	list_add_tail(&tsc->e_list, l);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static vrrp_tracked_process_t * __attribute__ ((pure))
 find_tracked_process_by_name(const char *name)
 {
@@ -403,7 +405,7 @@ find_vrrp_tracked_bfd_by_name(const char *name)
 	return NULL;
 }
 
-void
+vrrp_tracked_bfd_t *
 alloc_vrrp_tracked_bfd(const char *name, list_head_t *l)
 {
 	vrrp_tracked_bfd_t *tbfd;
@@ -411,14 +413,14 @@ alloc_vrrp_tracked_bfd(const char *name, list_head_t *l)
 	if (strlen(name) >= BFD_INAME_MAX) {
 		report_config_error(CONFIG_GENERAL_ERROR, "BFD name %s too long", name);
 		skip_block(true);
-		return;
+		return NULL;
 	}
 
 	list_for_each_entry(tbfd, l, e_list) {
 		if (!strcmp(name, tbfd->bname)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "BFD %s already specified", name);
 			skip_block(true);
-			return;
+			return NULL;
 		}
 	}
 
@@ -429,7 +431,8 @@ alloc_vrrp_tracked_bfd(const char *name, list_head_t *l)
 	tbfd->weight_reverse = false;
 	tbfd->bfd_up = false;
 	INIT_LIST_HEAD(&tbfd->tracking_vrrp);
-	list_add_tail(&tbfd->e_list, l);
+
+	return tbfd;
 }
 
 /* Track bfd related */
@@ -577,7 +580,7 @@ vrrp_set_effective_priority(vrrp_t *vrrp)
 
 	vrrp->effective_priority = new_prio;
 	old_down_timer = vrrp->ms_down_timer;
-	vrrp->ms_down_timer = 3 * vrrp->master_adver_int + VRRP_TIMER_SKEW(vrrp);
+	vrrp->ms_down_timer = VRRP_MS_DOWN_TIMER(vrrp);
 
 	if (vrrp->state == VRRP_STATE_BACK) {
 		if (old_down_timer < vrrp->ms_down_timer)
@@ -610,6 +613,7 @@ process_script_update_priority(int weight, int multiplier, vrrp_script_t *vscrip
 			/* The instance needs to go down */
 			down_instance(vrrp);
 		} else if (!vrrp->num_script_init &&
+			   vscript->init_state != SCRIPT_INIT_STATE_INIT_RELOAD &&
 			   (!vrrp->sync || !vrrp->sync->num_member_init)) {
 			/* The instance can come up */
 			try_up_instance(vrrp, instance_left_init);  // Set want_state = BACKUP/MASTER, and check i/fs and sync groups
@@ -617,7 +621,8 @@ process_script_update_priority(int weight, int multiplier, vrrp_script_t *vscrip
 		return;
 	}
 
-	if (vscript->init_state == SCRIPT_INIT_STATE_INIT) {
+	if (vscript->init_state == SCRIPT_INIT_STATE_INIT ||
+	    vscript->init_state == SCRIPT_INIT_STATE_INIT_RELOAD) {
 		/* If the script hasn't previously exited, we need
 		   to only adjust the priority if the state the script
 		   is now in causes an adjustment to the priority */
@@ -658,7 +663,8 @@ initialise_track_script_state(tracked_sc_t *tsc, vrrp_t *vrrp)
 		if (tsc->scr->init_state == SCRIPT_INIT_STATE_INIT)
 			vrrp->num_script_init++;
 		else if (tsc->scr->init_state == SCRIPT_INIT_STATE_FAILED ||
-			 (tsc->scr->result >= 0 && tsc->scr->result < tsc->scr->rise)) {
+			 (tsc->scr->init_state != SCRIPT_INIT_STATE_INIT_RELOAD &&
+			  (tsc->scr->result >= 0 && tsc->scr->result < tsc->scr->rise))) {
 			/* The script is in fault state */
 			vrrp->num_script_if_fault++;
 			log_message(LOG_INFO, "(%s): entering FAULT state due to script %s", vrrp->iname, tsc->scr->sname);
@@ -671,7 +677,8 @@ initialise_track_script_state(tracked_sc_t *tsc, vrrp_t *vrrp)
 	if (vrrp->base_priority == VRRP_PRIO_OWNER)
 		return;
 
-	if (tsc->scr->init_state != SCRIPT_INIT_STATE_INIT)
+	if (tsc->scr->init_state != SCRIPT_INIT_STATE_INIT &&
+	    tsc->scr->init_state != SCRIPT_INIT_STATE_INIT_RELOAD)
 	{
 		if (tsc->scr->result >= tsc->scr->rise) {
 			if (tsc->weight > 0)
@@ -766,7 +773,7 @@ initialise_vrrp_file_tracking_priorities(void)
 	}
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 initialise_process_tracking_priorities(void)
 {
@@ -827,7 +834,7 @@ initialise_vrrp_tracking_priorities(vrrp_t *vrrp)
 		initialise_track_script_state(tsc, vrrp);
 
 #ifdef _WITH_BFD_
-	/* Initialise the vrrp instance's tracked scripts */
+	/* Initialise the vrrp instance's tracked BFDs */
 	list_for_each_entry(tbfd, &vrrp->track_bfd, e_list)
 		initialise_track_bfd_state(tbfd, vrrp);
 #endif
@@ -836,6 +843,10 @@ initialise_vrrp_tracking_priorities(vrrp_t *vrrp)
 	if (vrrp->sync) {
 		list_for_each_entry(tsc, &vrrp->sync->track_script, e_list)
 			initialise_track_script_state(tsc, vrrp);
+#ifdef _WITH_BFD_
+		list_for_each_entry(tbfd, &vrrp->sync->track_bfd, e_list)
+			initialise_track_bfd_state(tbfd, vrrp);
+#endif
 	}
 
 	vrrp_set_effective_priority(vrrp);
@@ -851,7 +862,7 @@ initialise_tracking_priorities(void)
 
 	initialise_vrrp_file_tracking_priorities();
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	initialise_process_tracking_priorities();
 #endif
 
@@ -880,7 +891,7 @@ initialise_tracking_priorities(void)
 	}
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 void
 process_update_track_process_status(vrrp_tracked_process_t *tprocess, bool now_up)
 {

@@ -37,6 +37,7 @@
 #ifdef _WITH_VRRP_
 #include "vrrp_if.h"
 #endif
+#include "align.h"
 
 /* types definitions */
 typedef struct _nl_handle {
@@ -50,11 +51,8 @@ typedef struct _nl_handle {
 #ifndef NLMSG_TAIL
 #define NLMSG_TAIL(nmsg) ((void *)(((char *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
 #endif
-#if !defined SOL_NETLINK
-#define SOL_NETLINK 270
-#endif
 
-#define RTA_TAIL(rta)	((struct rtattr *)(((char *) (rta)) + RTA_ALIGN((rta)->rta_len)))
+#define RTA_TAIL(rta)	PTR_CAST(struct rtattr, (char *)(rta) + RTA_ALIGN((rta)->rta_len))
 
 /* Global vars exported */
 #ifdef _WITH_VRRP_
@@ -71,7 +69,7 @@ extern bool do_netlink_timers;
 extern void report_and_clear_netlink_timers(const char *);
 #endif
 
-extern int addattr_l(struct nlmsghdr *, size_t, unsigned short, const void *, size_t);
+extern int addattr_l(struct nlmsghdr *, size_t, unsigned short, const void *, size_t) GCC_LTO_NOINLINE;
 extern int addattr_l2(struct nlmsghdr *, size_t, unsigned short, const void *, size_t, const void *, size_t);
 extern int addraw_l(struct nlmsghdr *, size_t, const void *, size_t);
 
@@ -135,7 +133,7 @@ extern void kernel_netlink_poll(void);
 extern void process_if_status_change(interface_t *);
 #endif
 extern void kernel_netlink_set_recv_bufs(void);
-#ifdef _HAVE_FIB_ROUTING_
+#ifdef _WITH_VRRP_
 extern void set_extra_netlink_monitoring(bool, bool, bool, bool);
 #endif
 extern void kernel_netlink_init(void);

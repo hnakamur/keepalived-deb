@@ -37,7 +37,7 @@
 
 #include "timer.h"
 #include "list_head.h"
-#include "rbtree.h"
+#include "rbtree_ka.h"
 
 /* Thread types. */
 typedef enum {
@@ -58,6 +58,7 @@ typedef enum {
 	THREAD_CHILD_TERMINATED,
 	THREAD_TERMINATE_START,
 	THREAD_TERMINATE,
+	THREAD_READY_TIMER,
 	THREAD_READY_READ_FD,
 	THREAD_READY_WRITE_FD,
 	THREAD_READ_ERROR,
@@ -69,19 +70,36 @@ typedef enum {
 
 /* Thread Event flags */
 enum thread_flags {
-	THREAD_FL_READ_BIT,
-	THREAD_FL_WRITE_BIT,
-	THREAD_FL_EPOLL_BIT,
-	THREAD_FL_EPOLL_READ_BIT,
-	THREAD_FL_EPOLL_WRITE_BIT,
+	THREAD_FL_READ_BIT,		/* Want read set */
+	THREAD_FL_WRITE_BIT,		/* Want write set */
+	THREAD_FL_EPOLL_BIT,		/* fd is registered with epoll */
+	THREAD_FL_EPOLL_READ_BIT,	/* read is registered */
+	THREAD_FL_EPOLL_WRITE_BIT,	/* write is registered */
 };
 
 /* epoll def */
 #define THREAD_EPOLL_REALLOC_THRESH	64
 
+/* Thread flags for thread destruction */
+#define THREAD_DESTROY_CLOSE_FD	0x01
+#define THREAD_DESTROY_FREE_ARG	0x02
+
 typedef struct _thread thread_t;
 typedef const thread_t * thread_ref_t;
 typedef void (*thread_func_t)(thread_ref_t);
+
+typedef union {
+	int val;
+	unsigned uval;
+	struct {
+		int fd;		/* file descriptor in case of read/write. */
+		unsigned flags;
+	} f;
+	struct {
+		pid_t pid;	/* process id a child thread is wanting. */
+		int status;	/* return status of the process */
+	} c;
+} thread_arg2;
 
 /* Thread itself. */
 struct _thread {
@@ -91,17 +109,7 @@ struct _thread {
 	thread_func_t func;		/* event function */
 	void *arg;			/* event argument */
 	timeval_t sands;		/* rest of time sands value. */
-	union {
-		int val;		/* second argument of the event. */
-		struct {
-			int fd;		/* file descriptor in case of read/write. */
-			bool close_on_reload;
-		} f;
-		struct {
-			pid_t pid;	/* process id a child thread is wanting. */
-			int status;	/* return status of the process */
-		} c;
-	} u;
+	thread_arg2 u;			/* second argument of the event. */
 	struct _thread_event *event;	/* Thread Event back-pointer */
 
 	union {
@@ -192,14 +200,25 @@ typedef enum {
 #define THREAD_CHILD_PID(X) ((X)->u.c.pid)
 #define THREAD_CHILD_STATUS(X) ((X)->u.c.status)
 
-/* Exit codes */
-#define KEEPALIVED_EXIT_OK			EXIT_SUCCESS
-#define KEEPALIVED_EXIT_NO_MEMORY		(EXIT_FAILURE  )
-#define KEEPALIVED_EXIT_FATAL			(EXIT_FAILURE+1)
-#define KEEPALIVED_EXIT_CONFIG			(EXIT_FAILURE+2)
-#define KEEPALIVED_EXIT_CONFIG_TEST		(EXIT_FAILURE+3)
-#define KEEPALIVED_EXIT_CONFIG_TEST_SECURITY	(EXIT_FAILURE+4)
-#define KEEPALIVED_EXIT_NO_CONFIG		(EXIT_FAILURE+5)
+/* Exit codes. The values comply with the LSB so far as possible,
+ * and are also documented in the systemd.exec(5) man page. */
+enum exit_code {
+	KEEPALIVED_EXIT_OK = EXIT_SUCCESS,
+	KEEPALIVED_EXIT_NO_MEMORY = 204,	/* EXIT_MEMORY */
+	KEEPALIVED_EXIT_PROGRAM_ERROR = 70,	/* EX_SOFTWARE */
+	KEEPALIVED_EXIT_FATAL = 1,		/* EXIT_FAILURE */
+	KEEPALIVED_EXIT_CONFIG = 2,		/* EXIT_INVALIDARGUMENT */
+	KEEPALIVED_EXIT_NO_CONFIG = 6,		/* EXIT_NOTCONFIGURED */
+	KEEPALIVED_EXIT_MISSING_PERMISSION = 4,	/* EXIT_NOPERMISSION */
+} ;
+
+enum chk_exit_code {
+	KEEPALIVED_CHK_EXIT_OK = EXIT_SUCCESS,
+	KEEPALIVED_CHK_EXIT_CONFIG = 4,		/* Maintain backward compatibility */
+	KEEPALIVED_CHK_EXIT_CONFIG_TEST,
+	KEEPALIVED_CHK_EXIT_CONFIG_TEST_SECURITY,
+} ;
+
 
 #define DEFAULT_CHILD_FINDER ((void *)1)
 
@@ -224,27 +243,32 @@ extern bool do_script_debug;
 /* Prototypes. */
 extern void set_child_finder_name(char const * (*)(pid_t));
 extern void save_cmd_line_options(int, char * const *);
+extern char * const * get_cmd_line_options(int *);
 extern void log_command_line(unsigned);
 #ifndef _ONE_PROCESS_DEBUG_
 extern unsigned calc_restart_delay(const timeval_t *, unsigned *, const char *);
-extern bool report_child_status(int, pid_t, const char *);
+extern void log_child_died(const char *, pid_t);
+extern int report_child_status(int, pid_t, const char *);
 #endif
 extern thread_master_t *thread_make_master(void);
 extern thread_ref_t thread_add_terminate_event(thread_master_t *);
+extern thread_ref_t thread_add_parent_terminate_event(thread_master_t *, int);
 extern thread_ref_t thread_add_start_terminate_event(thread_master_t *, thread_func_t);
 #ifdef THREAD_DUMP
 extern void dump_thread_data(const thread_master_t *, FILE *);
 #endif
-extern void thread_cleanup_master(thread_master_t *);
+extern void thread_cleanup_master(thread_master_t *, bool);
 extern void thread_destroy_master(thread_master_t *);
-extern thread_ref_t thread_add_read_sands(thread_master_t *, thread_func_t, void *, int, const timeval_t *, bool);
-extern thread_ref_t thread_add_read(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
+extern thread_ref_t thread_add_read_sands(thread_master_t *, thread_func_t, void *, int, const timeval_t *, unsigned);
+extern thread_ref_t thread_add_read(thread_master_t *, thread_func_t, void *, int, unsigned long, unsigned);
 extern void thread_del_read(thread_ref_t);
 extern void thread_requeue_read(thread_master_t *, int, const timeval_t *);
-extern thread_ref_t thread_add_write(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
+extern thread_ref_t thread_add_write(thread_master_t *, thread_func_t, void *, int, unsigned long, unsigned);
 extern void thread_del_write(thread_ref_t);
 extern void thread_close_fd(thread_ref_t);
+extern thread_ref_t thread_add_timer_uval(thread_master_t *, thread_func_t, void *, unsigned, unsigned long);
 extern thread_ref_t thread_add_timer(thread_master_t *, thread_func_t, void *, unsigned long);
+extern void thread_update_arg2(thread_ref_t, const thread_arg2 *);
 extern void timer_thread_update_timeout(thread_ref_t, unsigned long);
 extern thread_ref_t thread_add_timer_shutdown(thread_master_t *, thread_func_t, void *, unsigned long);
 extern thread_ref_t thread_add_child(thread_master_t *, thread_func_t, void *, pid_t, unsigned long);
@@ -257,10 +281,14 @@ extern void snmp_timeout_thread(thread_ref_t);
 extern void snmp_epoll_info(thread_master_t *);
 extern void snmp_epoll_clear(thread_master_t *);
 #endif
-extern void process_threads(thread_master_t *);
+extern int process_threads(thread_master_t *);
 extern void thread_child_handler(void *, int);
 extern void thread_add_base_threads(thread_master_t *, bool);
-extern void launch_thread_scheduler(thread_master_t *);
+extern int launch_thread_scheduler(thread_master_t *);
+#ifndef _ONE_PROCESS_DEBUG_
+extern void register_shutdown_function(void (*)(int));
+#endif
+extern void register_thread_timeout_handler(void (*)(unsigned), unsigned);
 #ifdef THREAD_DUMP
 extern const char *get_signal_function_name(void (*)(void *, int));
 extern void register_signal_handler_address(const char *, void (*)(void *, int));

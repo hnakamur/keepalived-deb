@@ -37,14 +37,12 @@ bfd_data_t *bfd_data;
 bfd_data_t *old_bfd_data;
 char *bfd_buffer;
 
-/* Local vars */
-static const char *dump_file = "/tmp/keepalived_bfd.data";
 
 /*
  *	bfd_t functions
  */
 /* Initialize bfd_t */
-bool
+bfd_t *
 alloc_bfd(const char *name)
 {
 	bfd_t *bfd;
@@ -71,9 +69,9 @@ alloc_bfd(const char *name)
 	strcpy(bfd->iname, name);
 
 	/* Set defaults */
-	bfd->local_min_rx_intv = BFD_MINRX_DEFAULT * 1000;
-	bfd->local_min_tx_intv = BFD_MINTX_DEFAULT * 1000;
-	bfd->local_idle_tx_intv = BFD_IDLETX_DEFAULT * 1000;
+	bfd->local_min_rx_intv = BFD_MINRX_DEFAULT * TIMER_HZ / 1000;
+	bfd->local_min_tx_intv = BFD_MINTX_DEFAULT * TIMER_HZ / 1000;
+	bfd->local_idle_tx_intv = BFD_IDLETX_DEFAULT * TIMER_HZ / 1000;
 	bfd->local_detect_mult = BFD_MULTIPLIER_DEFAULT;
 
 	bfd->ttl = 0;
@@ -81,6 +79,7 @@ alloc_bfd(const char *name)
 
 	/* Initialize internal variables */
 	bfd->fd_out = -1;
+	bfd->thread_open_fd_out = NULL;
 	bfd->thread_out = NULL;
 	bfd->thread_exp = NULL;
 	bfd->thread_rst = NULL;
@@ -88,9 +87,7 @@ alloc_bfd(const char *name)
 	bfd->sands_exp = TIMER_NEVER;
 	bfd->sands_rst = TIMER_NEVER;
 
-	list_add_tail(&bfd->e_list, &bfd_data->bfd);
-
-	return true;
+	return bfd;
 }
 
 void
@@ -140,14 +137,10 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 		conf_write(fp, "   Source IP = %s",
 			    inet_sockaddrtos(&bfd->src_addr));
 
-	conf_write(fp, "   Required min RX interval = %u ms",
-		    bfd->local_min_rx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired min TX interval = %u ms",
-		    bfd->local_min_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Desired idle TX interval = %u ms",
-		    bfd->local_idle_tx_intv / (TIMER_HZ / 1000));
-	conf_write(fp, "   Detection multiplier = %d",
-		    bfd->local_detect_mult);
+	conf_write(fp, "   Required min RX interval = %u us", bfd->local_min_rx_intv);
+	conf_write(fp, "   Desired min TX interval = %u us", bfd->local_min_tx_intv);
+	conf_write(fp, "   Desired idle TX interval = %u us", bfd->local_idle_tx_intv);
+	conf_write(fp, "   Detection multiplier = %d", bfd->local_detect_mult);
 	conf_write(fp, "   %s = %d",
 		    bfd->nbr_addr.ss_family == AF_INET ? "TTL" : "hoplimit",
 		    bfd->ttl);
@@ -165,6 +158,7 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 	/* If this is not at startup time, write some state variables */
 	if (fp) {
 		conf_write(fp, "   fd_out %d", bfd->fd_out);
+		conf_write(fp, "   thread_open_fd_out 0x%p", bfd->thread_open_fd_out);
 		conf_write(fp, "   thread_out 0x%p", bfd->thread_out);
 		conf_write_sands(fp, "sands_out", bfd->sands_out);
 		conf_write(fp, "   thread_exp 0x%p", bfd->thread_exp);
@@ -178,16 +172,16 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 		conf_write(fp, "   remote discriminator = 0x%x", bfd->remote_discr);
 		conf_write(fp, "   local diag = %s", BFD_DIAG_STR(bfd->local_diag));
 		conf_write(fp, "   remote diag = %s", BFD_DIAG_STR(bfd->remote_diag));
-		conf_write(fp, "   remote min tx intv = %u ms", bfd->remote_min_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote min rx intv = %u ms", bfd->remote_min_rx_intv / (TIMER_HZ / 1000));
+		conf_write(fp, "   remote min tx intv = %u us", bfd->remote_min_tx_intv);
+		conf_write(fp, "   remote min rx intv = %u us", bfd->remote_min_rx_intv);
 		conf_write(fp, "   local demand = %u", bfd->local_demand);
 		conf_write(fp, "   remote demand = %u", bfd->remote_demand);
 		conf_write(fp, "   remote detect multiplier = %u", bfd->remote_detect_mult);
 		conf_write(fp, "   %spoll, %sfinal", bfd->poll ? "" : "!", bfd->final ? "" : "!");
-		conf_write(fp, "   local tx intv = %u ms", bfd->local_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote tx intv = %u ms", bfd->remote_tx_intv / (TIMER_HZ / 1000));
-		conf_write(fp, "   local detection time = %" PRIu64 " ms", bfd->local_detect_time / (TIMER_HZ / 1000));
-		conf_write(fp, "   remote detection time = %" PRIu64 " ms", bfd->remote_detect_time / (TIMER_HZ / 1000));
+		conf_write(fp, "   local tx intv = %u us", bfd->local_tx_intv);
+		conf_write(fp, "   remote tx intv = %u us", bfd->remote_tx_intv);
+		conf_write(fp, "   local detection time = %" PRIu64 " us", bfd->local_detect_time);
+		conf_write(fp, "   remote detection time = %" PRIu64 " us", bfd->remote_detect_time);
 		if (bfd->last_seen.tv_sec == 0)
 			conf_write(fp, "   last_seen = [never]");
 		else {
@@ -252,6 +246,7 @@ alloc_bfd_data(void)
 	/* Initialize internal variables */
 	data->thread_in = NULL;
 	data->fd_in = -1;
+	data->multihop_fd_in = -1;
 
 	return data;
 }
@@ -274,7 +269,10 @@ dump_bfd_data(FILE *fp, const bfd_data_t *data)
 
 	if (fp) {
 		conf_write(fp, "------< BFD Data >------");
-		conf_write(fp, " fd_in = %d", data->fd_in);
+		if (data->fd_in != -1)
+			conf_write(fp, " fd_in = %d", data->fd_in);
+		if (data->multihop_fd_in != -1)
+			conf_write(fp, " multihop fd_in = %d", data->multihop_fd_in);
 		conf_write(fp, " thread_in = 0x%p", data->thread_in);
 	}
 
@@ -284,19 +282,27 @@ dump_bfd_data(FILE *fp, const bfd_data_t *data)
 	}
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
+void
+dump_bfd_data_global(FILE *fp)
+{
+	dump_bfd_data(fp, bfd_data);
+}
+#endif
+
 void
 bfd_print_data(void)
 {
-	FILE *file = fopen_safe(dump_file, "w");
+	FILE *fp;
 
-	if (!file) {
-		log_message(LOG_INFO, "Can't open %s (%d: %m)", dump_file, errno);
+	fp = open_dump_file("keepalived_bfd.data");
+
+	if (!fp)
 		return;
-	}
 
-	dump_bfd_data(file, bfd_data);
+	dump_bfd_data(fp, bfd_data);
 
-	fclose(file);
+	fclose(fp);
 }
 
 void
@@ -320,8 +326,10 @@ bfd_complete_init(void)
 	}
 
 	/* Copy old input fd on reload */
-	if (reload)
+	if (reload) {
 		bfd_data->fd_in = old_bfd_data->fd_in;
+		bfd_data->multihop_fd_in = old_bfd_data->multihop_fd_in;
+	}
 }
 
 /*
@@ -331,7 +339,7 @@ void
 alloc_bfd_buffer(void)
 {
 	if (!bfd_buffer)
-		bfd_buffer = (char *) MALLOC(BFD_BUFFER_SIZE);
+		bfd_buffer = (char *)MALLOC(BFD_BUFFER_SIZE);
 }
 
 void
@@ -344,11 +352,11 @@ free_bfd_buffer(void)
 /*
  *	Lookup functions
  */
-/* Looks up bfd instance by neighbor address, and optional local address.
+/* Looks up bfd instance by neighbor address and port, and optional local address.
  * If local address is not set, then it is a configuration time check and
  * the bfd instance is configured without a local address. */
 bfd_t * __attribute__ ((pure))
-find_bfd_by_addr(const struct sockaddr_storage *nbr_addr, const struct sockaddr_storage *local_addr)
+find_bfd_by_addr(const sockaddr_t *nbr_addr, const sockaddr_t *local_addr, bool multihop)
 {
 	bfd_t *bfd;
 	assert(nbr_addr);
@@ -360,6 +368,9 @@ find_bfd_by_addr(const struct sockaddr_storage *nbr_addr, const struct sockaddr_
 			continue;
 
 		if (inet_sockaddrcmp(&bfd->nbr_addr, nbr_addr))
+			continue;
+
+		if (multihop != bfd->multihop)
 			continue;
 
 		if (!bfd->src_addr.ss_family)

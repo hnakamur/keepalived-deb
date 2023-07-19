@@ -24,6 +24,10 @@
 
 #include <sys/mman.h>
 #include <sys/resource.h>
+#ifndef RLIMIT_RTTIME
+/* musl was very late defining RLIMIT_RTTIME, not until v1.20 */
+#define RLIMIT_RTTIME	15
+#endif
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,9 +36,7 @@
 #include "process.h"
 #include "utils.h"
 #include "logger.h"
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 #include "signals.h"
-#endif
 #include "warnings.h"
 #include "bitops.h"
 
@@ -42,11 +44,9 @@ static unsigned cur_rt_priority;
 static unsigned max_rt_priority;
 long min_auto_priority_delay;
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 static unsigned cur_rlimit_rttime;
 static unsigned default_rlimit_rttime;
 static struct rlimit orig_rlimit_rt;
-#endif
 
 static int cur_priority;
 static int orig_priority;
@@ -56,9 +56,13 @@ static bool process_locked_in_memory;
 static struct rlimit orig_fd_limit;
 
 /* rlimit values to set for child processes */
-bool rlimit_nofile_set;
+static bool rlimit_nofile_set;
 static struct rlimit core;
-bool rlimit_core_set;
+static bool rlimit_core_set;
+
+/* main_pid is used by child processes to ensure the main process
+ * hasn't died during a window when PDEATHSIG is not set */
+pid_t main_pid;
 
 static void
 set_process_dont_swap(size_t stack_reserve)
@@ -68,14 +72,19 @@ set_process_dont_swap(size_t stack_reserve)
 	char stack[stack_reserve];
 	size_t i;
 
-	stack[0] = 23;		/* A random number */
-	for (i = 0; i < stack_reserve; i += pagesize)
-		stack[i] = stack[0];
-
-	if (mlockall(MCL_FUTURE) == -1)
+	if (mlockall(MCL_CURRENT | MCL_FUTURE
+#ifdef MCL_ONFAULT
+					      | MCL_ONFAULT	/* Since Linux 4.4 */
+#endif
+							   ) == -1)
 		log_message(LOG_INFO, "Unable to lock process in memory - %s", strerror(errno));
 	else
 		process_locked_in_memory = true;
+
+	stack[0] = 23;		/* A random number */
+	for (i = 0; i < stack_reserve; i += pagesize)
+		stack[i] = stack[0];
+	stack[stack_reserve-1] = stack[0];
 }
 
 static void
@@ -112,10 +121,7 @@ reset_process_priority(void)
 RELAX_STACK_PROTECTOR_START
 void
 set_process_priorities(int realtime_priority, int max_realtime_priority, long min_delay,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-		       int rlimit_rt,
-#endif
-		       int process_priority, int no_swap_stack_size)
+		       int rlimit_rt, int process_priority, int no_swap_stack_size)
 {
 	if (max_realtime_priority != -1)
 		max_rt_priority = max_realtime_priority;
@@ -130,7 +136,6 @@ set_process_priorities(int realtime_priority, int max_realtime_priority, long mi
 			log_message(LOG_WARNING, "child process: cannot raise priority");
 		else {
 			cur_rt_priority = realtime_priority;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 			if (rlimit_rt)
 			{
 				struct rlimit rlim;
@@ -144,16 +149,13 @@ set_process_priorities(int realtime_priority, int max_realtime_priority, long mi
 				else
 					cur_rlimit_rttime = rlimit_rt;
 			}
-#endif
 		}
 	}
 	else {
 		if (process_priority)
 			set_process_priority(process_priority);
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 		default_rlimit_rttime = rlimit_rt;
-#endif
 	}
 
 	if (min_delay)
@@ -178,7 +180,6 @@ reset_process_priorities(void)
 			log_message(LOG_WARNING, "child process: cannot reset realtime scheduling");
 		else {
 			cur_rt_priority = 0;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 			if (cur_rlimit_rttime)
 			{
 				if (setrlimit(RLIMIT_RTTIME, &orig_rlimit_rt))
@@ -187,7 +188,6 @@ reset_process_priorities(void)
 					cur_rlimit_rttime = 0;
 
 			}
-#endif
 		}
 	}
 
@@ -224,9 +224,7 @@ increment_process_priority(void)
 		cur_rt_priority = sched_get_priority_min(SCHED_RR);
 
 	set_process_priorities(cur_rt_priority, -1, 0,
-#if HAVE_DECL_RLIMIT_RTTIME
 			       cur_rlimit_rttime ? 0 : default_rlimit_rttime,
-#endif
 			       0, 0);
 
 	log_message(LOG_INFO, "Set realtime priority %u", cur_rt_priority);
@@ -238,13 +236,11 @@ get_cur_priority(void)
 	return cur_rt_priority;
 }
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 unsigned __attribute__((pure))
 get_cur_rlimit_rttime(void)
 {
 	return cur_rlimit_rttime;
 }
-#endif
 
 int
 set_process_cpu_affinity(cpu_set_t *set, const char *process)
@@ -300,20 +296,6 @@ set_child_rlimit(int resource, const struct rlimit *rlim)
 	}
 	else
 		log_message(LOG_INFO, "Unknown rlimit resource %d", resource);
-}
-
-pid_t
-local_fork(void)
-{
-	pid_t pid;
-
-	pid = fork();
-
-	/* If we are the child process, reset all elevated priorities */
-	if (pid == 0)
-		reset_process_priorities();
-
-	return pid;
 }
 
 void

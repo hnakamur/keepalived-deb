@@ -2,16 +2,14 @@
 #
 # Keepalived OpenSource project.
 
-SUBDIRS		= man/man8
-
-if BUILD_GENHASH
-dist_man1_MANS	= man/man1/genhash.1
+SUBDIRS		= man/man8 man/man5
+if WITH_IPVS
+SUBDIRS		+= man/man1
 endif
-dist_man5_MANS	= man/man5/keepalived.conf.5
 
 EXTRA_DIST	= source samples keepalived.conf.SYNOPSIS NOTE_vrrp_vmac.txt KEEPALIVED-MIB.txt VRRP-MIB.txt VRRPv3-MIB.txt
 
-sampledir	= $(sysconfdir)/@PACKAGE@/samples
+sampledir	= @SAMPLES_DIR@
 sample_DATA	= $(srcdir)/samples/*
 
 mibsdir		= $(datarootdir)/snmp/mibs

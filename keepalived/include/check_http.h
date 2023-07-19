@@ -27,7 +27,7 @@
 /* system includes */
 #include <sys/types.h>
 #include <stdbool.h>
-#include <openssl/md5.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 #ifdef _WITH_REGEX_CHECK_
 #define PCRE2_CODE_UNIT_WIDTH 8
@@ -62,7 +62,7 @@ typedef struct _request {
 	size_t				len;
 	SSL				*ssl;
 	BIO				*bio;
-	MD5_CTX				context;
+	EVP_MD_CTX			*context;
 	size_t				content_len;
 	size_t				rx_bytes;
 #ifdef _WITH_REGEX_CHECK_
@@ -100,6 +100,8 @@ typedef struct _url {
 	unsigned long			status_code[(HTTP_STATUS_CODE_MAX - HTTP_STATUS_CODE_MIN + 1 - 1) / (sizeof(unsigned long) * CHAR_BIT) + 1];
 	const char			*virtualhost;
 	ssize_t				len_mismatch;
+	bool				tls_compliant;
+	unsigned long			last_ssl_error;
 #ifdef _WITH_REGEX_CHECK_
 	bool				regex_no_match;
 	regex_t				*regex;
@@ -125,14 +127,19 @@ typedef struct _http_checker {
 	bool				enable_sni;
 #endif
 	bool				fast_recovery;
+	bool				tls_compliant;
+	int				genhash_flags;
 } http_checker_t;
 
-/* global defs */
 #define GET_BUFFER_LENGTH 2048U
 #define MAX_BUFFER_LENGTH 4096U
 #define PROTO_HTTP	0x01
 #define PROTO_SSL	0x02
 
+#define GENHASH         0x01
+#define GENHASH_VERBOSE 0x02
+
+/* global defs */
 #ifdef _REGEX_DEBUG_
 extern bool do_regex_debug;
 #endif
@@ -141,10 +148,13 @@ extern bool do_regex_timers;
 #endif
 
 /* Define prototypes */
+extern void free_http_check(checker_t *);
 extern void install_http_check_keyword(void);
 extern void timeout_epilog(thread_ref_t, const char *);
-extern void http_process_response(request_t *, size_t, url_t *);
+extern void dump_digest(unsigned char *, unsigned);
+extern void http_process_response(thread_ref_t, request_t *, size_t, url_t *);
 extern void http_handle_response(thread_ref_t, unsigned char digest[16], bool);
+extern void http_connect_thread(thread_ref_t);
 #ifdef THREAD_DUMP
 extern void register_check_http_addresses(void);
 #endif

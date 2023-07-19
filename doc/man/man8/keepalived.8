@@ -1,4 +1,4 @@
-.TH KEEPALIVED "8" "July 2018"
+.TH KEEPALIVED "8" "2022-01-06"
 
 .na
 .nh
@@ -15,7 +15,7 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-\-all\fP]
 [\fB\-l\fP|\fB\-\-log\-console\fP]
 [\fB\-D\fP|\fB\-\-log\-detail\fP]
-[\fB\-S\fP|\fB\-\-log\-facility\fP={0-7}]
+[\fB\-S\fP|\fB\-\-log\-facility\fP={0\-7|local{0\-7}|user|daemon}]
 [\fB\-g\fP|\fB\-\-log\-file\fP=FILE]
 [\fB\-\-flush\-log\-file\fP]
 [\fB\-G\fP|\fB\-\-no\-syslog\fP]
@@ -27,10 +27,12 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-d\fP|\fB\-\-dump\-conf\fP]
 [\fB\-p\fP|\fB\-\-pid\fP=FILE]
 [\fB\-r\fP|\fB\-\-vrrp_pid\fP=FILE]
+[\fB\-T\fP|\fB\-\-genhash\fP]
 [\fB\-c\fP|\fB\-\-checkers_pid\fP=FILE]
 [\fB\-a\fP|\fB\-\-address-monitoring\fP]
 [\fB\-b\fP|\fB\-\-bfd_pid\fP=FILE]
 [\fB\-s\fP|\fB\-\-namespace\fP=NAME]
+[\fB\-e\fP|\fB\-\-all-config\fP]
 [\fB\-i\fP|\fB\-\-config-id\fP id]
 [\fB\-x\fP|\fB\-\-snmp\fP]
 [\fB\-A\fP|\fB\-\-snmp-agent-socket\fP=FILE]
@@ -41,6 +43,7 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-t\fP|\fB\-\-config\-test\fP[=FILE]]
 [\fB\-\-perf\fP[={all|run|end}]]
 [\fB\-\-debug\fP[=debug-options]]
+[\fB\-\-no-mem-check\fP]
 [\fB\-v\fP|\fB\-\-version\fP]
 [\fB\-h\fP|\fB\-\-help\fP]
 
@@ -58,7 +61,8 @@ with director failover.
 .TP
 \fB -f, --use-file\fP=FILE
 Use the specified configuration file. The default configuration file
-is "/etc/keepalived/keepalived.conf".
+is "/usr/local/etc/keepalived/keepalived.conf".
+Deprecated alternative is "/etc/keepalived/keepalived.conf".
 .TP
 \fB -P, --vrrp\fP
 Only run the VRRP subsystem. This is useful for configurations that do
@@ -81,8 +85,9 @@ messages to syslog.
 \fB -D, --log-detail\fP
 Detailed log messages.
 .TP
-\fB -S, --log-facility\fP=[0-7]
-Set syslog facility to LOG_LOCAL[0-7]. The default syslog facility is LOG_DAEMON.
+\fB \-S, \-\-log\-facility\fP={0\-7|local{0\-7}|user|daemon}
+Set syslog facility to LOG_LOCAL[0\-7], LOG_USER or LOG_DAEMON.
+The default syslog facility is LOG_DAEMON.
 .TP
 \fB -g, --log-file\fP=FILE
 Write log entries to FILE. FILE will have _vrrp, _healthcheckers, and _bfd
@@ -131,6 +136,12 @@ Use the specified pidfile for the VRRP child process. The default pidfile
 for the VRRP child process is "/run/keepalived_vrrp.pid", unless a
 network namespace is being used.
 .TP
+\fB -T, --genhash\fP
+Enter genhash utility mode. Previous versions of keepalived were shipped with a
+dedicated genhash utility. genhash is now part of the mainline code. We keep
+compatibility with previous genhash utility command line option. For more
+information please refer to the genhash(1) manpage.
+.TP
 \fB -c, --checkers_pid\fP=FILE
 Use the specified pidfile for checkers child process. The default pidfile
 for the checker child process is "/run/keepalived_checkers.pid" unless
@@ -148,6 +159,9 @@ a network namespace is being used.
 Run keepalived in network namespace NAME. See
 .B NAMESPACES
 below for more details.
+.TP
+\fB -e, --all-config
+Don't load if any configuration file is missing or cannot be read.
 .TP
 \fB -i, --config-id ID
 Use configuration id ID, for conditional configuration (defaults to
@@ -180,7 +194,7 @@ Provided the parent process doesn't terminate abnormally, it will restore
 \fBNote:\fP This will also affect any other process producing a core dump while keepalived is running.
 .TP
 \fB --signum\fP=PATTERN
-Returns the signal number to use for STOP, RELOAD, DATA, STATS, STATS_CLEAR and JSON.
+Returns the signal number to use for STOP, RELOAD, DATA, STATS, STATS_CLEAR, JSON and TDATA.
 For example, to stop keepalived running, execute:
 .IP
 .nf
@@ -198,6 +212,9 @@ unless file is specified, in which case it will write to the file.
 \fB --perf\fP[={all|run|end}]
 Record perf data for vrrp process. Data will be written to /perf_vrrp.data.
 The data recorded is for use with the perf tool.
+.TP
+\fB --no-mem-check\fP
+Disable malloc() etc mem-checks if they have been compiled into keepalived.
 .TP
 \fB --debug\fP[=debug-options]]
 Enables debug options if they have been compiled into keepalived.
@@ -239,6 +256,17 @@ M@Email alert debug
 T@Timer debug
 S@TSM debug
 R@Regex debug
+B@Smtp connect debug
+U@Checksum diagnostics
+O@Track process debug
+A@Track process debug with extra detail
+C@Parser (config) debug
+H@Checker debug
+Z@Memory alloc/free error debug
+G@VRRP recvmsg() debug
+J@VRRP recvmsg() log rx data
+V@Script debugging
+K@Dump keywords
 .TE
 .PP
 \fBExample:\fP --debug=DvEcvNR
@@ -318,6 +346,20 @@ This causes
 .B keepalived
 to close down all interfaces, reload its configuration, and
 start up with the new configuration.
+.IP
+.B Note:
+If a virtual_ipaddress, virtual_route or virtual_rule is being moved from
+one VRRP instance to another one, two reloads will be necessary, the first
+to remove the virtual ipaddress/route/rule, and the second reload to add it
+to the VRRP instance it is now to be configured on. Failing to do this can
+result in the ipaddress/route/rule not being configured on the new instance
+if both the old and new instances are in master state.
+It will usually work with a single reload, however, if either of the VRRP
+instances is not in MASTER state or if the VRRP instance the
+ipaddress/route/rule the VRRP instance is being
+.B added to
+is later in the original configuration file than the instance it is being
+removed from.
 .TP
 .B TERM\fP, \fBINT\fP or \fBSIGFUNC=STOP
 .B keepalived
@@ -339,6 +381,11 @@ and clear the statistics counters
 .B SIGFUNC=JSON
 Write configuration data in JSON format to
 .B /tmp/keepalived.json
+.TP
+.B SIGFUNC=TDATA
+This causes
+.B keepalived
+to write the current state of its internal threads to the log
 .LP
 .SH "USING KEEPALIVED WITH FIREWALLD"
 If you are running a firewall (see

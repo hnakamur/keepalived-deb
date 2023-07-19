@@ -26,6 +26,7 @@
 #include "config.h"
 
 #include <fcntl.h>
+#include <openssl/md5.h>
 #include <openssl/err.h>
 
 #include "check_ssl.h"
@@ -51,7 +52,7 @@ clear_ssl(ssl_data_t *ssl)
 static int
 password_cb(char *buf, int num, __attribute__((unused)) int rwflag, void *userdata)
 {
-	ssl_data_t *ssl = (ssl_data_t *) userdata;
+	ssl_data_t *ssl = PTR_CAST(ssl_data_t, userdata);
 	size_t plen = strlen(ssl->password);
 
 	if ((unsigned)num < plen + 1)
@@ -82,9 +83,9 @@ build_ssl_ctx(void)
 	SSL_load_error_strings();
 #endif
 
-	if (!check_data->ssl)
-		ssl = (ssl_data_t *) MALLOC(sizeof(ssl_data_t));
-	else
+	if (!check_data->ssl) {
+		PMALLOC(ssl);
+	} else
 		ssl = check_data->ssl;
 
 	/* Initialize SSL context */
@@ -110,11 +111,9 @@ build_ssl_ctx(void)
 
 	/* Load our keys and certificates */
 	if (check_data->ssl->certfile)
-		if (!
-		    (SSL_CTX_use_certificate_chain_file
-		     (ssl->ctx, check_data->ssl->certfile))) {
-			log_message(LOG_INFO,
-			       "SSL error : Cant load certificate file...");
+		if (!(SSL_CTX_use_certificate_chain_file(ssl->ctx,
+							 check_data->ssl->certfile))) {
+			log_message(LOG_INFO, "SSL error : Cant load certificate file...");
 			return false;
 		}
 
@@ -126,18 +125,17 @@ build_ssl_ctx(void)
 	}
 
 	if (check_data->ssl->keyfile)
-		if (!
-		    (SSL_CTX_use_PrivateKey_file
-		     (ssl->ctx, check_data->ssl->keyfile, SSL_FILETYPE_PEM))) {
+		if (!(SSL_CTX_use_PrivateKey_file(ssl->ctx,
+						  check_data->ssl->keyfile,
+						  SSL_FILETYPE_PEM))) {
 			log_message(LOG_INFO, "SSL error : Cant load key file...");
 			return false;
 		}
 
 	/* Load the CAs we trust */
 	if (check_data->ssl->cafile)
-		if (!
-		    (SSL_CTX_load_verify_locations
-		     (ssl->ctx, check_data->ssl->cafile, 0))) {
+		if (!(SSL_CTX_load_verify_locations(ssl->ctx,
+						    check_data->ssl->cafile, 0))) {
 			log_message(LOG_INFO, "SSL error : Cant load CA file...");
 			return false;
 		}
@@ -210,9 +208,14 @@ ssl_connect(thread_ref_t thread, int new_req)
 	request_t *req = http_get_check->req;
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 	url_t *url = http_get_check->url_it;
-	const char* vhost = NULL;
+	/* The man page for SSL_set_tlsext_host_name states name is const char *,
+	 * but it is cast to a void * */
+	union {
+		const char *name_const;
+		char *name;
+	} vhost;
 #endif
-	int ret = 0;
+	int ret;
 
 	/* First round, create SSL context */
 	if (new_req) {
@@ -229,9 +232,32 @@ ssl_connect(thread_ref_t thread, int new_req)
 		}
 
 		BIO_get_fd(req->bio, &bio_fd);
-		if (fcntl(bio_fd, F_SETFD, fcntl(bio_fd, F_GETFD) | FD_CLOEXEC) == -1)
-			log_message(LOG_INFO, "Setting CLOEXEC failed on ssl socket - errno %d", errno);
-#ifdef HAVE_SSL_SET0_RBIO
+		if (bio_fd != thread->u.f.fd) {
+			if (fcntl(bio_fd, F_SETFD, fcntl(bio_fd, F_GETFD) | FD_CLOEXEC) == -1)
+				log_message(LOG_INFO, "Setting CLOEXEC failed on ssl socket - errno %d", errno);
+		}
+
+		/* There is a memory leak in openSSL at least in version 3.0.1, which is fixed
+		 * by version 3.0.5. It was not present in version 1.1.1n. Since I haven't been
+		 * able to identify the OpenSSL patch that resolved the leak, we play safe and
+		 * assume it is in versions 3.0.0 up to 3.0.4.
+		 * The leak is memory allocated by
+		 *   p = OPENSSL_malloc(len);
+		 * in ssl3_setup_write_buffer() in ssl/record/ssl_buffer.c
+		 *
+		 * It appears that setting SSL_MODE_RELEASE_BUFFERS causes the memory leak not
+		 * to occur.
+		 */
+#ifdef OPENSSL_VERSION_MAJOR
+#if OPENSSL_VERSION_MAJOR == 3 && OPENSSL_VERSION_MINOR == 0 && OPENSSL_VERSION_PATCH <= 4
+		SSL_set_mode(req->ssl, SSL_MODE_RELEASE_BUFFERS);
+#endif
+#endif
+
+		if (!url->tls_compliant && !http_get_check->tls_compliant)
+			SSL_set_quiet_shutdown(req->ssl, 1);
+
+#if defined HAVE_SSL_SET0_RBIO && defined HAVE_SSL_SET0_WBIO
 		BIO_up_ref(req->bio);
 		SSL_set0_rbio(req->ssl, req->bio);
 		SSL_set0_wbio(req->ssl, req->bio);
@@ -241,13 +267,15 @@ ssl_connect(thread_ref_t thread, int new_req)
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 		if (http_get_check->enable_sni) {
 			if (url && url->virtualhost)
-				vhost = url->virtualhost;
+				vhost.name_const = url->virtualhost;
 			else if (http_get_check->virtualhost)
-				vhost = http_get_check->virtualhost;
+				vhost.name_const = http_get_check->virtualhost;
 			else if (checker->vs->virtualhost)
-				vhost = checker->vs->virtualhost;
-			if (vhost)
-				SSL_set_tlsext_host_name(req->ssl, vhost);
+				vhost.name_const = checker->vs->virtualhost;
+			else
+				vhost.name_const = NULL;
+			if (vhost.name)
+				SSL_set_tlsext_host_name(req->ssl, vhost.name);
 		}
 #endif
 	}
@@ -260,21 +288,11 @@ ssl_connect(thread_ref_t thread, int new_req)
 bool
 ssl_send_request(SSL * ssl, const char *str_request, int request_len)
 {
-	int err, r = 0;
+	int r;
 
-	while (true) {
-		err = 1;
-		r = SSL_write(ssl, str_request, request_len);
-		if (SSL_ERROR_NONE != SSL_get_error(ssl, r))
-			break;
-		err++;
-		if (request_len != r)
-			break;
-		err++;
-		break;
-	}
+	r = SSL_write(ssl, str_request, request_len);
 
-	return (err == 3);
+	return (r == request_len);
 }
 
 /* Asynchronous SSL stream reader */
@@ -285,52 +303,105 @@ ssl_read_thread(thread_ref_t thread)
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
 	url_t *url = http_get_check->url_it;
-	unsigned timeout = checker->co->connection_to;
+	unsigned long timeout;
 	unsigned char digest[MD5_DIGEST_LENGTH];
 	int r = 0;
 
 	/* Handle read timeout */
-	if (thread->type == THREAD_READ_TIMEOUT && !req->extracted) {
+	if (thread->type == THREAD_READ_TIMEOUT) {
+		SSL_shutdown(req->ssl);
+
 		timeout_epilog(thread, "Timeout SSL read");
 		return;
 	}
 
+	timeout = timer_long(thread->sands) - timer_long(time_now);
+
 	/* read the SSL stream - allow for terminating the data with '\0 */
 	r = SSL_read(req->ssl, req->buffer + req->len, (int)(MAX_BUFFER_LENGTH - 1 - req->len));
+
+	if (r > 0) {
+		/* Handle response stream */
+		http_process_response(thread, req, (size_t)r, url);
+
+		/*
+		 * Register next ssl stream reader.
+		 * Register itself to not perturbe global I/O multiplexer.
+		 */
+
+		thread_add_read(thread->master, ssl_read_thread, checker,
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
+		return;
+	}
 
 	req->error = SSL_get_error(req->ssl, r);
 
 	if (req->error == SSL_ERROR_WANT_READ) {
 		 /* async read unfinished */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, false);
-	} else if (r > 0 && req->error == 0) {
-		/* Handle response stream */
-		http_process_response(req, (size_t)r, url);
-
-		/*
-		 * Register next ssl stream reader.
-		 * Register itself to not perturbe global I/O multiplexer.
-		 */
-		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, false);
-	} else if (req->error) {
-
-		/* All the SSL streal has been parsed */
-		if (url->digest)
-			MD5_Final(digest, &req->context);
-		SSL_set_quiet_shutdown(req->ssl, 1);
-
-		r = (req->error == SSL_ERROR_ZERO_RETURN) ? SSL_shutdown(req->ssl) : 0;
-
-		if (r && !req->extracted) {
-			timeout_epilog(thread, "SSL read error from");
-			return;
-		}
-
-		/* Handle response stream */
-		http_handle_response(thread, digest, !req->extracted);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
+		return;
 	}
+
+	if (req->error == SSL_ERROR_SSL) {
+		const char *file;
+		int line;
+#ifdef HAVE_ERR_GET_ERROR_ALL
+		const char *func;
+#endif
+		const char *data;
+		int flags;
+		unsigned long err;
+
+#ifdef HAVE_ERR_GET_ERROR_ALL
+		while ((err = ERR_get_error_all(&file, &line, &func, &data, &flags))) {
+#else
+		while ((err = ERR_get_error_line_data(&file, &line, &data, &flags))) {
+
+#endif
+			/* Don't output the same error message repeatedly */
+			if (err == url->last_ssl_error)
+				continue;
+
+			url->last_ssl_error = err;
+
+			log_message(LOG_INFO, "SSL error '%s' at %s:%d "
+#ifdef HAVE_ERR_GET_ERROR_ALL
+					"(%s) "
+#endif
+					"data '%s' flags 0x%x",
+					ERR_error_string(err, NULL),
+					file, line,
+#ifdef HAVE_ERR_GET_ERROR_ALL
+					func,
+#endif
+					data, (unsigned)flags);
+		}
+	}
+
+	/* All the SSL stream has been parsed */
+	if (url->digest) {
+		EVP_DigestFinal_ex(req->context, digest, NULL);
+		EVP_MD_CTX_free(req->context);
+		req->context = NULL;
+		if (req->error == SSL_ERROR_ZERO_RETURN &&
+		    http_get_check->genhash_flags & GENHASH_VERBOSE)
+			dump_digest(digest, MD5_DIGEST_LENGTH);
+	} else
+		digest[0] = 0;
+
+	if (req->error != SSL_ERROR_SSL && req->error != SSL_ERROR_SYSCALL)
+		r = SSL_shutdown(req->ssl);
+	else
+		r = 0;
+
+	if (r && !req->extracted) {
+		timeout_epilog(thread, "SSL read error from");
+		return;
+	}
+
+	/* Handle response stream */
+	http_handle_response(thread, digest, !req->extracted);
 }
 
 #ifdef THREAD_DUMP

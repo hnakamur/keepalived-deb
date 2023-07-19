@@ -31,6 +31,7 @@
 #include <net/if_arp.h>
 #include <linux/if_packet.h>
 #include <errno.h>
+#include <stdbool.h>
 
 /* local includes */
 #include "logger.h"
@@ -39,9 +40,6 @@
 #include "bitops.h"
 #include "vrrp_scheduler.h"
 #include "vrrp_arp.h"
-#if !HAVE_DECL_SOCK_CLOEXEC
-#include "old_socket.h"
-#endif
 
 /*
  * The size of the garp_buffer should be the large enough to hold
@@ -54,20 +52,6 @@
 #define GARP_BUFFER_SIZE (sizeof(inf_arphdr_t) + sizeof (ipoib_hdr_t) +\
 			  (INFINIBAND_ALEN))
 
-/*
- * Private link layer socket structure to hold infiniband size address
- * The infiniband MAC address is 20 bytes long
- */
-struct sockaddr_large_ll {
-	unsigned short	sll_family;
-	__be16		sll_protocol;
-	int		sll_ifindex;
-	unsigned short	sll_hatype;
-	unsigned char	sll_pkttype;
-	unsigned char	sll_halen;
-	unsigned char	sll_addr[INFINIBAND_ALEN];
-};
-
 /* static vars */
 static char *garp_buffer;
 static int garp_fd = -1;
@@ -76,19 +60,20 @@ static int garp_fd = -1;
 static ssize_t send_arp(ip_address_t *ipaddress, ssize_t pack_len)
 {
 	interface_t *ifp = ipaddress->ifp;
-	struct sockaddr_storage sll;
+	struct sockaddr_storage ss;
+	struct sockaddr_large_ll *sll = PTR_CAST(struct sockaddr_large_ll, &ss);
 	ssize_t len;
 
 	/* Build the dst device */
-	memset(&sll, 0, sizeof(sll));
-	((struct sockaddr_large_ll *)&sll)->sll_family = AF_PACKET;
-	((struct sockaddr_large_ll *)&sll)->sll_hatype = ifp->hw_type;
-	((struct sockaddr_large_ll *)&sll)->sll_protocol = htons(ETHERTYPE_ARP);
-	((struct sockaddr_large_ll *)&sll)->sll_ifindex = (int) ifp->ifindex;
+	memset(&ss, 0, sizeof(ss));
+	sll->sll_family = AF_PACKET;
+	sll->sll_hatype = ifp->hw_type;
+	sll->sll_protocol = htons(ETHERTYPE_ARP);
+	sll->sll_ifindex = (int) ifp->ifindex;
 
 	/* The values in sll_addr and sll_halen appear to be ignored */
-	((struct sockaddr_large_ll *)&sll)->sll_halen = ifp->hw_addr_len;
-	memcpy(((struct sockaddr_large_ll *)&sll)->sll_addr,
+	sll->sll_halen = ifp->hw_addr_len;
+	memcpy(sll->sll_addr,
 	       ifp->hw_addr_bcast, ifp->hw_addr_len);
 
 	if (__test_bit(LOG_DETAIL_BIT, &debug))
@@ -98,7 +83,7 @@ static ssize_t send_arp(ip_address_t *ipaddress, ssize_t pack_len)
 
 	/* Send packet */
 	len = sendto(garp_fd, garp_buffer, pack_len, 0,
-		     (struct sockaddr *)&sll, sizeof(sll));
+		     PTR_CAST(struct sockaddr, sll), sizeof(*sll));
 	if (len < 0) {
 		/* coverity[bad_printf_format_string] */
 		log_message(LOG_INFO, "Error %d (%m) sending gratuitous ARP on %s for %s", errno,
@@ -110,12 +95,15 @@ static ssize_t send_arp(ip_address_t *ipaddress, ssize_t pack_len)
 /* Build a gratuitous ARP message over a specific interface */
 ssize_t send_gratuitous_arp_immediate(interface_t *ifp, ip_address_t *ipaddress)
 {
-	char *hwaddr = (char *) IF_HWADDR(ipaddress->ifp);
+	char *hwaddr = PTR_CAST(char, IF_HWADDR(ipaddress->ifp));
 	struct arphdr *arph;
 	char *arp_ptr;
 	ssize_t len, pack_len;
 
 	if (ifp->hw_addr_len == 0)
+		return -1;
+
+	if (!garp_buffer)
 		return -1;
 
 	/* Setup link layer header */
@@ -124,19 +112,19 @@ ssize_t send_gratuitous_arp_immediate(interface_t *ifp, ip_address_t *ipaddress)
 
 		/*  Add ipoib link layer header MAC + proto */
 		memcpy(garp_buffer, ifp->hw_addr_bcast, ifp->hw_addr_len);
-		ipoib = (struct ipoib_hdr *) (garp_buffer + ifp->hw_addr_len);
+		ipoib = PTR_CAST(struct ipoib_hdr, (garp_buffer + ifp->hw_addr_len));
 		ipoib->proto = htons(ETHERTYPE_ARP);
 		ipoib->reserved = 0;
-		arph = (struct arphdr *) (garp_buffer + ifp->hw_addr_len +
+		arph = PTR_CAST(struct arphdr, garp_buffer + ifp->hw_addr_len +
 					 sizeof(*ipoib));
 	} else {
 		struct ether_header *eth;
 
-		eth = (struct ether_header *) garp_buffer;
+		eth = PTR_CAST(struct ether_header, garp_buffer);
 		memcpy(eth->ether_dhost, ifp->hw_addr_bcast, ETH_ALEN < ifp->hw_addr_len ? ETH_ALEN : ifp->hw_addr_len);
 		memcpy(eth->ether_shost, hwaddr, ETH_ALEN < ifp->hw_addr_len ? ETH_ALEN : ifp->hw_addr_len);
 		eth->ether_type = htons(ETHERTYPE_ARP);
-		arph = (struct arphdr *) (garp_buffer + ETHER_HDR_LEN);
+		arph = PTR_CAST(struct arphdr, (garp_buffer + ETHER_HDR_LEN));
 	}
 
 	/* ARP payload */
@@ -145,7 +133,7 @@ ssize_t send_gratuitous_arp_immediate(interface_t *ifp, ip_address_t *ipaddress)
 	arph->ar_hln = ifp->hw_addr_len;
 	arph->ar_pln = sizeof(struct in_addr);
 	arph->ar_op = htons(ARPOP_REQUEST);
-	arp_ptr = (char *) (arph + 1);
+	arp_ptr = PTR_CAST(char, (arph + 1));
 	memcpy(arp_ptr, hwaddr, ifp->hw_addr_len);
 	arp_ptr += ifp->hw_addr_len;
 	memcpy(arp_ptr, &ipaddress->u.sin.sin_addr.s_addr,
@@ -214,32 +202,30 @@ void send_gratuitous_arp(vrrp_t *vrrp, ip_address_t *ipaddress)
 /*
  *	Gratuitous ARP init/close
  */
-void gratuitous_arp_init(void)
+bool
+gratuitous_arp_init(void)
 {
 	if (garp_buffer)
-		return;
+		return true;
 
 	/* Create the socket descriptor */
-	garp_fd = socket(PF_PACKET, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, htons(ETH_P_RARP));
+	garp_fd = socket(PF_PACKET, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, htons(ETH_P_ARP));
 
-	if (garp_fd >= 0)
-		log_message(LOG_INFO, "Registering gratuitous ARP shared channel");
-	else {
+	if (garp_fd < 0) {
 		log_message(LOG_INFO, "Error %d while registering gratuitous ARP shared channel", errno);
-		return;
+		return (errno != EAFNOSUPPORT && errno != EPERM);
 	}
 
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(garp_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on gratuitous ARP socket");
-#endif
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(garp_fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on gratuitous ARP socket");
-#endif
+	if (__test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Registering gratuitous ARP shared channel");
+
+	/* We don't want to receive any data on this socket */
+	if_setsockopt_no_receive(&garp_fd);
 
 	/* Initalize shared buffer */
-	garp_buffer = (char *)MALLOC(GARP_BUFFER_SIZE);
+	garp_buffer = PTR_CAST(char, MALLOC(GARP_BUFFER_SIZE));
+
+	return true;
 }
 
 void gratuitous_arp_close(void)

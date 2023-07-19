@@ -87,9 +87,9 @@ check_iptables_nft(void)
 
 #ifdef ALLOW_IPTABLES_LEGACY
 		fp = popen("iptables-legacy -V", "r");
-		fclose(fp);
 
 		if (fp) {
+		    fclose(fp);
 			/* The iptables-legacy command exists, so can use iptables */
 			return;
 		}
@@ -100,7 +100,7 @@ check_iptables_nft(void)
 
 	FREE_CONST_PTR(global_data->vrrp_iptables_inchain);
 	FREE_CONST_PTR(global_data->vrrp_iptables_outchain);
-#ifdef _HAVE_LIBISPET_
+#ifdef _HAVE_LIBIPSET_
 	if (global_data->using_ipsets)
 		disable_ipsets();
 #endif
@@ -157,7 +157,11 @@ firewall_remove_rule_to_iplist(list_head_t *l)
 
 #ifdef _HAVE_VRRP_VMAC_
 void
-firewall_add_vmac(const vrrp_t *vrrp)
+firewall_add_vmac(const vrrp_t *vrrp,
+#ifndef _WITH_NFTABLES_
+			__attribute__((unused))
+#endif
+						const interface_t *old_ifp)
 {
 #if defined _WITH_IPTABLES_ && defined _WITH_NFTABLES_
 	if (!checked_iptables_nft)
@@ -166,12 +170,12 @@ firewall_add_vmac(const vrrp_t *vrrp)
 
 #ifdef _WITH_IPTABLES_
 	if (global_data->vrrp_iptables_outchain)
-		iptables_add_vmac(vrrp);
+		iptables_add_vmac(vrrp->ifp, vrrp->family, __test_bit(VRRP_FLAG_EVIP_OTHER_FAMILY, &vrrp->flags));
 #endif
 
 #ifdef _WITH_NFTABLES_
 	if (global_data->vrrp_nf_table_name)
-		nft_add_vmac(vrrp);
+		nft_add_vmac(vrrp->ifp, vrrp->family, __test_bit(VRRP_FLAG_EVIP_OTHER_FAMILY, &vrrp->flags), old_ifp);
 #endif
 }
 
@@ -180,12 +184,12 @@ firewall_remove_vmac(const vrrp_t *vrrp)
 {
 #ifdef _WITH_IPTABLES_
 	if (global_data->vrrp_iptables_outchain)
-		iptables_remove_vmac(vrrp);
+		iptables_remove_vmac(vrrp->ifp, vrrp->family, __test_bit(VRRP_FLAG_EVIP_OTHER_FAMILY, &vrrp->flags));
 #endif
 
 #ifdef _WITH_NFTABLES_
 	if (global_data->vrrp_nf_table_name)
-		nft_remove_vmac(vrrp);
+		nft_remove_vmac(vrrp->ifp, vrrp->family, __test_bit(VRRP_FLAG_EVIP_OTHER_FAMILY, &vrrp->flags));
 #endif
 }
 #endif

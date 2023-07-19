@@ -28,6 +28,12 @@
 #include <sys/inotify.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <sys/statvfs.h>
+#include <sys/statfs.h>
+#include <linux/magic.h>
+
 
 #include "track_file.h"
 #include "tracker.h"
@@ -49,6 +55,73 @@
 #include "vrrp_data.h"
 #endif
 
+/* The following definitions come from the statfs(2) man page.
+   Some of them are defined in <linux/magic.h>, others aren't. */
+#ifndef BPF_FS_MAGIC
+#define	BPF_FS_MAGIC 0xcafe4a11
+#endif
+#ifndef CGROUP_SUPER_MAGIC
+#define	CGROUP_SUPER_MAGIC 0x27e0eb
+#endif
+#ifndef CGROUP2_SUPER_MAGIC
+#define	CGROUP2_SUPER_MAGIC 0x63677270
+#endif
+#ifndef DEBUGFS_MAGIC
+#define	DEBUGFS_MAGIC 0x64626720
+#endif
+#ifndef DEVPTS_SUPER_MAGIC
+#define	DEVPTS_SUPER_MAGIC 0x1cd1
+#endif
+#ifndef EFIVARFS_MAGIC
+#define	EFIVARFS_MAGIC 0xde5e81e4
+#endif
+#ifndef FUSE_SUPER_MAGIC
+#define	FUSE_SUPER_MAGIC 0x65735546
+#endif
+#ifndef MQUEUE_MAGIC
+#define	MQUEUE_MAGIC 0x19800202
+#endif
+#ifndef NFS_SUPER_MAGIC
+#define	NFS_SUPER_MAGIC 0x6969
+#endif
+#ifndef PIPEFS_MAGIC
+#define	PIPEFS_MAGIC 0x50495045
+#endif
+#ifndef PROC_SUPER_MAGIC
+#define	PROC_SUPER_MAGIC 0x9fa0
+#endif
+#ifndef ROMFS_MAGIC
+#define	ROMFS_MAGIC 0x7275
+#endif
+#ifndef SELINUX_MAGIC
+#define	SELINUX_MAGIC 0xf97cff8c
+#endif
+#ifndef SMB_SUPER_MAGIC
+#define	SMB_SUPER_MAGIC 0x517b
+#endif
+#ifndef SMB2_MAGIC_NUMBER
+#define	SMB2_MAGIC_NUMBER 0xfe534d42
+#endif
+#ifndef SOCKFS_MAGIC
+#define	SOCKFS_MAGIC 0x534f434b
+#endif
+#ifndef SYSFS_MAGIC
+#define	SYSFS_MAGIC 0x62656572
+#endif
+#ifndef SYSV2_SUPER_MAGIC
+#define	SYSV2_SUPER_MAGIC 0x012ff7b6
+#endif
+#ifndef SYSV4_SUPER_MAGIC
+#define	SYSV4_SUPER_MAGIC 0x012ff7b5
+#endif
+#ifndef TRACEFS_MAGIC
+#define	TRACEFS_MAGIC 0x74726163
+#endif
+#ifndef XENFS_SUPER_MAGIC
+#define	XENFS_SUPER_MAGIC 0xabba1974
+#endif
+
+
 /* Used for initialising track files */
 static enum {
 	TRACK_FILE_NO_INIT,
@@ -56,7 +129,7 @@ static enum {
 	TRACK_FILE_INIT,
 } track_file_init;
 static int track_file_init_value;
-static tracked_file_t *cur_track_file;
+static tracked_file_t *current_tf;
 
 
 static int inotify_fd = -1;
@@ -107,6 +180,7 @@ find_tracked_file_by_name(const char *name, list_head_t *l)
 	return NULL;
 }
 
+// Some of the following code is VRRP specific, and so should be in vrrp_track_file.c
 void
 vrrp_alloc_track_file(const char *name, list_head_t *tracked_files, list_head_t *track_file, const vector_t *strvec)
 {
@@ -170,7 +244,7 @@ vrrp_alloc_track_file(const char *name, list_head_t *tracked_files, list_head_t 
 		}
 	}
 
-	tfile = (tracked_file_monitor_t *) MALLOC(sizeof(tracked_file_monitor_t));
+	PMALLOC(tfile);
 	INIT_LIST_HEAD(&tfile->e_list);
 	tfile->file = vsf;
 	tfile->weight = weight;
@@ -186,11 +260,11 @@ track_file_handler(const vector_t *strvec)
 		return;
 
 	/* Allocate new file structure */
-	PMALLOC(cur_track_file);
-	INIT_LIST_HEAD(&cur_track_file->e_list);
-	INIT_LIST_HEAD(&cur_track_file->tracking_obj);
-	cur_track_file->fname = STRDUP(strvec_slot(strvec, 1));
-	cur_track_file->weight = 1;
+	PMALLOC(current_tf);
+	INIT_LIST_HEAD(&current_tf->e_list);
+	INIT_LIST_HEAD(&current_tf->tracking_obj);
+	current_tf->fname = STRDUP(strvec_slot(strvec, 1));
+	current_tf->weight = 1;
 
 	track_file_init = TRACK_FILE_NO_INIT;
 }
@@ -216,16 +290,13 @@ track_file_file_handler(const vector_t *strvec)
 		return;
 	}
 
-	if (!cur_track_file)
-		return;
-
-	if (cur_track_file->file_path) {
+	if (current_tf->file_path) {
 		report_config_error(CONFIG_GENERAL_ERROR, "File already set for track file %s - ignoring %s"
-							, cur_track_file->fname, strvec_slot(strvec, 1));
+							, current_tf->fname, strvec_slot(strvec, 1));
 		return;
 	}
 
-	cur_track_file->file_path = set_value(strvec);
+	current_tf->file_path = set_value(strvec);
 }
 
 static void
@@ -235,33 +306,30 @@ track_file_weight_handler(const vector_t *strvec)
 
 	if (vector_size(strvec) < 2) {
 		report_config_error(CONFIG_GENERAL_ERROR, "No weight specified for track file %s - ignoring"
-							, cur_track_file->fname);
+							, current_tf->fname);
 		return;
 	}
 
-	if (!cur_track_file)
-		return;
-
-	if (cur_track_file->weight != 1) {
+	if (current_tf->weight != 1) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Weight already set for track file %s - ignoring %s"
-							, cur_track_file->fname, strvec_slot(strvec, 1));
+							, current_tf->fname, strvec_slot(strvec, 1));
 		return;
 	}
 
 	if (!read_int_strvec(strvec, 1, &weight, -254, 254, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Weight (%s) for track_file %s must be between "
 							  "[-254..254] inclusive. Ignoring..."
-							, strvec_slot(strvec, 1), cur_track_file->fname);
+							, strvec_slot(strvec, 1), current_tf->fname);
 		weight = 1;
 	}
-	cur_track_file->weight = weight;
+	current_tf->weight = weight;
 
 	if (vector_size(strvec) >= 3) {
 		if (!strcmp(strvec_slot(strvec, 2), "reverse"))
-			cur_track_file->weight_reverse = true;
+			current_tf->weight_reverse = true;
 		else
 			report_config_error(CONFIG_GENERAL_ERROR, "track_file %s unknown weight option %s"
-								, cur_track_file->fname, strvec_slot(strvec, 2));
+								, current_tf->fname, strvec_slot(strvec, 2));
 	}
 }
 
@@ -271,9 +339,6 @@ track_file_init_handler(const vector_t *strvec)
 	unsigned i;
 	const char *word;
 	int value;
-
-	if (!cur_track_file)
-		return;
 
 	track_file_init = TRACK_FILE_CREATE;
 	track_file_init_value = 0;
@@ -285,13 +350,16 @@ track_file_init_handler(const vector_t *strvec)
 			if (!read_int_strvec(strvec, i, &value, INT_MIN, INT_MAX, false)) {
 				/* It is not a valid integer */
 				report_config_error(CONFIG_GENERAL_ERROR, "Track file %s init value %s is invalid"
-									, cur_track_file->fname, word);
+									, current_tf->fname, word);
 				value = 0;
 			}
-			else if (value < -254 || value > 254)
+			else if (value < -254 || value > 254) {
+// This is not valid for checker process
 				report_config_error(CONFIG_GENERAL_ERROR, "Track file %s init value %d is"
 									  " outside sensible range [%d, %d]"
-									, cur_track_file->fname, value, -254, 254);
+									, current_tf->fname, value, -254, 254);
+			}
+
 			track_file_init_value = value;
 		}
 		else if (!strcmp(word, "overwrite"))
@@ -305,21 +373,128 @@ static void
 track_file_end_handler(void)
 {
 	struct stat statb;
+	struct statfs fs_buf;
 	FILE *tf;
 	int ret;
 	tracked_file_t *track_file;
+	char *realpath_buf;
+	char *dir_end;
+	char *resolved_path;
 
-	if (!cur_track_file)
-		return;
+	track_file = current_tf;
+	current_tf = NULL;
 
-	if (!cur_track_file->file_path) {
+	if (!track_file->file_path) {
 		report_config_error(CONFIG_GENERAL_ERROR, "No file set for track_file %s - ignoring"
-							, cur_track_file->fname);
+							, track_file->fname);
+
+		FREE_CONST(track_file->fname);
+		FREE(track_file);
+
 		return;
 	}
 
-	track_file = cur_track_file;
-	cur_track_file = NULL;
+	/* Check the penultimate field in path is a directory */
+	if (!(dir_end = strrchr(track_file->file_path, '/'))) {
+		realpath_buf = MALLOC(2);
+		strcpy(realpath_buf, ".");
+	} else {
+		realpath_buf = MALLOC(dir_end - track_file->file_path + 1);
+		strncpy(realpath_buf, track_file->file_path, dir_end - track_file->file_path);
+		realpath_buf[dir_end - track_file->file_path] = '\0';
+	}
+
+	resolved_path = realpath(realpath_buf, NULL);
+	FREE(realpath_buf);
+
+	if (!resolved_path) {
+		report_config_error(CONFIG_GENERAL_ERROR, "realpath() error %d (%m) for %s",
+				  errno, track_file->fname);
+
+		FREE_CONST(track_file->fname);
+		FREE(track_file);
+
+		return;
+	}
+
+	/* Check filesystem type. We can check for some that we know won't work.
+	 * The list of filesystem types checked can be expanded as needed. */
+	ret = statfs(resolved_path, &fs_buf);
+	free(resolved_path);
+
+	if (ret) {
+		if (errno == ENOTDIR) {
+			report_config_error(CONFIG_GENERAL_ERROR, "track file directory for %s "
+								  "does not exist - removing",
+								  track_file->fname);
+
+			FREE_CONST(track_file->fname);
+			FREE(track_file);
+
+			return;
+		}
+
+		log_message(LOG_INFO, "statfs(%s) returned errno %d (%m)", track_file->fname, errno);
+	} else if (fs_buf.f_flags & ST_RDONLY ||
+		   fs_buf.f_type == BPF_FS_MAGIC ||
+		   fs_buf.f_type == CGROUP_SUPER_MAGIC ||
+		   fs_buf.f_type == CGROUP2_SUPER_MAGIC ||
+		   fs_buf.f_type == DEBUGFS_MAGIC ||
+		   fs_buf.f_type == DEVPTS_SUPER_MAGIC ||
+		   fs_buf.f_type == EFIVARFS_MAGIC ||
+		   fs_buf.f_type == FUSE_SUPER_MAGIC ||
+		   fs_buf.f_type == MQUEUE_MAGIC ||
+		   fs_buf.f_type == NFS_SUPER_MAGIC ||
+		   fs_buf.f_type == PIPEFS_MAGIC ||
+		   fs_buf.f_type == PROC_SUPER_MAGIC ||
+		   fs_buf.f_type == ROMFS_MAGIC ||
+		   fs_buf.f_type == SELINUX_MAGIC ||
+		   fs_buf.f_type == SMB_SUPER_MAGIC ||
+		   fs_buf.f_type == SMB2_MAGIC_NUMBER ||
+		   fs_buf.f_type == SOCKFS_MAGIC ||
+		   fs_buf.f_type == SYSFS_MAGIC ||
+		   fs_buf.f_type == SYSV2_SUPER_MAGIC ||
+		   fs_buf.f_type == SYSV4_SUPER_MAGIC ||
+		   fs_buf.f_type == TRACEFS_MAGIC) {
+		/* The specified file is on a type of filesystem that inotify cannot monitor,
+		 * or the filesystem is read-only. */
+		report_config_error(CONFIG_GENERAL_ERROR,
+			       	"The filesystem of %s is read only or cannot be monitored - ignoring", track_file->file_path);
+
+		FREE_CONST(track_file->fname);
+		FREE(track_file);
+
+		return;
+	}
+
+	if (track_file_init != TRACK_FILE_NO_INIT) {
+		ret = stat(track_file->file_path, &statb);
+		if (!ret && track_file_init == TRACK_FILE_INIT) {
+			if ((statb.st_mode & S_IFMT) != S_IFREG) {
+				/* It is not a regular file */
+				report_config_error(CONFIG_GENERAL_ERROR, "Cannot initialise track file %s"
+									  " - it is not a regular file"
+									, track_file->fname);
+
+				FREE_CONST(track_file->fname);
+				FREE(track_file);
+
+				return;
+			}
+		}
+
+		/* Don't overwrite a file on reload */
+		if (!reload && !__test_bit(CONFIG_TEST_BIT, &debug)) {
+			/* Write the value to the file */
+			if ((tf = fopen_safe(track_file->file_path, "w"))) {
+				fprintf(tf, "%d\n", track_file_init_value);
+				fclose(tf);
+			}
+			else
+				report_config_error(CONFIG_GENERAL_ERROR, "Unable to initialise track file %s"
+									, track_file->fname);
+		}
+	}
 
 #ifdef _WITH_VRRP_
 	if (vrrp_data)
@@ -342,56 +517,24 @@ track_file_end_handler(void)
 	}
 #endif
 
-	if (track_file_init == TRACK_FILE_NO_INIT)
-		return;
-
-	ret = stat(track_file->file_path, &statb);
-	if (!ret) {
-		if (track_file_init == TRACK_FILE_CREATE) {
-			/* The file exists */
-			return;
-		}
-		if ((statb.st_mode & S_IFMT) != S_IFREG) {
-			/* It is not a regular file */
-			report_config_error(CONFIG_GENERAL_ERROR, "Cannot initialise track file %s"
-								  " - it is not a regular file"
-								, track_file->fname);
-			return;
-		}
-
-		/* Don't overwrite a file on reload */
-		if (reload)
-			return;
-	}
-
-	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
-		/* Write the value to the file */
-		if ((tf = fopen_safe(track_file->file_path, "w"))) {
-			fprintf(tf, "%d\n", track_file_init_value);
-			fclose(tf);
-		}
-		else
-			report_config_error(CONFIG_GENERAL_ERROR, "Unable to initialise track file %s"
-								, track_file->fname);
-	}
 }
 
 void
 add_track_file_keywords(bool active)
 {
 	/* Track file declarations */
-	install_keyword_root("track_file", &track_file_handler, active);
+	install_keyword_root("track_file", &track_file_handler, active, VPP &current_tf);
 	install_keyword("file", &track_file_file_handler);
 	install_keyword("weight", &track_file_weight_handler);
 	install_keyword("init_file", &track_file_init_handler);
-	install_sublevel_end_handler(&track_file_end_handler);
+	install_level_end_handler(&track_file_end_handler);
 
 #ifdef _WITH_VRRP_
-	install_keyword_root("vrrp_track_file", &vrrp_track_file_handler, active);	/* Deprecated synonym - after v2.0.20 */
+	install_keyword_root("vrrp_track_file", &vrrp_track_file_handler, active, VPP &current_tf);	/* Deprecated synonym - after v2.0.20 */
 	install_keyword("file", &track_file_file_handler);
 	install_keyword("weight", &track_file_weight_handler);
 	install_keyword("init_file", &track_file_init_handler);
-	install_sublevel_end_handler(&track_file_end_handler);
+	install_level_end_handler(&track_file_end_handler);
 #endif
 }
 
@@ -442,7 +585,7 @@ dump_track_file(FILE *fp, const tracked_file_t *file)
 {
 	conf_write(fp, " Track file = %s", file->fname);
 	conf_write(fp, "   File = %s", file->file_path);
-	conf_write(fp, "   Status = %d", file->last_status);
+	conf_write(fp, "   Status = %" PRIi64, file->last_status);
 	conf_write(fp, "   Weight = %d%s", file->weight, file->weight_reverse ? " reverse" : "");
 	dump_tracking_obj_list(fp, &file->tracking_obj, file->tracking_obj_dump);
 }
@@ -474,7 +617,7 @@ add_obj_to_track_file(void *obj, tracked_file_monitor_t *tfl, const char *name, 
 		if (top->obj.obj == obj) {
 			/* Update the weight appropriately. We will use the sync group's
 			 * weight unless the vrrp setting is unweighted. */
-			log_message(LOG_INFO, "(%s) track_file %s is configured on object"
+			log_message(LOG_INFO, "(%s) track_file %s is configured on VRRP instance and sync group. Remove vrrp instance config"
 					    , name, file->fname);
 			if (top->weight) {
 				top->weight = tfl->weight;
@@ -539,7 +682,7 @@ process_update_vrrp_track_file_status(const tracked_file_t *tfile, int new_statu
 
 	previous_status = !top->weight ? (!!tfile->last_status == (top->weight_multiplier == 1) ? -254 : 0 ) : tfile->last_status * top->weight * top->weight_multiplier;
 #ifdef TMP_TRACK_FILE_DEBUG
-	log_message(LOG_INFO, "top->weight %d, mult %d tfile->last_status %d, previous_status %d new_status %d"
+	log_message(LOG_INFO, "top->weight %d, mult %d tfile->last_status %" PRIi64 ", previous_status %d new_status %d"
 			    , top->weight, top->weight_multiplier, tfile->last_status, previous_status, new_status);
 #endif
 	if (previous_status < -254)
@@ -582,46 +725,44 @@ void
 process_update_checker_track_file_status(const tracked_file_t *tfile, int new_status, const tracking_obj_t *top)
 {
 	int previous_status;
+	int64_t previous_status64;
 	checker_t *checker = top->obj.checker;
 
-	if (new_status < -IPVS_WEIGHT_MAX)
-		new_status = -IPVS_WEIGHT_MAX;
-	else if (new_status > IPVS_WEIGHT_MAX -1)
-		new_status = IPVS_WEIGHT_MAX - 1;
-
-	previous_status = !top->weight ? (!!tfile->last_status == (top->weight_multiplier == 1) ? -IPVS_WEIGHT_MAX : 0 ) : tfile->last_status * top->weight * top->weight_multiplier;
-	if (previous_status < -IPVS_WEIGHT_MAX)
-		previous_status = -IPVS_WEIGHT_MAX;
-	else if (previous_status > IPVS_WEIGHT_MAX - 1)
-		previous_status = IPVS_WEIGHT_MAX - 1;
+	previous_status64 = !top->weight ? (!tfile->last_status != (top->weight_multiplier == 1) ? IPVS_WEIGHT_FAULT : 0 ) : (int64_t)tfile->last_status * top->weight * top->weight_multiplier;
+	previous_status = weight_range(previous_status64);
 
 	if (previous_status == new_status)
 		return;
 
-	if (new_status == -IPVS_WEIGHT_MAX) {
+	if (new_status == IPVS_WEIGHT_FAULT) {
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
 			log_message(LOG_INFO, "(%s): tracked file %s now FAULT state"
 					    , FMT_RS(checker->rs, checker->vs), tfile->fname);
 		update_svr_checker_state(DOWN, checker);
-	} else if (previous_status == -IPVS_WEIGHT_MAX) {
+		checker->rs->effective_weight -= checker->cur_weight;
+		checker->cur_weight = 0;
+	} else if (previous_status == IPVS_WEIGHT_FAULT) {
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
 			log_message(LOG_INFO, "(%s): tracked file %s leaving FAULT state"
 					    , FMT_RS(checker->rs, checker->vs), tfile->fname);
+		checker->cur_weight = new_status;
+		checker->rs->effective_weight += new_status;
 		update_svr_checker_state(UP, checker);
 	}
 	else {
 #ifdef TMP_TRACK_FILE_DEBUG
-		log_message(LOG_INFO, "Updated weight to %d (weight %d, new_status %d previous_status %d)"
+		log_message(LOG_INFO, "Updated weight to %" PRIi64 " (weight %d, new_status %d previous_status %d)"
 				    , checker->rs->effective_weight + new_status - previous_status
-				    , checker->rs->weight, new_status, previous_status);
+				    , real_weight(checker->rs->effective_weight), new_status, previous_status);
 #endif
 		update_svr_wgt(checker->rs->effective_weight + new_status - previous_status, checker->vs, checker->rs, true);
+		checker->cur_weight = new_status;
 	}
 }
 #endif
 
-void
-update_track_file_status(tracked_file_t *tfile, int new_status)
+static void
+update_track_file_status(tracked_file_t *tfile, int64_t new_status)
 {
 	tracking_obj_t *top;
 	int status;
@@ -634,9 +775,9 @@ update_track_file_status(tracked_file_t *tfile, int new_status)
 		/* If the tracking weight is 0, a non-zero value means
 		 * failure, a 0 status means success */
 		if (!top->weight)
-			status = !!new_status == (top->weight_multiplier == 1) ? INT_MIN : 0;
+			status = !new_status != (top->weight_multiplier == 1) ? INT_MIN : 0;
 		else
-			status = new_status * top->weight * top->weight_multiplier;
+			status = weight_range((int64_t)new_status * top->weight * top->weight_multiplier);
 
 #ifdef _WITH_VRRP_
 		if (vrrp_data)
@@ -652,7 +793,7 @@ update_track_file_status(tracked_file_t *tfile, int new_status)
 static void
 process_track_file(tracked_file_t *tfile, bool init)
 {
-	long new_status = 0;
+	int64_t new_status = 0;
 	char buf[128];
 	int fd;
 	ssize_t len;
@@ -665,29 +806,33 @@ process_track_file(tracked_file_t *tfile, bool init)
 			/* If there is an error, we want to use 0,
 			 * so we don't really mind if there is an error */
 			errno = 0;
+#if LONG_MAX > INT32_MAX
 			new_status = strtol(buf, NULL, 0);
-			if (errno || new_status < INT_MIN || new_status > INT_MAX) {
-				log_message(LOG_INFO, "Invalid number %ld read from %s - ignoring",  new_status, tfile->file_path);
+#else
+			new_status = strtoll(buf, NULL, 0);
+#endif
+			if (errno || new_status < (int64_t)INT32_MIN || new_status > (int64_t)INT32_MAX + 1) {
+				log_message(LOG_INFO, "Invalid number %" PRId64 " read from %s - ignoring",  new_status, tfile->file_path);
 				return;
 			}
 		}
 	}
 
 	if (!init)
-		update_track_file_status(tfile, (int)new_status);
-
-	tfile->last_status = new_status;
+		update_track_file_status(tfile, new_status);
 
 #ifdef TMP_TRACK_FILE_DEBUG
-	log_message(LOG_INFO, "Read %s: long val %ld, val %d, new last status %d"
+	log_message(LOG_INFO, "Read %s: long val %ld, val %d, last status %" PRIi64
 			    , tfile->file_path, new_status, (int)new_status, tfile->last_status);
 #endif
+
+	tfile->last_status = new_status;
 }
 
 static void
 process_inotify(thread_ref_t thread)
 {
-	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+	char buf[sizeof(struct inotify_event) + NAME_MAX + 1] __attribute__((aligned(__alignof__(struct inotify_event))));
 	char *buf_ptr;
 	ssize_t len;
 	struct inotify_event* event;
@@ -695,7 +840,7 @@ process_inotify(thread_ref_t thread)
 	int fd = thread->u.f.fd;
 	list_head_t *track_files = thread->arg;
 
-	inotify_thread = thread_add_read(master, process_inotify, track_files, fd, TIMER_NEVER, false);
+	inotify_thread = thread_add_read(master, process_inotify, track_files, fd, TIMER_NEVER, 0);
 
 	while (true) {
 		if ((len = read(fd, buf, sizeof(buf))) < (ssize_t)sizeof(struct inotify_event)) {
@@ -720,7 +865,7 @@ process_inotify(thread_ref_t thread)
 
 		/* The following line causes a strict-overflow=4 warning on gcc 5.4.0 */
 		for (buf_ptr = buf; buf_ptr < buf + len; buf_ptr += event->len + sizeof(struct inotify_event)) {
-			event = (struct inotify_event*)buf_ptr;
+			event = PTR_CAST(struct inotify_event, buf_ptr);
 
 			/* We are not interested in directories */
 			if (event->mask & IN_ISDIR)
@@ -762,8 +907,16 @@ init_track_files(list_head_t *track_files)
 	char *dir_end = NULL;
 	char *new_path;
 	struct stat stat_buf;
+	char *realpath_buf;
+	bool file_exists;
 
-	inotify_fd = -1;
+	if (inotify_fd != -1) {
+		/* This should not happen */
+		close(inotify_fd);
+		inotify_fd = -1;
+	}
+
+	realpath_buf = MALLOC(PATH_MAX);
 
 	list_for_each_entry_safe(tfile, tfile_tmp, track_files, e_list) {
 		if (list_empty(&tfile->tracking_obj)) {
@@ -772,46 +925,29 @@ init_track_files(list_head_t *track_files)
 			continue;
 		}
 
-		if (inotify_fd == -1) {
-#ifdef HAVE_INOTIFY_INIT1
-			inotify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-#else
-			inotify_fd = inotify_init();
-			if (inotify_fd != -1) {
-				fcntl(inotify_fd, F_SETFD, FD_CLOEXEC);
-				fcntl(inotify_fd, F_SETFL, O_NONBLOCK);
-			}
-#endif
+		file_exists = false;
 
-			if (inotify_fd == -1) {
-				log_message(LOG_INFO, "Unable to monitor track files");
-				return ;
-			}
-		}
-
-		resolved_path = realpath(tfile->file_path, NULL);
+		resolved_path = realpath(tfile->file_path, realpath_buf);
 		if (resolved_path) {
 			if (strcmp(tfile->file_path, resolved_path)) {
 				FREE_CONST(tfile->file_path);
 				tfile->file_path = STRDUP(resolved_path);
 			}
 
-			/* The file exists, so read it now */
-			process_track_file(tfile, true);
+			file_exists = true;
 		}
 		else if (errno == ENOENT) {
 			/* Resolve the directory */
 			if (!(dir_end = strrchr(tfile->file_path, '/')))
-				resolved_path = realpath(".", NULL);
+				resolved_path = realpath(".", realpath_buf);
 			else {
 				*dir_end = '\0';
-				resolved_path = realpath(tfile->file_path, NULL);
+				resolved_path = realpath(tfile->file_path, realpath_buf);
 
 				/* Check it is a directory */
 				if (resolved_path &&
 				    (stat(resolved_path, &stat_buf) ||
 				     !S_ISDIR(stat_buf.st_mode))) {
-					free(resolved_path);	/* malloc'd by realpath() */
 					resolved_path = NULL;
 				}
 			}
@@ -824,6 +960,7 @@ init_track_files(list_head_t *track_files)
 				continue;
 			}
 
+			/* Make the file name with the resolved directory path */
 			if (strcmp(tfile->file_path, resolved_path)) {
 				new_path = MALLOC(strlen(resolved_path) + strlen((!dir_end) ? tfile->file_path : dir_end + 1) + 2);
 				strcpy(new_path, resolved_path);
@@ -837,23 +974,34 @@ init_track_files(list_head_t *track_files)
 		}
 		else {
 			report_config_error(CONFIG_GENERAL_ERROR, "track file %s is not accessible"
-								  " - ignoring"
-								, tfile->fname);
+								  " - ignoring", tfile->fname);
 			remove_track_file(tfile);
 			continue;
 		}
 
-		if (resolved_path)
-			free(resolved_path);	/* malloc'd by realpath() */
+		if (inotify_fd == -1) {
+			inotify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+
+			if (inotify_fd == -1) {
+				log_message(LOG_INFO, "Unable to monitor track files");
+				break;
+			}
+		}
 
 		tfile->file_part = strrchr(tfile->file_path, '/') + 1;
 		new_path = STRNDUP(tfile->file_path, tfile->file_part - tfile->file_path);
 		tfile->wd = inotify_add_watch(inotify_fd, new_path, IN_CLOSE_WRITE | IN_DELETE | IN_MOVE);
 		FREE(new_path);
+
+		/* If the file exists, read it now */
+		if (file_exists)
+			process_track_file(tfile, true);
 	}
 
+	FREE(realpath_buf);
+
 	if (inotify_fd != -1)
-		inotify_thread = thread_add_read(master, process_inotify, track_files, inotify_fd, TIMER_NEVER, false);
+		inotify_thread = thread_add_read(master, process_inotify, track_files, inotify_fd, TIMER_NEVER, 0);
 }
 
 void

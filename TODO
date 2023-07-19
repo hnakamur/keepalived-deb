@@ -1,7 +1,13 @@
 BUG - If have VIP on a different interface from the VRRP instance, the
 interface isn't tracked and so we do nothing if the interface is deleted.
 
+Add INTERFACE_CHECK and ADDRESS_CHECK checkers - see issue#1679 and pull request
+#1680.
+
 Fix building on CentOS 6.10
+
+Add a TCP_KEEPALIVE_CHECK that established a TCP connection and uses keepalives
+like hg635_config to check the remote end is there.
 
 Remove definitions that simply access structure fields, e.g. VRRP_ISUP
 
@@ -108,10 +114,6 @@ In thread functions with a timer, ensure not > LONG_MAX (or even some lower valu
 Change tcp_socket_state etc to socket_state etc
 
 Add noreturn function attribute on stop_vrrp/check
-
-bin/genhash -s 2001:470:69dd:35::188 --port 80 -u /Harriet/     # works, but
-bin/genhash -s 2001:470:69dd:35::188 --port 80 -u /Harriet/     # -S doesn't
-								# but -S is OK with IPv4 address
 
 in ipvswrapper.c, get rid of static srule etc and make them procedure local and pass as parameters
 

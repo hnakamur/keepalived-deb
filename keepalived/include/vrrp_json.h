@@ -19,14 +19,13 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright (C) 2017 Damien Clabaut, <Damien.Clabaut@corp.ovh.com>
- * Copyright (C) 2017-2017 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2017-2023 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_JSON_H
 #define _VRRP_JSON_H
 
-/* Static definitions */
-#define SIGJSON (SIGRTMIN + 2)
+#include "global_json.h"
 
 /* Prototypes */
 extern void vrrp_print_json(void);

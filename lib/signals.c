@@ -29,9 +29,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
-#ifdef HAVE_SIGNALFD
 #include <sys/signalfd.h>
-#endif
 #ifdef _INCLUDE_UNUSED_CODE_
 #include <sys/epoll.h>
 #endif
@@ -47,33 +45,17 @@
 #include "../keepalived/include/vrrp_json.h"
 #endif
 
-#ifdef _WITH_JSON_
-  /* We need to include the realtime signals, but
-   * unfortunately SIGRTMIN/SIGRTMAX are not constants.
-   * I'm not clear if _NSIG is always defined, so play safe.
-   * Although we are not meant to use __SIGRTMAX, we are
-   * using it here as an upper bound, which is rather different. */
-  #ifdef _NSIG
-    #define SIG_MAX	_NSIG
-  #elif defined __SIGRTMAX
-    #define SIG_MAX __SIGRTMAX
-  #else
-    #define SIG_MAX 64
-  #endif
+/* We need to include the realtime signals, but
+ * unfortunately SIGRTMIN/SIGRTMAX are not constants.
+ * I'm not clear if _NSIG is always defined, so play safe.
+ * Although we are not meant to use __SIGRTMAX, we are
+ * using it here as an upper bound, which is rather different. */
+#ifdef _NSIG
+  #define SIG_MAX	_NSIG
+#elif defined __SIGRTMAX
+  #define SIG_MAX __SIGRTMAX
 #else
-  /* The signals currently used are HUP, INT, TERM, USR1,
-   * USR2, CHLD and XCPU. */
-  #if SIGCHLD > SIGUSR2
-    /* Architectures except alpha and sparc - see signal(7) */
-    #if HAVE_DECL_RLIMIT_RTTIME == 1
-      #define SIG_MAX SIGXCPU
-    #else
-      #define SIG_MAX SIGCHLD
-    #endif
-  #else
-    /* alpha and sparc */
-    #define SIG_MAX SIGUSR2
-  #endif
+  #define SIG_MAX 64
 #endif
 
 /* Local Vars */
@@ -82,12 +64,8 @@ static void (*signal_handler_func[SIG_MAX]) (void *, int sig);
 static void *signal_v[SIG_MAX];
 #endif
 
-#ifdef HAVE_SIGNALFD
 static int signal_fd = -1;
 static sigset_t signal_fd_set;
-#else
-static int signal_pipe[2] = { -1, -1 };
-#endif
 
 /* Remember signal disposition for not default disposition */
 static sigset_t dfl_sig;
@@ -124,7 +102,6 @@ get_signum(const char *sigfunc)
 	return -1;
 }
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 static void
 log_sigxcpu(__attribute__((unused)) void * ptr, __attribute__((unused)) int signum)
 {
@@ -159,7 +136,6 @@ log_sigxcpu(__attribute__((unused)) void * ptr, __attribute__((unused)) int sign
 #endif
 		    );
 }
-#endif
 
 #ifdef _INCLUDE_UNUSED_CODE_
 /* Local signal test */
@@ -171,26 +147,11 @@ signal_pending(void)
 	struct epoll_event ev = { .events = EPOLLIN };
 
 	efd = epoll_create(1);
-#ifdef HAVE_SIGNALFD
 	epoll_ctl(efd, EPOLL_CTL_ADD, signal_fd,  &ev);
-#else
-	epoll_ctl(efd, EPOLL_CTL_ADD, signal_pipe[0],  &ev);
-#endif
 	rc = epoll_wait(efd, &ev, 1, 0);
 	close(efd);
 
 	return rc > 0;
-}
-#endif
-
-/* Signal flag */
-#ifndef HAVE_SIGNALFD
-static void
-signal_handler(int sig)
-{
-	if (write(signal_pipe[1], &sig, sizeof(uint32_t)) != sizeof(uint32_t))
-		log_message(LOG_INFO, "BUG - write to signal_pipe[1] error %d (%s) - please report", errno, strerror(errno));
-
 }
 #endif
 
@@ -201,9 +162,6 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	int ret;
 	sigset_t sset;
 	struct sigaction sig;
-#ifndef HAVE_SIGNALFD
-	struct sigaction osig;
-#endif
 #ifdef _SIGNAL_DEBUG_
 	static int max_signo = SIG_MAX;
 	static int min_signo = 1;
@@ -223,14 +181,13 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	else
 		sigdelset(&dfl_sig, signo);
 
-	if (func == (void*)SIG_IGN || func == (void*)SIG_DFL) {
+	if (func == (void *)SIG_IGN || func == (void *)SIG_DFL) {
 		/* We are no longer handling the signal, so
 		 * clear our handlers */
 		func = NULL;
 		v = NULL;
 	}
 
-#ifdef HAVE_SIGNALFD
 	sigemptyset(&sset);
 	sigaddset(&sset, signo);
 
@@ -259,44 +216,9 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 
 	if (!func)
 		sigmask_func(SIG_UNBLOCK, &sset, NULL);
-#else
-	if (func)
-		sig.sa_handler = signal_handler;
-	else
-		sig.sa_handler = (void*)func;
-
-	sigemptyset(&sig.sa_mask);
-	sig.sa_flags = 0;
-	sig.sa_flags |= SA_RESTART;
-
-	/* Block the signal we are about to configure, to avoid
-	 * any race conditions while setting the handler and
-	 * parameter */
-	if (func) {
-		sigemptyset(&sset);
-		sigaddset(&sset, signo);
-		sigmask_func(SIG_BLOCK, &sset, NULL);
-
-		/* Remember what signals we set, so any child processes can clear them */
-		sigaddset(&parent_sig, signo);
-	}
-	else
-		sigdelset(&parent_sig, signo);
-
-	ret = sigaction(signo, &sig, &osig);
-#endif
 
 	signal_handler_func[signo-1] = func;
 	signal_v[signo-1] = v;
-
-#ifndef HAVE_SIGNALFD
-	if (ret < 0)
-		return;
-
-	/* Release the signal */
-	if (func != NULL)
-		sigmask_func(SIG_UNBLOCK, &sset, NULL);
-#endif
 }
 
 /* Signal Ignore */
@@ -312,14 +234,10 @@ static void
 signal_run_callback(thread_ref_t thread)
 {
 	uint32_t sig;
-#ifdef HAVE_SIGNALFD
 	struct signalfd_siginfo siginfo;
 
 	while (read(signal_fd, &siginfo, sizeof(struct signalfd_siginfo)) == sizeof(struct signalfd_siginfo)) {
 		sig = siginfo.ssi_signo;
-#else
-	while (read(signal_pipe[0], &sig, sizeof(uint32_t)) == sizeof(uint32_t)) {
-#endif
 
 #ifdef _EPOLL_DEBUG_
 		if (do_epoll_debug) {
@@ -347,7 +265,7 @@ signal_run_callback(thread_ref_t thread)
 #endif
 	}
 
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, false);
+	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, 0);
 }
 
 static void
@@ -363,7 +281,7 @@ clear_signal_handler_addresses(void)
 void
 add_signal_read_thread(thread_master_t *thread_master)
 {
-	signal_thread = thread_add_read(thread_master, signal_run_callback, NULL, thread_master->signal_fd, TIMER_NEVER, false);
+	signal_thread = thread_add_read(thread_master, signal_run_callback, NULL, thread_master->signal_fd, TIMER_NEVER, 0);
 }
 
 void
@@ -378,29 +296,13 @@ cancel_signal_read_thread(void)
 static int
 open_signal_fd(void)
 {
-#ifdef HAVE_SIGNALFD
 	sigemptyset(&signal_fd_set);
 
-#ifdef SFD_NONBLOCK	/* From Linux 2.6.26 */
 	signal_fd = signalfd(signal_fd, &signal_fd_set, SFD_NONBLOCK | SFD_CLOEXEC);
-#else
-	signal_fd = signalfd(signal_fd, &signal_fd_set, 0);
-
-	if (signal_fd != -1) {
-		fcntl(signal_fd, F_SETFL, O_NONBLOCK | fcntl(signal_fd, F_GETFL));
-		fcntl(signal_fd, F_SETFD, FD_CLOEXEC | fcntl(signal_fd, F_GETFD));
-	}
-#endif
 	if (signal_fd == -1)
 		log_message(LOG_INFO, "BUG - signal_fd init failed - %d (%s), please report", errno, strerror(errno));
 
 	return signal_fd;
-#else
-	if (open_pipe(signal_pipe))
-		log_message(LOG_INFO, "BUG - pipe in open_signal_fd() failed - %d (%s), please report", errno, strerror(errno));
-
-	return signal_pipe[0];
-#endif
 }
 
 static void
@@ -430,10 +332,8 @@ signal_handler_parent_init(void)
 			sigaction(sig, &act, NULL);
 	}
 
-#ifdef HAVE_SIGNALFD
 	sigemptyset(&sset);
 	sigmask_func(SIG_SETMASK, &sset, NULL);
-#endif
 }
 
 #ifndef _ONE_PROCESS_DEBUG_
@@ -487,9 +387,7 @@ signal_handlers_clear(void *state)
 	signal_set(SIGCHLD, state, NULL);
 	signal_set(SIGUSR1, state, NULL);
 	signal_set(SIGUSR2, state, NULL);
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	signal_set(SIGXCPU, state, NULL);
-#endif
 #ifdef _WITH_JSON_
 	signal_set(SIGJSON, state, NULL);
 #endif
@@ -503,26 +401,13 @@ signal_handler_destroy(void)
 		signal_thread = NULL;
 	}
 
-#ifdef HAVE_SIGNALFD
 	if (signal_fd != -1) {
 		close(signal_fd);
 		signal_fd = -1;
 	}
 	sigemptyset(&signal_fd_set);
-#endif
 
 	signal_handlers_clear(SIG_IGN);
-
-#ifndef HAVE_SIGNALFD
-	if (signal_pipe[1] != -1) {
-		close(signal_pipe[1]);
-		signal_pipe[1] = -1;
-	}
-	if (signal_pipe[0] != -1) {
-		close(signal_pipe[0]);
-		signal_pipe[0] = -1;
-	}
-#endif
 }
 
 /* Called prior to exec'ing a script. The script can reasonably
@@ -532,14 +417,7 @@ signal_handler_script(void)
 {
 	struct sigaction dfl;
 	int sig;
-#ifdef HAVE_SIGNALFD
 	sigset_t sset;
-
-	if (signal_fd != -1){
-		close(signal_fd);
-		signal_fd = -1;
-	}
-#endif
 
 	dfl.sa_handler = SIG_DFL;
 	dfl.sa_flags = 0;
@@ -550,40 +428,14 @@ signal_handler_script(void)
 			sigaction(sig, &dfl, NULL);
 	}
 
-#ifdef HAVE_SIGNALFD
 	sigemptyset(&sset);
 	sigmask_func(SIG_SETMASK, &sset, NULL);
-#endif
 }
 
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 void
 set_sigxcpu_handler(void)
 {
 	signal_set(SIGXCPU, log_sigxcpu, NULL);
-#ifdef THREAD_DUMP
-	register_signal_handler_address("log_sigxcpu", log_sigxcpu);
-#endif
-}
-#endif
-
-void signal_fd_close(int min_fd)
-{
-#ifdef HAVE_SIGNALFD
-	if (signal_fd >= min_fd) {
-		close(signal_fd);
-		signal_fd = -1;
-	}
-#else
-	if (signal_pipe[0] >= min_fd) {
-		close(signal_pipe[0]);
-		signal_pipe[0] = -1;
-	}
-	if (signal_pipe[1] >= min_fd) {
-		close(signal_pipe[1]);
-		signal_pipe[1] = -1;
-	}
-#endif
 }
 
 #ifdef THREAD_DUMP
@@ -591,5 +443,6 @@ void
 register_signal_thread_addresses(void)
 {
 	register_thread_address("signal_run_callback", signal_run_callback);
+	register_signal_handler_address("log_sigxcpu", log_sigxcpu);
 }
 #endif

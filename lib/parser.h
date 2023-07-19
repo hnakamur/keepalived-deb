@@ -32,17 +32,19 @@
 /* local includes */
 #include "vector.h"
 #include "memory.h"
+#include "warnings.h"
+
 
 /* Global definitions */
-#define KEEPALIVED_CONFIG_FILE	DEFAULT_CONFIG_FILE
 
 /* Maximum config line length */
 #define MAXBUF	1024
 
 /* Maximum time read_timer can read - in micro-seconds */
-#define TIMER_MAXIMUM (ULONG_MAX)
+#define TIMER_MAXIMUM (ULONG_MAX - 1)
 
-/* Special value for parameters when we want to know they haven't been set */
+/* Special values for parameters when we want to know they haven't been set */
+#define	TIME_T_PARAMETER_UNSET	LONG_MAX
 #define	PARAMETER_UNSET		UINT_MAX
 
 /* Configuration test errors. These should be in decreasing order of severity */
@@ -66,19 +68,25 @@ typedef enum {
 	CONFIG_INVALID_NUMBER,
 	CONFIG_GENERAL_ERROR,
 	CONFIG_WARNING,
+	CONFIG_DEPRECATED,
 
 	/* The following is for script security not enabled when needed */
 	CONFIG_SECURITY_ERROR,
 } config_err_t;
 
 /* keyword definition */
+typedef void **vpp_t;
+#define	VPP (vpp_t)
 typedef struct _keyword {
 	const char *string;
 	void (*handler) (const vector_t *);
 	vector_t *sub;
 	void (*sub_close_handler) (void);
 	bool active;
+	vpp_t ptr;
+	vpp_t sub_close_ptr;
 } keyword_t;
+
 
 /* global vars exported */
 extern vector_t *keywords;
@@ -91,6 +99,10 @@ extern bool do_parser_debug;
 #ifdef _DUMP_KEYWORDS_
 extern bool do_dump_keywords;
 #endif
+#ifndef _ONE_PROCESS_DEBUG_
+extern const char *config_save_dir;
+#endif
+
 
 static inline const char * __attribute__((malloc))
 set_value_r(const vector_t *strvec)
@@ -110,24 +122,27 @@ set_value_r(const vector_t *strvec)
 #endif
 
 /* Prototypes */
+extern void set_string(const char **, const vector_t *, const char *);
 extern void report_config_error(config_err_t, const char *format, ...)
 	__attribute__((format (printf, 2, 3)));
+extern void use_disk_copy_for_config(const char *);
+extern void clear_config_status(void);
 extern config_err_t get_config_status(void) __attribute__ ((pure));
 extern bool read_int(const char *, int *, int, int, bool);
 extern bool read_unsigned(const char *, unsigned *, unsigned, unsigned, bool);
 extern bool read_unsigned64(const char *, uint64_t *, uint64_t, uint64_t, bool);
-extern bool read_double(const char *, double *, double, double, bool);
+extern bool read_decimal_unsigned(const char *, unsigned *, unsigned, unsigned, unsigned, bool);
 extern bool read_int_strvec(const vector_t *, size_t, int *, int, int, bool);
 extern bool read_unsigned_strvec(const vector_t *, size_t, unsigned *, unsigned, unsigned, bool);
 extern bool read_unsigned64_strvec(const vector_t *, size_t, uint64_t *, uint64_t, uint64_t, bool);
 extern bool read_unsigned_base_strvec(const vector_t *, size_t, int, unsigned *, unsigned, unsigned, bool);
-extern bool read_double_strvec(const vector_t *, size_t, double *, double, double, bool);
+extern bool read_decimal_unsigned_strvec(const vector_t *, size_t, unsigned *, unsigned, unsigned, unsigned, bool);
+extern uint16_t read_hex_str(const char *, uint8_t **, uint8_t **);
 extern void set_random_seed(unsigned int);
-extern void install_keyword_root(const char *, void (*handler) (const vector_t *), bool);
-extern void install_root_end_handler(void (*handler) (void));
-extern void install_sublevel(void);
-extern void install_sublevel_end(void);
-extern void install_sublevel_end_handler(void (*handler) (void));
+extern void install_keyword_root(const char *, void (*handler) (const vector_t *), bool, vpp_t);
+extern vpp_t install_sublevel(vpp_t) WARN_UNUSED_RESULT;
+extern void install_sublevel_end(vpp_t);
+extern void install_level_end_handler(void (*handler) (void));
 extern void install_keyword(const char *, void (*handler) (const vector_t *));
 extern const vector_t *alloc_strvec_quoted_escaped(const char *);
 extern vector_t *alloc_strvec_r(const char *);
@@ -137,6 +152,11 @@ extern void alloc_value_block(void (*alloc_func) (const vector_t *), const vecto
 extern bool read_timer(const vector_t *, size_t, unsigned long *, unsigned long, unsigned long, bool);
 extern int check_true_false(const char *) __attribute__ ((pure));
 extern void skip_block(bool);
-extern void init_data(const char *, const vector_t * (*init_keywords) (void));
+extern void init_data(const char *, const vector_t * (*init_keywords) (void), bool);
+extern int get_config_fd(void);
+extern void set_config_fd(int);
+void include_check_set(const vector_t *);
+bool had_config_file_error(void) __attribute__((pure));
+void separate_config_file(void);
 
 #endif
