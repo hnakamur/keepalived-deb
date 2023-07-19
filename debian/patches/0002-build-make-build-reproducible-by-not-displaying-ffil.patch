@@ -1,0 +1,20 @@
+From: Vincent Bernat <bernat@debian.org>
+Date: Mon, 14 Mar 2022 11:21:01 +0100
+Subject: build: make build reproducible by not displaying
+ `-ffile-prefix-map=`
+
+---
+ configure.ac | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/configure.ac
++++ b/configure.ac
+@@ -394,7 +394,7 @@
+ #
+ # save the configure arguments
+ #
+-args=`echo $ac_configure_args | $SED -e "s/'//g"`
++args=`echo $ac_configure_args | $SED -e "s/'//g" -e "s/-ffile-prefix-map=[[^ ]]*//g"`
+ AC_DEFINE_UNQUOTED(KEEPALIVED_CONFIGURE_OPTIONS,"$args", [configure options specified])
+ 
+ AS_IF([test .$enable_lto = .yes],
